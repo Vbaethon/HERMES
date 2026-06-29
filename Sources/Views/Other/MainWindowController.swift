@@ -3,7 +3,7 @@ import Combine
 
 final class MainWindowController: NSWindowController {
     private static let frameAutosaveName = "HERMESMainWindow"
-    private static let preferredWindowSize = NSSize(width: 1120, height: 720)
+    private static let preferredWindowSize = NSSize(width: 1440, height: 1080)
     private static let minimumWindowSize = NSSize(width: 920, height: 620)
 
     private let model = ImporterModel()
