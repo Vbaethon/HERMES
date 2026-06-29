@@ -778,7 +778,7 @@ enum XHSNativeDownloader {
                             try? stripImageDescription(finalURL)
                         }
                         if let videoHDRHint = task.videoHDRHint, finalURL.pathExtension.lowercased() == "mp4" {
-                            try? remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
+                            try? await remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
                         }
                         return
                     } catch {
@@ -797,28 +797,22 @@ enum XHSNativeDownloader {
         throw lastError ?? NSError(domain: "XHSDownloader", code: 7, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])
     }
 
-    private static func remuxHDRVideoIfNeeded(at url: URL, hint: VideoHDRHint) throws {
+    private static func remuxHDRVideoIfNeeded(at url: URL, hint: VideoHDRHint) async throws {
         guard hint.needsPassthroughRemux else { return }
         let asset = AVURLAsset(url: url)
-        guard asset.isReadable else { return }
+        guard try await asset.load(.isReadable) else { return }
         let tempURL = url.deletingLastPathComponent().appendingPathComponent(".\(url.deletingPathExtension().lastPathComponent).hdrremux.mp4")
         try? FileManager.default.removeItem(at: tempURL)
 
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
-        exportSession.outputURL = tempURL
-        exportSession.outputFileType = .mp4
-        if #available(macOS 13.0, *) {
-            exportSession.shouldOptimizeForNetworkUse = true
-        }
-        let semaphore = DispatchSemaphore(value: 0)
-        exportSession.exportAsynchronously {
-            semaphore.signal()
-        }
-        semaphore.wait()
-        guard exportSession.status == .completed, FileManager.default.fileExists(atPath: tempURL.path) else {
+        exportSession.shouldOptimizeForNetworkUse = true
+        do {
+            try await exportSession.export(to: tempURL, as: .mp4)
+        } catch {
             try? FileManager.default.removeItem(at: tempURL)
-            return
+            throw error
         }
+        guard FileManager.default.fileExists(atPath: tempURL.path) else { return }
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.moveItem(at: tempURL, to: url)
     }
