@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -19,6 +20,7 @@ enum XHSNativeDownloader {
         var videoURL: URL?
         var videoURLs: [URL] = []
         var videoScore: Int64 = 0
+        var videoHDRHint: VideoHDRHint?
         var requestUserAgent = mobileUserAgent
 
         var hasMedia: Bool {
@@ -39,6 +41,19 @@ enum XHSNativeDownloader {
         var destination: URL
         var stripsDescription: Bool
         var requestUserAgent: String
+        var videoHDRHint: VideoHDRHint?
+    }
+
+    private struct VideoHDRHint {
+        var sourceMarkedHDR = false
+        var streamMarkedHDR = false
+        var transferFunction: String?
+        var colorPrimaries: String?
+        var yCbCrMatrix: String?
+
+        var needsPassthroughRemux: Bool {
+            sourceMarkedHDR || streamMarkedHDR
+        }
     }
 
     static func run(
@@ -72,14 +87,16 @@ enum XHSNativeDownloader {
                         urls: [item.imageURL],
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).bin", usedNames: &usedNames),
                         stripsDescription: false,
-                        requestUserAgent: note.requestUserAgent
+                        requestUserAgent: note.requestUserAgent,
+                        videoHDRHint: nil
                     ))
                     if let liveURL = item.liveURL {
                         tasks.append(DownloadTask(
                             urls: item.liveURLs.isEmpty ? [liveURL] : item.liveURLs,
                             destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).mp4", usedNames: &usedNames),
                             stripsDescription: false,
-                            requestUserAgent: note.requestUserAgent
+                            requestUserAgent: note.requestUserAgent,
+                            videoHDRHint: nil
                         ))
                     }
                 }
@@ -89,7 +106,8 @@ enum XHSNativeDownloader {
                         urls: note.videoURLs.isEmpty ? [videoURL] : note.videoURLs,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: originalURLFilename(videoURL, defaultName: "video.mp4"), usedNames: &usedNames),
                         stripsDescription: false,
-                        requestUserAgent: note.requestUserAgent
+                        requestUserAgent: note.requestUserAgent,
+                        videoHDRHint: note.videoHDRHint
                     ))
                 }
 
@@ -106,9 +124,10 @@ enum XHSNativeDownloader {
                     "分享链接: \(link.absoluteString)",
                     "下载原图: \(note.items.count) 张",
                     "下载视频: \(videoCount) 个",
+                    note.videoHDRHint?.sourceMarkedHDR == true ? "HDR: 源视频标记为 HDR，已优先保留最高规格视频流" : nil,
                     "下载 Live Photo 视频: \(liveCount) 个",
                     "输出目录: \(outputFolder.path)"
-                ].joined(separator: "\n"))
+                ].compactMap { $0 }.joined(separator: "\n"))
             }
             lines.append("完成。输出只保留媒体文件，不保存鉴权链接。")
             return .success(lines.joined(separator: "\n\n"))
@@ -290,8 +309,10 @@ enum XHSNativeDownloader {
                 info.videoURLs = streamURLs(bestVideo.item)
                 info.videoURL = info.videoURLs.first
                 info.videoScore = streamScore(bestVideo)
+                info.videoHDRHint = videoHDRHint(from: bestVideo.item)
             } else if let originKey = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
                 info.videoURL = URL(string: "https://sns-video-bd.xhscdn.com/\(MediaFileUtilities.formatURL(originKey))")
+                info.videoHDRHint = videoHDRHint(from: note)
             }
         }
         return info
@@ -339,16 +360,18 @@ enum XHSNativeDownloader {
 
     private static func bestVideoCandidate(from note: [String: Any]) -> StreamCandidate? {
         var candidates: [StreamCandidate] = []
+        let inheritedVideoMeta = deepGet(note, keys: ["video", "media", "video"]) as? [String: Any] ?? [:]
         if let stream = deepGet(note, keys: ["video", "media", "stream"]) as? [String: Any] {
-            candidates.append(contentsOf: streamCandidates(from: stream))
+            candidates.append(contentsOf: streamCandidates(from: stream, inheritedMeta: inheritedVideoMeta))
         }
         if let mediaV2Text = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "mediaV2"])),
            let mediaV2 = parseJSONString(mediaV2Text) as? [String: Any] {
+            let mediaV2VideoMeta = deepGet(mediaV2, keys: ["video"]) as? [String: Any] ?? [:]
             if let stream = deepGet(mediaV2, keys: ["stream"]) as? [String: Any] {
-                candidates.append(contentsOf: streamCandidates(from: stream))
+                candidates.append(contentsOf: streamCandidates(from: stream, inheritedMeta: mediaV2VideoMeta))
             }
             if let stream = deepGet(mediaV2, keys: ["video", "stream"]) as? [String: Any] {
-                candidates.append(contentsOf: streamCandidates(from: stream))
+                candidates.append(contentsOf: streamCandidates(from: stream, inheritedMeta: mediaV2VideoMeta))
             }
             if var opaque = deepGet(mediaV2, keys: ["video", "opaque1"]) as? [String: Any] {
                 if let width = deepGet(mediaV2, keys: ["video", "width"]) {
@@ -360,6 +383,7 @@ enum XHSNativeDownloader {
                 if let hdrType = deepGet(mediaV2, keys: ["video", "hdr_type"]) {
                     opaque["hdr_type"] = hdrType
                 }
+                inheritVideoHDRMetadata(from: mediaV2VideoMeta, into: &opaque)
                 if let hdURL = JSONValueUtilities.nonEmptyString(opaque["hd_screencast_stream"]) {
                     var item = opaque
                     item["master_url"] = hdURL
@@ -412,11 +436,15 @@ enum XHSNativeDownloader {
         return Int64(note.items.count) * 1_000_000_000
     }
 
-    private static func streamCandidates(from stream: [String: Any]) -> [StreamCandidate] {
+    private static func streamCandidates(from stream: [String: Any], inheritedMeta: [String: Any] = [:]) -> [StreamCandidate] {
         var candidates: [StreamCandidate] = []
         for key in ["h264", "h265", "h266", "av1"] {
             if let values = stream[key] as? [[String: Any]] {
-                candidates.append(contentsOf: values.map { StreamCandidate(codec: key, item: $0) })
+                candidates.append(contentsOf: values.map {
+                    var item = $0
+                    inheritVideoHDRMetadata(from: inheritedMeta, into: &item)
+                    return StreamCandidate(codec: key, item: item)
+                })
             }
         }
         return candidates
@@ -557,6 +585,44 @@ enum XHSNativeDownloader {
         return score
     }
 
+    private static func inheritVideoHDRMetadata(from inheritedMeta: [String: Any], into item: inout [String: Any]) {
+        for key in ["hdrType", "hdr_type", "dynamicRange", "dynamic_range", "videoCodec", "video_codec", "codec", "format", "streamType"] {
+            if let value = inheritedMeta[key], item[key] == nil {
+                item[key] = value
+            }
+        }
+        if item["hdrType"] == nil, let value = inheritedMeta["hdr_type"] {
+            item["hdrType"] = value
+        }
+        if item["hdr_type"] == nil, let value = inheritedMeta["hdrType"] {
+            item["hdr_type"] = value
+        }
+    }
+
+    private static func videoHDRHint(from meta: [String: Any]) -> VideoHDRHint? {
+        let hdrType = JSONValueUtilities.intValue(meta["hdrType"]) != 0
+            ? JSONValueUtilities.intValue(meta["hdrType"])
+            : JSONValueUtilities.intValue(meta["hdr_type"])
+        let text = [
+            JSONValueUtilities.nonEmptyString(meta["dynamicRange"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["dynamic_range"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["qualityType"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["quality_type"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["videoCodec"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["video_codec"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["codec"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["format"]) ?? ""
+        ].joined(separator: " ").lowercased()
+
+        var hint = VideoHDRHint()
+        hint.sourceMarkedHDR = hdrType > 0 || JSONValueUtilities.boolValue(meta["hdr"]) || JSONValueUtilities.boolValue(meta["isHDR"]) || JSONValueUtilities.boolValue(meta["is_hdr"]) || text.contains("hdr") || text.contains("hlg") || text.contains("dolby") || text.contains("dovi")
+        hint.streamMarkedHDR = hdrType > 1 || text.contains("hdr10") || text.contains("10bit") || text.contains("10-bit") || text.contains("main10") || text.contains("dvhe")
+        hint.transferFunction = text.contains("hlg") ? "ITU_R_2100_HLG" : (text.contains("pq") || text.contains("hdr10") || text.contains("dolby") ? "SMPTE_ST_2084_PQ" : nil)
+        hint.colorPrimaries = hint.sourceMarkedHDR ? "ITU_R_2020" : nil
+        hint.yCbCrMatrix = hint.sourceMarkedHDR ? "ITU_R_2020" : nil
+        return hint.sourceMarkedHDR ? hint : nil
+    }
+
     private static func videoFPSHint(urlText: String, meta: [String: Any]) -> Int {
         let text = ([
             urlText,
@@ -600,7 +666,7 @@ enum XHSNativeDownloader {
         if JSONValueUtilities.boolValue(meta["hdr"]) || JSONValueUtilities.boolValue(meta["isHDR"]) || JSONValueUtilities.boolValue(meta["is_hdr"]) {
             return 3
         }
-        if JSONValueUtilities.intValue(meta["hdrType"]) > 1 || JSONValueUtilities.intValue(meta["hdr_type"]) > 1 {
+        if JSONValueUtilities.intValue(meta["hdrType"]) > 0 || JSONValueUtilities.intValue(meta["hdr_type"]) > 0 {
             return 2
         }
         return 0
@@ -711,6 +777,9 @@ enum XHSNativeDownloader {
                         if task.stripsDescription, ["heic", "heif", "jpg", "jpeg", "png", "webp"].contains(finalURL.pathExtension.lowercased()) {
                             try? stripImageDescription(finalURL)
                         }
+                        if let videoHDRHint = task.videoHDRHint, finalURL.pathExtension.lowercased() == "mp4" {
+                            try? remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
+                        }
                         return
                     } catch {
                         lastError = error
@@ -726,6 +795,32 @@ enum XHSNativeDownloader {
             }
         }
         throw lastError ?? NSError(domain: "XHSDownloader", code: 7, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])
+    }
+
+    private static func remuxHDRVideoIfNeeded(at url: URL, hint: VideoHDRHint) throws {
+        guard hint.needsPassthroughRemux else { return }
+        let asset = AVURLAsset(url: url)
+        guard asset.isReadable else { return }
+        let tempURL = url.deletingLastPathComponent().appendingPathComponent(".\(url.deletingPathExtension().lastPathComponent).hdrremux.mp4")
+        try? FileManager.default.removeItem(at: tempURL)
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
+        exportSession.outputURL = tempURL
+        exportSession.outputFileType = .mp4
+        if #available(macOS 13.0, *) {
+            exportSession.shouldOptimizeForNetworkUse = true
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        exportSession.exportAsynchronously {
+            semaphore.signal()
+        }
+        semaphore.wait()
+        guard exportSession.status == .completed, FileManager.default.fileExists(atPath: tempURL.path) else {
+            try? FileManager.default.removeItem(at: tempURL)
+            return
+        }
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: tempURL, to: url)
     }
 
     private static func shouldUseDirectly(_ req: URLRequest) -> Bool {

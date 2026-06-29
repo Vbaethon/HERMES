@@ -251,23 +251,23 @@ private final class FinderSidebarCellView: NSTableCellView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override var rowSizeStyle: NSTableView.RowSizeStyle {
+        didSet {
+            applySourceListMetrics(isSelected: currentSelectionState)
+        }
+    }
+
+    private var currentSelectionState = false
+
     func configure(title: String, symbolName: String, count: Int?, isSelected: Bool, rowSizeStyle: NSTableView.RowSizeStyle) {
-        let titleFont = Self.sourceListFont(for: rowSizeStyle, isSelected: isSelected)
-        let countFont = Self.sourceListCountFont(for: rowSizeStyle)
-        let symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: titleFont.pointSize,
-            weight: .regular,
-            scale: .medium
-        )
+        currentSelectionState = isSelected
+        self.rowSizeStyle = rowSizeStyle
         let symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
         symbolImage?.isTemplate = true
-        symbolView.symbolConfiguration = symbolConfiguration
         symbolView.image = symbolImage
         symbolView.contentTintColor = .controlAccentColor
         titleField.stringValue = title
-        titleField.font = titleFont
-        countField.font = countFont
-        updateSymbolMetrics(pointSize: titleFont.pointSize)
+        applySourceListMetrics(isSelected: isSelected)
 
         if let count {
             countField.stringValue = count.formatted()
@@ -276,6 +276,13 @@ private final class FinderSidebarCellView: NSTableCellView {
             countField.stringValue = ""
             countField.isHidden = true
         }
+    }
+
+    private func applySourceListMetrics(isSelected: Bool) {
+        let titleFont = Self.sourceListFont(for: rowSizeStyle, isSelected: isSelected)
+        titleField.font = titleFont
+        countField.font = Self.sourceListCountFont(for: rowSizeStyle)
+        updateSymbolMetrics(for: rowSizeStyle)
     }
 
     private static func sourceListFont(for rowSizeStyle: NSTableView.RowSizeStyle, isSelected: Bool) -> NSFont {
@@ -305,8 +312,23 @@ private final class FinderSidebarCellView: NSTableCellView {
         }
     }
 
-    private func updateSymbolMetrics(pointSize: CGFloat) {
-        let dimension = ceil(pointSize)
+    private func updateSymbolMetrics(for rowSizeStyle: NSTableView.RowSizeStyle) {
+        let dimension: CGFloat
+        switch rowSizeStyle {
+        case .small:
+            dimension = 16
+        case .medium:
+            dimension = 20
+        case .large:
+            dimension = 24
+        default:
+            dimension = 20
+        }
+        symbolView.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: dimension,
+            weight: .regular,
+            scale: .medium
+        )
         symbolWidthConstraint?.constant = dimension
         symbolHeightConstraint?.constant = dimension
     }
