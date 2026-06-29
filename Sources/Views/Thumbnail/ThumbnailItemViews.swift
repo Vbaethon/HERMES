@@ -24,12 +24,15 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
         imageView.layer?.masksToBounds = true
-        imageView.layer?.borderColor = NSColor.controlAccentColor.cgColor
-        imageView.layer?.borderWidth = 0
 
         rootView.addSubview(imageView)
         rootView.imageView = imageView
         self.imageView = imageView
+
+        let ringView = ThumbnailStateRingView(frame: .zero)
+        ringView.isHidden = true
+        rootView.addSubview(ringView)
+        rootView.ringView = ringView
 
         let badgeLabel = ThumbnailBadgeLabel(labelWithString: "")
         badgeLabel.alignment = .center
@@ -172,15 +175,78 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     }
 
     private func updateBorderAppearance(isSelected: Bool) {
-        guard let layer = imageView?.layer else { return }
         if isSelected {
-            layer.borderColor = NSColor.controlAccentColor.cgColor
-            layer.borderWidth = ThumbnailCollectionStyle.selectionBorderWidth
+            thumbnailView?.setRingState(.selected)
         } else if thumbnailStatus == .failed {
-            layer.borderColor = NSColor.systemRed.cgColor
-            layer.borderWidth = ThumbnailCollectionStyle.selectionBorderWidth
+            thumbnailView?.setRingState(.failed)
         } else {
-            layer.borderWidth = 0
+            thumbnailView?.setRingState(.none)
+        }
+    }
+}
+
+fileprivate enum ThumbnailStateRing {
+    case none
+    case selected
+    case failed
+}
+
+final class ThumbnailStateRingView: NSView {
+    fileprivate var state: ThumbnailStateRing = .none {
+        didSet {
+            isHidden = state == .none
+            needsDisplay = true
+        }
+    }
+
+    private var keyWindowObservers: [NSObjectProtocol] = []
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        keyWindowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        keyWindowObservers.removeAll()
+
+        guard let window else { return }
+        let center = NotificationCenter.default
+        keyWindowObservers.append(
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                self?.needsDisplay = true
+            }
+        )
+        keyWindowObservers.append(
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                self?.needsDisplay = true
+            }
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard state != .none else { return }
+        let lineWidth = ThumbnailCollectionStyle.stateRingLineWidth
+        let rect = bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+        let radius = ThumbnailCollectionStyle.imageCornerRadius + ThumbnailCollectionStyle.stateRingGap
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+        switch state {
+        case .selected:
+            let color = (window?.isKeyWindow == true)
+                ? NSColor.selectedContentBackgroundColor
+                : NSColor.unemphasizedSelectedContentBackgroundColor
+            color.setStroke()
+            path.lineWidth = lineWidth
+            path.stroke()
+        case .failed:
+            NSColor.systemRed.setStroke()
+            path.lineWidth = lineWidth
+            path.stroke()
+        case .none:
+            break
         }
     }
 }
@@ -226,6 +292,7 @@ final class ThumbnailBadgeLabel: NSTextField {
 final class ThumbnailItemView: NSView {
     weak var imageView: NSImageView?
     weak var badgeLabel: NSTextField?
+    weak var ringView: ThumbnailStateRingView?
     private var interactiveFrame: NSRect = .zero
     var onEffectiveAppearanceChanged: (() -> Void)?
 
@@ -245,6 +312,7 @@ final class ThumbnailItemView: NSView {
         guard let image, image.size.width > 0, image.size.height > 0 else {
             interactiveFrame = .zero
             imageView.frame = .zero
+            ringView?.frame = .zero
             updateBadgeFrames()
             return
         }
@@ -256,7 +324,12 @@ final class ThumbnailItemView: NSView {
         let frame = NSRect(origin: origin, size: size).integral
         interactiveFrame = frame
         imageView.frame = frame
+        updateRingFrame()
         updateBadgeFrames()
+    }
+
+    fileprivate func setRingState(_ state: ThumbnailStateRing) {
+        ringView?.state = state
     }
 
     func setBadge(_ text: String?) {
@@ -269,6 +342,12 @@ final class ThumbnailItemView: NSView {
         badgeLabel.stringValue = text
         badgeLabel.isHidden = false
         updateBadgeFrames()
+    }
+
+    private func updateRingFrame() {
+        guard let ringView else { return }
+        let outwardInset = ThumbnailCollectionStyle.stateRingGap + ThumbnailCollectionStyle.stateRingLineWidth
+        ringView.frame = interactiveFrame.insetBy(dx: -outwardInset, dy: -outwardInset)
     }
 
     private func updateBadgeFrames() {

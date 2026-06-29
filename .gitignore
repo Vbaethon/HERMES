@@ -16,3 +16,4 @@ Build/XcodeProducts/
 *.xcbkptlist
 HERMES.xcodeproj/xcuserdata/
 HERMES.xcodeproj/project.xcworkspace/xcuserdata/
+/docs

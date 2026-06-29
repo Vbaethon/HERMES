@@ -34,7 +34,8 @@ enum ThumbnailCollectionStyle {
     static let itemSpacing: CGFloat = 20
     static let sectionInset = NSEdgeInsets(top: 22, left: 44, bottom: 24, right: 44)
     static let imageCornerRadius: CGFloat = 6
-    static let selectionBorderWidth: CGFloat = 4
+    static let stateRingGap: CGFloat = 1
+    static let stateRingLineWidth: CGFloat = 3
     static let thumbnailMaxPixelSize = 512
 
     static func sectionInset(additionalBottomInset: CGFloat) -> NSEdgeInsets {
