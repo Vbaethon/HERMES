@@ -2,7 +2,8 @@ import AppKit
 import Combine
 
 final class MainWindowController: NSWindowController {
-    private static let preferredWindowSize = NSSize(width: 920, height: 620)
+    private static let frameAutosaveName = "HERMESMainWindow"
+    private static let preferredWindowSize = NSSize(width: 1120, height: 720)
     private static let minimumWindowSize = NSSize(width: 920, height: 620)
 
     private let model = ImporterModel()
@@ -49,6 +50,10 @@ final class MainWindowController: NSWindowController {
         window.setContentSize(Self.preferredWindowSize)
         window.minSize = Self.minimumWindowSize
         super.init(window: window)
+        if !window.setFrameUsingName(Self.frameAutosaveName) {
+            window.center()
+        }
+        window.setFrameAutosaveName(Self.frameAutosaveName)
 
         toolbarController.clearCompleted = { [weak self] in self?.presentCompletedClearConfirmation() }
         toolbarController.clearDownloads = { [weak self] in self?.presentDownloadClearConfirmation() }
