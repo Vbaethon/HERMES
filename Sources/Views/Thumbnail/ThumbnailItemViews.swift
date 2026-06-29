@@ -23,6 +23,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
+        imageView.layer?.cornerCurve = .continuous
         imageView.layer?.masksToBounds = true
 
         rootView.addSubview(imageView)
@@ -321,7 +322,7 @@ final class ThumbnailItemView: NSView {
         let scale = min(maxSide / image.size.width, maxSide / image.size.height)
         let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
         let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
-        let frame = NSRect(origin: origin, size: size).integral
+        let frame = NSRect(origin: origin, size: size)
         interactiveFrame = frame
         imageView.frame = frame
         updateRingFrame()
