@@ -75,7 +75,7 @@
 		111111111111111111111004 /* tool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = tool.swift; sourceTree = "<group>"; };
 		111111111111111111111005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		111111111111111111111006 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
-		111111111111111111111015 /* Hermes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Hermes.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		111111111111111111111015 /* HERMES.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HERMES.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		111111111111111111111016 /* tool */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = tool; sourceTree = BUILT_PRODUCTS_DIR; };
 		111111111111111111111017 /* dydl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = dydl.swift; sourceTree = "<group>"; };
 		111111111111111111111022 /* DownloaderHTTPCompatibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderHTTPCompatibility.swift; sourceTree = "<group>"; };
@@ -181,7 +181,7 @@
 		111111111111111111111018 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				111111111111111111111015 /* Hermes.app */,
+				111111111111111111111015 /* HERMES.app */,
 				111111111111111111111016 /* tool */,
 			);
 			name = Products;
@@ -208,9 +208,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		111111111111111111111011 /* Hermes */ = {
+		111111111111111111111011 /* HERMES */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 111111111111111111111031 /* Build configuration list for PBXNativeTarget "Hermes" */;
+			buildConfigurationList = 111111111111111111111031 /* Build configuration list for PBXNativeTarget "HERMES" */;
 			buildPhases = (
 				111111111111111111111111 /* Sources */,
 				111111111111111111111109 /* Frameworks */,
@@ -223,11 +223,11 @@
 			dependencies = (
 				111111111111111111111113 /* PBXTargetDependency */,
 			);
-			name = Hermes;
+			name = HERMES;
 			packageProductDependencies = (
 			);
-			productName = Hermes;
-			productReference = 111111111111111111111015 /* Hermes.app */;
+			productName = HERMES;
+			productReference = 111111111111111111111015 /* HERMES.app */;
 			productType = "com.apple.product-type.application";
 		};
 		111111111111111111111012 /* tool */ = {
@@ -280,7 +280,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				111111111111111111111011 /* Hermes */,
+				111111111111111111111011 /* HERMES */,
 				111111111111111111111012 /* tool */,
 			);
 		};
@@ -515,7 +515,7 @@
 					"$(inherited)",
 					"-lsqlite3",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.codex.Hermes;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.HERMES;
 				PRODUCT_NAME = HERMES;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -547,7 +547,7 @@
 					"$(inherited)",
 					"-lsqlite3",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.codex.Hermes;
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.HERMES;
 				PRODUCT_NAME = HERMES;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -601,7 +601,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		111111111111111111111031 /* Build configuration list for PBXNativeTarget "Hermes" */ = {
+		111111111111111111111031 /* Build configuration list for PBXNativeTarget "HERMES" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				111111111111111111111043 /* Debug */,

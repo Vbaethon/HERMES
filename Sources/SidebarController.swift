@@ -28,11 +28,7 @@ final class FinderStyleSidebarController: NSViewController {
     }
 
     override func loadView() {
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .sidebar
-        visualEffectView.blendingMode = .behindWindow
-        visualEffectView.state = .followsWindowActiveState
-        view = visualEffectView
+        view = NSView()
     }
 
     override func viewDidLoad() {

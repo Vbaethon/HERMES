@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 APP_NAME="HERMES"
-BUNDLE_ID="com.codex.Hermes"
+BUNDLE_ID="com.codex.HERMES"
 PROJECT_NAME="HERMES.xcodeproj"
-SCHEME="Hermes"
+SCHEME="HERMES"
 MINIMUM_MACOS_VERSION="27.0"
 
 resolve_developer_dir() {
