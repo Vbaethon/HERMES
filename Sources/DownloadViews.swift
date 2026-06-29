@@ -934,12 +934,19 @@ final class DownloadProgressStackView: NSView {
 
         orderVisibleBars(visibleItems)
         let orderedViews = visibleItems.compactMap { barViewsByID[$0.id] }
-        let applyLayout = {
+        let applyLayout = { (animated: Bool) in
             self.alphaValue = visibleItems.isEmpty ? 0 : 1
             self.isHidden = false
             for (index, barView) in orderedViews.enumerated() {
-                barView.frame = self.frameForBar(at: index)
-                barView.alphaValue = self.alphaForBar(at: index)
+                let targetFrame = self.frameForBar(at: index)
+                let targetAlpha = self.alphaForBar(at: index)
+                if animated {
+                    barView.animator().frame = targetFrame
+                    barView.animator().alphaValue = targetAlpha
+                } else {
+                    barView.frame = targetFrame
+                    barView.alphaValue = targetAlpha
+                }
             }
         }
 
@@ -951,7 +958,7 @@ final class DownloadProgressStackView: NSView {
                 context.duration = 0.36
                 context.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 0.86, 0.22, 1)
                 context.allowsImplicitAnimation = true
-                applyLayout()
+                applyLayout(true)
             } completionHandler: { [weak self, idsToReveal] in
                 Task { @MainActor [weak self, idsToReveal] in
                     guard let self else { return }
@@ -963,7 +970,7 @@ final class DownloadProgressStackView: NSView {
                 }
             }
         } else {
-            applyLayout()
+            applyLayout(false)
             for id in idsToReveal {
                 barViewsByID[id]?.revealPrimaryText(animated: false)
             }
@@ -1007,12 +1014,17 @@ final class DownloadProgressStackView: NSView {
     private func animateRemoval(of barView: DownloadTaskProgressBarView, animated: Bool) {
         barView.isRemovingFromStack = true
         let removedFrame = barView.frame.offsetBy(dx: 0, dy: -verticalTransitionOffset)
-        let applyRemoval = {
-            barView.alphaValue = 0
-            barView.frame = removedFrame
+        let applyRemoval = { (animated: Bool) in
+            if animated {
+                barView.animator().alphaValue = 0
+                barView.animator().frame = removedFrame
+            } else {
+                barView.alphaValue = 0
+                barView.frame = removedFrame
+            }
         }
         guard animated else {
-            applyRemoval()
+            applyRemoval(false)
             barView.removeFromSuperview()
             return
         }
@@ -1020,7 +1032,7 @@ final class DownloadProgressStackView: NSView {
             context.duration = 0.24
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0, 0.67, 0)
             context.allowsImplicitAnimation = true
-            applyRemoval()
+            applyRemoval(true)
         } completionHandler: {
             DispatchQueue.main.async {
                 barView.removeFromSuperview()
