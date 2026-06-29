@@ -1,0 +1,16 @@
+.DS_Store
+.build/
+.swiftpm/
+.codegraph/
+.codex/
+.derivedData/
+Build/*.app/
+Build/AppIconCompiled/
+Build/XcodeDerivedData/
+Build/XcodeProducts/
+*.dSYM/
+
+*.xcuserstate
+*.xcbkptlist
+HERMES.xcodeproj/xcuserdata/
+HERMES.xcodeproj/project.xcworkspace/xcuserdata/
