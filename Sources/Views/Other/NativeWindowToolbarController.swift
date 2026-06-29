@@ -220,7 +220,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-            [
+            FinderStyleSidebarController.toolbarAllowedItemIdentifiers + [
                 ID.filter, ID.refresh, ID.openFolder, ID.chooseFolder,
                 ID.importToPhotos, ID.addToAlbum, ID.clear, ID.addFiles,
                 ID.importCompleted, ID.compose, .space, .flexibleSpace
@@ -261,11 +261,11 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         private var defaultIdentifiers: [NSToolbarItem.Identifier] {
             switch model.selection ?? .queue {
             case .queue:
-                [.flexibleSpace, ID.addFiles, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [.flexibleSpace, ID.addFiles, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
             case .downloads:
-                [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
             case .completed:
-                [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.addToAlbum, .space, ID.clear, ID.importCompleted]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.addToAlbum, .space, ID.clear, ID.importCompleted]
             }
         }
 

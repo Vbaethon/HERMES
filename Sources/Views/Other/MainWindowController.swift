@@ -78,12 +78,7 @@ final class MainWindowController: NSWindowController {
         splitViewController.splitView.isVertical = true
         splitViewController.splitView.dividerStyle = .thin
 
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
-        sidebarItem.minimumThickness = 180
-        sidebarItem.maximumThickness = 360
-        sidebarItem.canCollapse = false
-        sidebarItem.holdingPriority = .defaultLow
-
+        let sidebarItem = sidebarController.makeSplitViewItem()
         let detailItem = NSSplitViewItem(viewController: detailController)
         detailItem.minimumThickness = 520
         detailItem.canCollapse = false

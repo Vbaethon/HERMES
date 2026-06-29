@@ -1,6 +1,16 @@
 import AppKit
 
 final class FinderStyleSidebarController: NSViewController {
+    static let toolbarAllowedItemIdentifiers: [NSToolbarItem.Identifier] = [
+        .toggleSidebar,
+        .sidebarTrackingSeparator
+    ]
+    static let toolbarDefaultItemIdentifiers: [NSToolbarItem.Identifier] = [
+        .flexibleSpace,
+        .toggleSidebar,
+        .sidebarTrackingSeparator
+    ]
+
     private let coordinator: Coordinator
     private var sections: [SidebarSection]
     private var selection: SidebarSection?
@@ -29,6 +39,15 @@ final class FinderStyleSidebarController: NSViewController {
 
     override func loadView() {
         view = NSView()
+    }
+
+    func makeSplitViewItem() -> NSSplitViewItem {
+        let item = NSSplitViewItem(sidebarWithViewController: self)
+        item.minimumThickness = 180
+        item.maximumThickness = 360
+        item.canCollapse = true
+        item.holdingPriority = .defaultLow
+        return item
     }
 
     override func viewDidLoad() {
