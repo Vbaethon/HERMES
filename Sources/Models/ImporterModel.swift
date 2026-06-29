@@ -799,7 +799,7 @@ final class ImporterModel: ObservableObject {
         let task = pendingDownloadTasks.removeFirst()
         activeDownloadTask = task
         isDownloading = true
-        rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: "准备解析链接", activeUnitProgress: 0.03)
+        rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: "解析分享链接", activeUnitProgress: 0)
         Task { await performQueuedDownloadTask(task) }
     }
 
@@ -850,8 +850,6 @@ final class ImporterModel: ObservableObject {
         }
 
         refreshDownloads()
-        rebuildDownloadProgressItems(activeCompletedCount: task.entries.count, activeDetail: "下载完成", activeUnitProgress: 1)
-        try? await Task.sleep(for: .milliseconds(420))
         if activeDownloadTask?.id == task.id {
             activeDownloadTask = nil
         }
@@ -875,7 +873,11 @@ final class ImporterModel: ObservableObject {
             let state: DownloadProgressState
             if let previousState,
                overallProgress(for: candidateState, totalCount: totalCount) < overallProgress(for: previousState, totalCount: totalCount) {
-                state = previousState
+                state = DownloadProgressState(
+                    completedCount: previousState.completedCount,
+                    detail: candidateState.detail,
+                    unitProgress: previousState.unitProgress
+                )
             } else {
                 state = candidateState
             }

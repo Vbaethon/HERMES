@@ -568,7 +568,6 @@ final class DownloadBarView: NSView {
 final class DownloadTaskProgressBarView: NSView {
     private let glassSurface: NSView
     private let tintOverlay = NSView()
-    private let progressTrackView = NSView()
     private let fillClipView = NSView()
     private let fillView = NSView()
     private let fillEdgeView = NSView()
@@ -750,7 +749,6 @@ final class DownloadTaskProgressBarView: NSView {
         layer?.masksToBounds = false
         glassSurface.translatesAutoresizingMaskIntoConstraints = false
         tintOverlay.translatesAutoresizingMaskIntoConstraints = false
-        progressTrackView.translatesAutoresizingMaskIntoConstraints = false
         fillClipView.translatesAutoresizingMaskIntoConstraints = false
         fillView.translatesAutoresizingMaskIntoConstraints = false
         fillEdgeView.translatesAutoresizingMaskIntoConstraints = false
@@ -763,29 +761,24 @@ final class DownloadTaskProgressBarView: NSView {
         tintOverlay.layer?.masksToBounds = true
         tintOverlay.alphaValue = 0
 
-        progressTrackView.wantsLayer = true
-        progressTrackView.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.18).cgColor
-        progressTrackView.layer?.cornerRadius = 2
-        progressTrackView.layer?.masksToBounds = true
-
         fillClipView.wantsLayer = true
         fillClipView.layer?.backgroundColor = NSColor.clear.cgColor
-        fillClipView.layer?.cornerRadius = 2
+        fillClipView.layer?.cornerRadius = 14
         fillClipView.layer?.masksToBounds = true
 
         fillView.wantsLayer = true
-        fillView.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.74).cgColor
+        fillView.layer?.backgroundColor = NSColor.white.cgColor
         fillView.layer?.cornerRadius = 0
         fillView.layer?.masksToBounds = false
         fillView.layer?.compositingFilter = nil
 
         fillEdgeView.wantsLayer = true
-        fillEdgeView.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.96).cgColor
+        fillEdgeView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.58).cgColor
         fillEdgeView.layer?.compositingFilter = nil
         fillEdgeView.alphaValue = 0
 
-        textLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        textLabel.textColor = .labelColor
+        textLabel.font = .systemFont(ofSize: 12)
+        textLabel.textColor = .secondaryLabelColor
         textLabel.lineBreakMode = .byTruncatingTail
         textLabel.maximumNumberOfLines = 1
 
@@ -794,12 +787,11 @@ final class DownloadTaskProgressBarView: NSView {
         countField.alignment = .right
         countField.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        addSubview(glassSurface)
-        addSubview(tintOverlay)
-        addSubview(progressTrackView)
         addSubview(fillClipView)
         fillClipView.addSubview(fillView)
         fillClipView.addSubview(fillEdgeView)
+        addSubview(glassSurface)
+        addSubview(tintOverlay)
         addSubview(textLabel)
         addSubview(countField)
 
@@ -816,15 +808,10 @@ final class DownloadTaskProgressBarView: NSView {
             tintOverlay.topAnchor.constraint(equalTo: topAnchor),
             tintOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            progressTrackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            progressTrackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            progressTrackView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            progressTrackView.heightAnchor.constraint(equalToConstant: 4),
-
-            fillClipView.leadingAnchor.constraint(equalTo: progressTrackView.leadingAnchor),
-            fillClipView.trailingAnchor.constraint(equalTo: progressTrackView.trailingAnchor),
-            fillClipView.topAnchor.constraint(equalTo: progressTrackView.topAnchor),
-            fillClipView.bottomAnchor.constraint(equalTo: progressTrackView.bottomAnchor),
+            fillClipView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            fillClipView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            fillClipView.topAnchor.constraint(equalTo: topAnchor),
+            fillClipView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             fillView.leadingAnchor.constraint(equalTo: fillClipView.leadingAnchor),
             fillView.topAnchor.constraint(equalTo: fillClipView.topAnchor),
@@ -838,10 +825,10 @@ final class DownloadTaskProgressBarView: NSView {
 
             textLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             textLabel.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -8),
-            textLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -2),
+            textLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             countField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            countField.centerYAnchor.constraint(equalTo: textLabel.centerYAnchor),
+            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
             countField.widthAnchor.constraint(equalToConstant: 52)
         ])
     }
@@ -850,13 +837,13 @@ final class DownloadTaskProgressBarView: NSView {
         if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
             let view = glassClass.init(frame: .zero)
             view.setValue(14, forKey: "cornerRadius")
-            view.setValue(NSColor.controlBackgroundColor.withAlphaComponent(0.075), forKey: "tintColor")
+            view.setValue(NSColor.controlBackgroundColor.withAlphaComponent(0.045), forKey: "tintColor")
             view.setValue(0, forKey: "style")
             return view
         }
 
         let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .popover
+        visualEffectView.material = .hudWindow
         visualEffectView.blendingMode = .withinWindow
         visualEffectView.state = .active
         visualEffectView.wantsLayer = true
@@ -872,8 +859,7 @@ final class DownloadTaskProgressBarView: NSView {
         }
         glassSurface.layer?.cornerRadius = radius
         tintOverlay.layer?.cornerRadius = radius
-        progressTrackView.layer?.cornerRadius = min(progressTrackView.bounds.height / 2, 2)
-        fillClipView.layer?.cornerRadius = min(fillClipView.bounds.height / 2, 2)
+        fillClipView.layer?.cornerRadius = radius
         fillView.layer?.cornerRadius = 0
     }
 
@@ -904,8 +890,8 @@ final class DownloadProgressStackView: NSView {
     private var barViewsByID: [UUID: DownloadTaskProgressBarView] = [:]
     private var isAnimatingStackLayout = false
     private let maximumVisibleBars = 3
-    private let barHeight: CGFloat = 34
-    private let slotYOffset: CGFloat = 12
+    private let barHeight: CGFloat = 28
+    private let slotYOffset: CGFloat = 10
     private let slotWidthStep: CGFloat = 52
     private let verticalTransitionOffset: CGFloat = 16
     private let slotAlphas: [CGFloat] = [1.0, 0.66, 0.42]

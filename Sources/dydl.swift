@@ -371,7 +371,7 @@ enum DouyinNativeDownloader {
             for (linkIndex, link) in links.enumerated() {
                 let linkFraction = Double(linkIndex) / Double(links.count)
                 let linkWidth = 1.0 / Double(links.count)
-                /// 缓存扫描阶段占每个链接的 20% 工作量。
+                /// 媒体解析阶段占每个链接的 20% 工作量。
                 let scanRatio = 0.2
 
                 if let progress {
@@ -379,15 +379,18 @@ enum DouyinNativeDownloader {
                 }
                 let (resolvedURL, seedInfo) = try await resolveURL(link)
                 if debugEnabled { print("[DouyinDebug] run: resolved URL = \(resolvedURL.absoluteString)") }
+                if let progress {
+                    await progress(linkFraction + 0.02 * linkWidth)
+                }
                 let awemeID = try extractAwemeID(from: resolvedURL)
                 if debugEnabled { print("[DouyinDebug] run: awemeID = \(awemeID)") }
                 if let progress {
-                    await progress(linkFraction + 0.03 * linkWidth)
+                    await progress(linkFraction + 0.04 * linkWidth)
                 }
                 let scanProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
                     scanProgress = { fraction in
-                        await progress(linkFraction + fraction * scanRatio * linkWidth)
+                        await progress(linkFraction + max(0.04, fraction * scanRatio) * linkWidth)
                     }
                 } else {
                     scanProgress = nil
@@ -718,6 +721,7 @@ enum DouyinNativeDownloader {
     private static func fetchAweme(awemeID: String, referer: URL, seedInfo: DouyinSeedInfo = DouyinSeedInfo(), progress: DownloaderInfra.ProgressHandler? = nil) async throws -> AwemeInfo {
         if debugEnabled { print("[DouyinDebug] fetchAweme: awemeID=\(awemeID)") }
         var publicInfo: AwemeInfo?
+        if let progress { await progress(0.02) }
         let detailURL = URL(string: "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=\(awemeID)&aid=6383&device_platform=webapp")!
         if let info = try? await parseAwemeResponse(from: detailURL, referer: referer), !info.images.isEmpty || !info.videos.isEmpty {
             if debugEnabled { print("[DouyinDebug] fetchAweme: got data from web aweme detail API") }
