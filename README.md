@@ -48,6 +48,10 @@ Alternatively:
 The run script delegates its build step to `build.sh`, then opens the debug app
 or attaches logs/debug tooling depending on the selected mode.
 
+## 更新说明
+
+- 2026-06-29: 下载任务完成后，进度条会先显示到 100%，再按原有动画消失。
+
 ## Package
 
 Run from this directory:

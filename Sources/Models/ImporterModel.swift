@@ -143,6 +143,7 @@ final class ImporterModel: ObservableObject {
         /// 下载阶段结束时的进度比例。剩余 0.04 留给"整理下载结果"阶段。
         static let downloadEnd: CGFloat = 0.96
     }
+    private static let completedDownloadProgressHoldNanoseconds: UInt64 = 460_000_000
 
     private struct DownloadProgressState {
         var completedCount: Int
@@ -840,6 +841,8 @@ final class ImporterModel: ObservableObject {
             rebuildDownloadProgressItems(activeCompletedCount: index + 1, activeDetail: "整理下载结果", activeUnitProgress: 0)
         }
 
+        await holdCompletedDownloadProgress(for: task)
+
         if messages.isEmpty {
             downloadStatusText = failures.isEmpty ? "下载完成。" : "下载失败：\(failures.joined(separator: "\n"))"
         } else {
@@ -854,6 +857,15 @@ final class ImporterModel: ObservableObject {
             activeDownloadTask = nil
         }
         startNextDownloadTaskIfNeeded()
+    }
+
+    private func holdCompletedDownloadProgress(for task: DownloadQueueTask) async {
+        guard activeDownloadTask?.id == task.id,
+              downloadProgressItems.first?.id == task.id,
+              downloadProgressItems.first?.progress ?? 0 >= 1 else {
+            return
+        }
+        try? await Task.sleep(nanoseconds: Self.completedDownloadProgressHoldNanoseconds)
     }
 
     private func rebuildDownloadProgressItems(
