@@ -32,6 +32,12 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
         let ringView = ThumbnailStateRingView(frame: .zero)
         ringView.isHidden = true
+        ringView.wantsLayer = true
+        ringView.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
+            + ThumbnailCollectionStyle.stateRingGap
+            + ThumbnailCollectionStyle.stateRingLineWidth
+        ringView.layer?.cornerCurve = .continuous
+        ringView.layer?.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth
         rootView.addSubview(ringView)
         rootView.ringView = ringView
 
@@ -196,7 +202,7 @@ final class ThumbnailStateRingView: NSView {
     fileprivate var state: ThumbnailStateRing = .none {
         didSet {
             isHidden = state == .none
-            needsDisplay = true
+            updateBorderColor()
         }
     }
 
@@ -217,35 +223,26 @@ final class ThumbnailStateRingView: NSView {
         let center = NotificationCenter.default
         keyWindowObservers.append(
             center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                self?.needsDisplay = true
+                self?.updateBorderColor()
             }
         )
         keyWindowObservers.append(
             center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
-                self?.needsDisplay = true
+                self?.updateBorderColor()
             }
         )
+        updateBorderColor()
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard state != .none else { return }
-        let lineWidth = ThumbnailCollectionStyle.stateRingLineWidth
-        let rect = bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
-        let radius = ThumbnailCollectionStyle.imageCornerRadius + ThumbnailCollectionStyle.stateRingGap
-        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-
+    private func updateBorderColor() {
+        guard let layer else { return }
         switch state {
         case .selected:
-            let color = (window?.isKeyWindow == true)
-                ? NSColor.selectedContentBackgroundColor
-                : NSColor.unemphasizedSelectedContentBackgroundColor
-            color.setStroke()
-            path.lineWidth = lineWidth
-            path.stroke()
+            layer.borderColor = (window?.isKeyWindow == true)
+                ? NSColor.selectedContentBackgroundColor.cgColor
+                : NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
         case .failed:
-            NSColor.systemRed.setStroke()
-            path.lineWidth = lineWidth
-            path.stroke()
+            layer.borderColor = NSColor.systemRed.cgColor
         case .none:
             break
         }
