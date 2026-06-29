@@ -145,6 +145,7 @@ final class FinderStyleSidebarController: NSViewController {
             guard let tableView else { return }
             isApplyingSelection = true
             tableView.reloadData()
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
             applySelection()
             DispatchQueue.main.async { [weak self] in
                 self?.isApplyingSelection = false
@@ -251,13 +252,21 @@ private final class FinderSidebarCellView: NSTableCellView {
     }
 
     func configure(title: String, symbolName: String, count: Int?, isSelected: Bool, rowSizeStyle: NSTableView.RowSizeStyle) {
+        let titleFont = Self.sourceListFont(for: rowSizeStyle, isSelected: isSelected)
+        let countFont = Self.sourceListCountFont(for: rowSizeStyle)
+        let symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: titleFont.pointSize,
+            weight: .regular,
+            scale: .medium
+        )
         let symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
         symbolImage?.isTemplate = true
-        symbolView.image = symbolImage
+        symbolView.image = symbolImage?.withSymbolConfiguration(symbolConfiguration) ?? symbolImage
         symbolView.contentTintColor = .controlAccentColor
         titleField.stringValue = title
-        titleField.font = .systemFont(ofSize: NSFont.systemFontSize, weight: isSelected ? .semibold : .regular)
-        updateSymbolMetrics(for: rowSizeStyle)
+        titleField.font = titleFont
+        countField.font = countFont
+        updateSymbolMetrics()
 
         if let count {
             countField.stringValue = count.formatted()
@@ -268,19 +277,36 @@ private final class FinderSidebarCellView: NSTableCellView {
         }
     }
 
-    private func updateSymbolMetrics(for rowSizeStyle: NSTableView.RowSizeStyle) {
-        let dimension: CGFloat
+    private static func sourceListFont(for rowSizeStyle: NSTableView.RowSizeStyle, isSelected: Bool) -> NSFont {
+        NSFont.systemFont(
+            ofSize: NSFont.systemFontSize(for: controlSize(for: rowSizeStyle)),
+            weight: isSelected ? .semibold : .regular
+        )
+    }
+
+    private static func sourceListCountFont(for rowSizeStyle: NSTableView.RowSizeStyle) -> NSFont {
+        NSFont.systemFont(
+            ofSize: NSFont.systemFontSize(for: controlSize(for: rowSizeStyle)),
+            weight: .regular
+        )
+    }
+
+    private static func controlSize(for rowSizeStyle: NSTableView.RowSizeStyle) -> NSControl.ControlSize {
         switch rowSizeStyle {
         case .small:
-            dimension = 14
+            return .small
         case .medium:
-            dimension = 16
+            return .regular
         case .large:
-            dimension = 20
+            return .large
         default:
-            dimension = 16
+            return .regular
         }
-        symbolWidthConstraint?.constant = dimension
-        symbolHeightConstraint?.constant = dimension
+    }
+
+    private func updateSymbolMetrics() {
+        let imageSize = symbolView.image?.size ?? NSSize(width: 16, height: 16)
+        symbolWidthConstraint?.constant = ceil(imageSize.width)
+        symbolHeightConstraint?.constant = ceil(imageSize.height)
     }
 }
