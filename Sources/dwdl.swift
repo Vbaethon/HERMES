@@ -188,11 +188,11 @@ enum DewuNativeDownloader {
         ]
         for pattern in patterns {
             if let match = RegexUtilities.firstMatch(pattern, in: trimmed),
-               let url = URL(string: DownloaderInfra.trimURLPunctuation(String(trimmed[match]))) {
+               let url = URL(string: MediaFileUtilities.trimURLPunctuation(String(trimmed[match]))) {
                 return url
             }
         }
-        if let url = URL(string: DownloaderInfra.trimURLPunctuation(trimmed)), url.scheme?.hasPrefix("http") == true {
+        if let url = URL(string: MediaFileUtilities.trimURLPunctuation(trimmed)), url.scheme?.hasPrefix("http") == true {
             return url
         }
         throw NSError(domain: "DewuDownloader", code: 2, userInfo: [NSLocalizedDescriptionKey: "未找到可用的得物分享链接。"])
@@ -203,7 +203,7 @@ enum DewuNativeDownloader {
         var info = SharePageInfo()
 
         if let nextData = RegexUtilities.firstCapture(1, pattern: #"<script[^>]+id=["']__NEXT_DATA__["'][^>]*>(.*?)</script>"#, in: page, dotMatchesLineSeparators: true),
-           let data = DownloaderInfra.htmlDecode(nextData).data(using: .utf8),
+           let data = MediaFileUtilities.htmlDecode(nextData).data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             parseNextData(json, into: &info)
         }
@@ -245,15 +245,15 @@ enum DewuNativeDownloader {
 
     private static func parseNextData(_ json: [String: Any], into info: inout SharePageInfo) {
         let props = (json["props"] as? [String: Any])?["pageProps"] as? [String: Any] ?? [:]
-        info.contentID = DownloaderInfra.string(props["trendId"]) ?? DownloaderInfra.string((json["query"] as? [String: Any])?["trendId"]) ?? info.contentID
+        info.contentID = JSONValueUtilities.string(props["trendId"]) ?? JSONValueUtilities.string((json["query"] as? [String: Any])?["trendId"]) ?? info.contentID
         let items = ((props["metaOGInfo"] as? [String: Any])?["data"] as? [[String: Any]]) ?? []
         guard let item = items.first else { return }
         let content = item["content"] as? [String: Any] ?? [:]
         let user = item["userInfo"] as? [String: Any] ?? [:]
-        info.author = DownloaderInfra.string(user["userName"]) ?? ""
-        info.userID = DownloaderInfra.string(user["userId"]) ?? DownloaderInfra.string(user["uid"]) ?? DownloaderInfra.string(user["user_id"]) ?? DownloaderInfra.string(user["duid"]) ?? ""
-        info.contentID = DownloaderInfra.string(content["contentId"]) ?? info.contentID
-        let source = DownloaderInfra.string(props["source"]) ?? DownloaderInfra.string((props["routeQuery"] as? [String: Any])?["source"])
+        info.author = JSONValueUtilities.string(user["userName"]) ?? ""
+        info.userID = JSONValueUtilities.string(user["userId"]) ?? JSONValueUtilities.string(user["uid"]) ?? JSONValueUtilities.string(user["user_id"]) ?? JSONValueUtilities.string(user["duid"]) ?? ""
+        info.contentID = JSONValueUtilities.string(content["contentId"]) ?? info.contentID
+        let source = JSONValueUtilities.string(props["source"]) ?? JSONValueUtilities.string((props["routeQuery"] as? [String: Any])?["source"])
         if source == "videoTrend" {
             info.isVideoPost = true
         }
@@ -262,10 +262,10 @@ enum DewuNativeDownloader {
         var seenVideos = Set<String>()
         let media = (content["media"] as? [String: Any])?["list"] as? [[String: Any]] ?? []
         for item in media {
-            if DownloaderInfra.string(item["mediaType"]) == "img", let url = DownloaderInfra.string(item["url"]) {
+            if JSONValueUtilities.string(item["mediaType"]) == "img", let url = JSONValueUtilities.string(item["url"]) {
                 addPostImage(url, to: &info.images, seen: &seenImages)
-            } else if DownloaderInfra.string(item["mediaType"]) == "video",
-                      let value = DownloaderInfra.string(item["url"]),
+            } else if JSONValueUtilities.string(item["mediaType"]) == "video",
+                      let value = JSONValueUtilities.string(item["url"]),
                       let url = normalizedURL(value),
                       !url.path.contains("/algorithm/wm/"),
                       seenVideos.insert(url.absoluteString).inserted {
@@ -275,15 +275,15 @@ enum DewuNativeDownloader {
         }
 
         if let cover = content["cover"] as? [String: Any],
-           DownloaderInfra.string(cover["mediaType"]) == "img",
-           let coverURL = DownloaderInfra.string(cover["url"]),
+           JSONValueUtilities.string(cover["mediaType"]) == "img",
+           let coverURL = JSONValueUtilities.string(cover["url"]),
            let source = imageSource(from: coverURL),
            seenImages.insert(source.url.absoluteString).inserted {
             info.images.insert(source, at: 0)
         }
 
         if info.userID.isEmpty {
-            info.userID = inferUserID(DownloaderInfra.string(user["icon"]) ?? "", info.images.first?.url.absoluteString ?? "")
+            info.userID = inferUserID(JSONValueUtilities.string(user["icon"]) ?? "", info.images.first?.url.absoluteString ?? "")
         }
     }
 
@@ -323,7 +323,7 @@ enum DewuNativeDownloader {
         }
         let headers = requestInfo["pre_request_header"] as? [String: Any] ?? [:]
         let headerStrings = headers.compactMapValues { value -> String? in
-            let text = DownloaderInfra.string(value)
+            let text = JSONValueUtilities.string(value)
             guard let text else { return nil }
             return text
         }
@@ -423,11 +423,11 @@ enum DewuNativeDownloader {
     }
 
     private static func isMediaDictionary(_ dict: [String: Any]) -> Bool {
-        let type = DownloaderInfra.string(dict["mediaType"])?.lowercased() ?? ""
+        let type = JSONValueUtilities.string(dict["mediaType"])?.lowercased() ?? ""
         if type == "img" || type == "image" || type == "video" {
             return true
         }
-        if DownloaderInfra.string(dict["url"])?.contains(".mp4") == true {
+        if JSONValueUtilities.string(dict["url"])?.contains(".mp4") == true {
             return true
         }
         if dict["mcFormat"] != nil || dict["mcTemplate"] != nil || dict["qualityType"] != nil || dict["videoCodec"] != nil {
@@ -461,7 +461,7 @@ enum DewuNativeDownloader {
         let pattern = #"https?://video-cdn-auth(?:-[a-z]+)?\.dewu\.com/[^\s"'<>]+?\.mp4\?auth_key=[^\s"'<>]+"#
         for db in databases {
             for row in DewuLogStore.query(db: db, sql: sql, bindings: ["%\(contentID)%", "%\(contentID)%"]) {
-                let text = DownloaderInfra.htmlDecode((row.first ?? "").replacingOccurrences(of: "\\/", with: "/"))
+                let text = MediaFileUtilities.htmlDecode((row.first ?? "").replacingOccurrences(of: "\\/", with: "/"))
                 for match in RegexUtilities.allMatches(pattern, in: text) {
                     let cleaned = String(match.trimmingCharacters(in: CharacterSet(charactersIn: ",);]}")))
                     guard let url = normalizedURL(cleaned) else { continue }
@@ -629,7 +629,7 @@ enum DewuNativeDownloader {
     }
 
     private static func decodedURL(_ value: String) -> URL? {
-        let decoded = DownloaderInfra.htmlDecode(value)
+        let decoded = MediaFileUtilities.htmlDecode(value)
             .replacingOccurrences(of: "\\u002F", with: "/")
             .replacingOccurrences(of: "\\/", with: "/")
         return URL(string: decoded)
@@ -736,11 +736,11 @@ enum DewuNativeDownloader {
         if path.contains("/sns-og/") { score += 10_000_000 }
         let qualityText = [
             path,
-            DownloaderInfra.string(meta["mcFormat"]) ?? "",
-            DownloaderInfra.string(meta["mcTemplate"]) ?? "",
-            DownloaderInfra.string(meta["qualityType"]) ?? "",
-            DownloaderInfra.string(meta["videoCodec"]) ?? "",
-            DownloaderInfra.string(meta["type"]) ?? ""
+            JSONValueUtilities.string(meta["mcFormat"]) ?? "",
+            JSONValueUtilities.string(meta["mcTemplate"]) ?? "",
+            JSONValueUtilities.string(meta["qualityType"]) ?? "",
+            JSONValueUtilities.string(meta["videoCodec"]) ?? "",
+            JSONValueUtilities.string(meta["type"]) ?? ""
         ]
         .joined(separator: " ")
         .lowercased()
@@ -752,12 +752,12 @@ enum DewuNativeDownloader {
         }
         if path.contains("wz265_1080p") { score += 2_000_000 }
         if path.contains("dw264") { score += 500_000 }
-        if (DownloaderInfra.string(meta["mcFormat"]) ?? "").lowercased() == "origin"
-            || (DownloaderInfra.string(meta["mcTemplate"]) ?? "").lowercased() == "origin" {
+        if (JSONValueUtilities.string(meta["mcFormat"]) ?? "").lowercased() == "origin"
+            || (JSONValueUtilities.string(meta["mcTemplate"]) ?? "").lowercased() == "origin" {
             score += 20_000_000
         }
-        let width = Int(DownloaderInfra.string(meta["width"]) ?? "") ?? 0
-        let height = Int(DownloaderInfra.string(meta["height"]) ?? "") ?? 0
+        let width = Int(JSONValueUtilities.string(meta["width"]) ?? "") ?? 0
+        let height = Int(JSONValueUtilities.string(meta["height"]) ?? "") ?? 0
         let dimensions = width > 0 && height > 0 ? (width, height) : videoDimensions(from: name)
         score += dimensions.0 * dimensions.1
         if let byteText = RegexUtilities.allMatches(#"_byte(\d+)"#, in: name).first,
@@ -769,10 +769,10 @@ enum DewuNativeDownloader {
     }
 
     private static func videoFPSHint(url: URL, meta: [String: Any]) -> Int {
-        let text = ([url.path, DownloaderInfra.string(meta["fps"]) ?? "", DownloaderInfra.string(meta["frameRate"]) ?? "", DownloaderInfra.string(meta["frame_rate"]) ?? ""]).joined(separator: " ").lowercased()
+        let text = ([url.path, JSONValueUtilities.string(meta["fps"]) ?? "", JSONValueUtilities.string(meta["frameRate"]) ?? "", JSONValueUtilities.string(meta["frame_rate"]) ?? ""]).joined(separator: " ").lowercased()
         var values = RegexUtilities.allMatches(#"\d{2,3}\s*fps"#, in: text).compactMap { Int($0.filter(\.isNumber)) }
         for key in ["fps", "frameRate", "frame_rate"] {
-            if let value = Double(DownloaderInfra.string(meta[key]) ?? ""), value > 0 {
+            if let value = Double(JSONValueUtilities.string(meta[key]) ?? ""), value > 0 {
                 values.append(Int(value))
             }
         }

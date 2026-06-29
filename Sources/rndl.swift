@@ -128,14 +128,14 @@ enum XHSNativeDownloader {
         var seen = Set<String>()
         for pattern in patterns {
             for rawValue in RegexUtilities.allMatches(pattern, in: text) {
-                let cleaned = DownloaderInfra.trimURLPunctuation(rawValue)
+                let cleaned = MediaFileUtilities.trimURLPunctuation(rawValue)
                 guard let sourceURL = normalizedShareURL(cleaned) else { continue }
                 let resolvedURL = sourceURL.host == "xhslink.com" ? (try? await resolveURL(sourceURL)) ?? sourceURL : sourceURL
                 guard seen.insert(resolvedURL.absoluteString).inserted else { continue }
                 links.append(resolvedURL)
             }
         }
-        let trimmedText = DownloaderInfra.trimURLPunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmedText = MediaFileUtilities.trimURLPunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines))
         if trimmedText.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
            let directURL = normalizedShareURL(trimmedText),
            directURL.host == "xhslink.com" || directURL.host?.contains("xiaohongshu.com") == true {
@@ -243,13 +243,13 @@ enum XHSNativeDownloader {
     }
 
     private static func sourceErrorMessage(from state: [String: Any]) -> String? {
-        if let message = DownloaderInfra.nonEmptyString(deepGet(state, keys: ["note", "serverRequestInfo", "errMsg"])) {
+        if let message = JSONValueUtilities.nonEmptyString(deepGet(state, keys: ["note", "serverRequestInfo", "errMsg"])) {
             return message
         }
-        if let message = DownloaderInfra.nonEmptyString(deepGet(state, keys: ["noteData", "data", "msg"])) {
+        if let message = JSONValueUtilities.nonEmptyString(deepGet(state, keys: ["noteData", "data", "msg"])) {
             return message
         }
-        if let message = DownloaderInfra.nonEmptyString(deepGet(state, keys: ["noteData", "msg"])) {
+        if let message = JSONValueUtilities.nonEmptyString(deepGet(state, keys: ["noteData", "msg"])) {
             return message
         }
         return nil
@@ -258,14 +258,14 @@ enum XHSNativeDownloader {
     private static func parseNote(_ note: [String: Any], fallbackURL: URL) throws -> NoteInfo {
         let user = note["user"] as? [String: Any] ?? [:]
         var info = NoteInfo()
-        info.noteID = DownloaderInfra.string(note["noteId"]) ?? fallbackURL.lastPathComponent
-        info.title = DownloaderInfra.string(note["title"]) ?? ""
-        info.author = DownloaderInfra.string(user["nickname"]) ?? DownloaderInfra.string(user["nickName"]) ?? DownloaderInfra.string(user["userId"]) ?? DownloaderInfra.string(user["id"]) ?? "unknown"
-        info.userID = DownloaderInfra.string(user["redId"])
-            ?? DownloaderInfra.string(user["redID"])
-            ?? DownloaderInfra.string(user["red_id"])
+        info.noteID = JSONValueUtilities.string(note["noteId"]) ?? fallbackURL.lastPathComponent
+        info.title = JSONValueUtilities.string(note["title"]) ?? ""
+        info.author = JSONValueUtilities.string(user["nickname"]) ?? JSONValueUtilities.string(user["nickName"]) ?? JSONValueUtilities.string(user["userId"]) ?? JSONValueUtilities.string(user["id"]) ?? "unknown"
+        info.userID = JSONValueUtilities.string(user["redId"])
+            ?? JSONValueUtilities.string(user["redID"])
+            ?? JSONValueUtilities.string(user["red_id"])
             ?? ""
-        info.type = DownloaderInfra.string(note["type"]) ?? ""
+        info.type = JSONValueUtilities.string(note["type"]) ?? ""
 
         if info.type != "video" {
             let imageList = note["imageList"] as? [[String: Any]] ?? []
@@ -280,7 +280,7 @@ enum XHSNativeDownloader {
                     imageURL: imageCandidate.url,
                     liveURL: liveURLs.first,
                     liveURLs: liveURLs,
-                    fileID: DownloaderInfra.nonEmptyString(item["fileId"]) ?? imageCandidate.token
+                    fileID: JSONValueUtilities.nonEmptyString(item["fileId"]) ?? imageCandidate.token
                 ))
             }
         }
@@ -290,8 +290,8 @@ enum XHSNativeDownloader {
                 info.videoURLs = streamURLs(bestVideo.item)
                 info.videoURL = info.videoURLs.first
                 info.videoScore = streamScore(bestVideo)
-            } else if let originKey = DownloaderInfra.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
-                info.videoURL = URL(string: "https://sns-video-bd.xhscdn.com/\(DownloaderInfra.formatURL(originKey))")
+            } else if let originKey = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
+                info.videoURL = URL(string: "https://sns-video-bd.xhscdn.com/\(MediaFileUtilities.formatURL(originKey))")
             }
         }
         return info
@@ -301,7 +301,7 @@ enum XHSNativeDownloader {
         guard let rawText = RegexUtilities.firstCapture(1, pattern: #"window\.__INITIAL_STATE__=(.*?)</script>"#, in: html, dotMatchesLineSeparators: true) else {
             throw NSError(domain: "XHSDownloader", code: 5, userInfo: [NSLocalizedDescriptionKey: "页面中没有 window.__INITIAL_STATE__。"])
         }
-        let decoded = DownloaderInfra.htmlDecode(rawText.trimmingCharacters(in: .whitespacesAndNewlines))
+        let decoded = MediaFileUtilities.htmlDecode(rawText.trimmingCharacters(in: .whitespacesAndNewlines))
         let normalized = decoded.replacingOccurrences(
             of: #"(?<=[:\[,])\s*undefined\s*(?=[,\]}])"#,
             with: "null",
@@ -331,8 +331,8 @@ enum XHSNativeDownloader {
            let url = streamURL(best.item) {
             return url
         }
-        if let originKey = DownloaderInfra.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
-            return URL(string: "https://sns-video-bd.xhscdn.com/\(DownloaderInfra.formatURL(originKey))")
+        if let originKey = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
+            return URL(string: "https://sns-video-bd.xhscdn.com/\(MediaFileUtilities.formatURL(originKey))")
         }
         return nil
     }
@@ -342,7 +342,7 @@ enum XHSNativeDownloader {
         if let stream = deepGet(note, keys: ["video", "media", "stream"]) as? [String: Any] {
             candidates.append(contentsOf: streamCandidates(from: stream))
         }
-        if let mediaV2Text = DownloaderInfra.nonEmptyString(deepGet(note, keys: ["video", "mediaV2"])),
+        if let mediaV2Text = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "mediaV2"])),
            let mediaV2 = parseJSONString(mediaV2Text) as? [String: Any] {
             if let stream = deepGet(mediaV2, keys: ["stream"]) as? [String: Any] {
                 candidates.append(contentsOf: streamCandidates(from: stream))
@@ -360,14 +360,14 @@ enum XHSNativeDownloader {
                 if let hdrType = deepGet(mediaV2, keys: ["video", "hdr_type"]) {
                     opaque["hdr_type"] = hdrType
                 }
-                if let hdURL = DownloaderInfra.nonEmptyString(opaque["hd_screencast_stream"]) {
+                if let hdURL = JSONValueUtilities.nonEmptyString(opaque["hd_screencast_stream"]) {
                     var item = opaque
                     item["master_url"] = hdURL
                     item["video_codec"] = "h265"
                     item["stream_quality_hint"] = "hd_screencast"
                     candidates.append(StreamCandidate(codec: "h265", item: item))
                 }
-                if let defaultURL = DownloaderInfra.nonEmptyString(opaque["default_screencast_stream"]) {
+                if let defaultURL = JSONValueUtilities.nonEmptyString(opaque["default_screencast_stream"]) {
                     var item = opaque
                     item["master_url"] = defaultURL
                     item["stream_quality_hint"] = "default_screencast"
@@ -445,7 +445,7 @@ enum XHSNativeDownloader {
     private static func nestedImageCandidates(in value: Any, keyHint: String = "", depth: Int = 0) -> [ImageCandidate] {
         guard depth <= 5 else { return [] }
         if let text = value as? String {
-            let decoded = DownloaderInfra.formatURL(text)
+            let decoded = MediaFileUtilities.formatURL(text)
             guard decoded.contains("xhscdn.com") || decoded.contains("sns-img") || decoded.contains("imageView") else {
                 return []
             }
@@ -473,7 +473,7 @@ enum XHSNativeDownloader {
     private static func streamURLs(_ item: [String: Any]) -> [URL] {
         var values: [String] = []
         for key in ["masterUrl", "master_url"] {
-            if let value = DownloaderInfra.nonEmptyString(item[key]) {
+            if let value = JSONValueUtilities.nonEmptyString(item[key]) {
                 values.append(value)
             }
         }
@@ -481,20 +481,20 @@ enum XHSNativeDownloader {
             values.append(contentsOf: (item[key] as? [String] ?? []).filter { !$0.isEmpty })
         }
         var seen = Set<String>()
-        return values.compactMap { URL(string: DownloaderInfra.formatURL($0)) }.filter { seen.insert($0.absoluteString).inserted }
+        return values.compactMap { URL(string: MediaFileUtilities.formatURL($0)) }.filter { seen.insert($0.absoluteString).inserted }
     }
 
     private static func streamScore(_ candidate: StreamCandidate) -> Int64 {
         let item = candidate.item
         let urlText = streamURL(item)?.absoluteString ?? ""
-        let width = DownloaderInfra.intValue(value(in: item, keys: ["width"]))
-        let height = DownloaderInfra.intValue(value(in: item, keys: ["height"]))
-        let videoBitrate = DownloaderInfra.intValue(value(in: item, keys: ["videoBitrate", "video_bitrate"]))
-        let bitrate = videoBitrate != 0 ? videoBitrate : DownloaderInfra.intValue(value(in: item, keys: ["avgBitrate", "avg_bitrate"]))
-        let size = DownloaderInfra.intValue(item["size"])
+        let width = JSONValueUtilities.intValue(value(in: item, keys: ["width"]))
+        let height = JSONValueUtilities.intValue(value(in: item, keys: ["height"]))
+        let videoBitrate = JSONValueUtilities.intValue(value(in: item, keys: ["videoBitrate", "video_bitrate"]))
+        let bitrate = videoBitrate != 0 ? videoBitrate : JSONValueUtilities.intValue(value(in: item, keys: ["avgBitrate", "avg_bitrate"]))
+        let size = JSONValueUtilities.intValue(item["size"])
         let fps = videoFPSHint(urlText: urlText, meta: item)
         let hdr = videoHDRHint(urlText: urlText, meta: item)
-        let qualityHint = (DownloaderInfra.nonEmptyString(item["stream_quality_hint"]) ?? "").lowercased()
+        let qualityHint = (JSONValueUtilities.nonEmptyString(item["stream_quality_hint"]) ?? "").lowercased()
         let codecScore: Int64
         switch candidate.codec.lowercased() {
         case "av1":
@@ -560,14 +560,14 @@ enum XHSNativeDownloader {
     private static func videoFPSHint(urlText: String, meta: [String: Any]) -> Int {
         let text = ([
             urlText,
-            DownloaderInfra.nonEmptyString(meta["fps"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["frameRate"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["frame_rate"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["fpsType"]) ?? ""
+            JSONValueUtilities.nonEmptyString(meta["fps"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["frameRate"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["frame_rate"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["fpsType"]) ?? ""
         ]).joined(separator: " ").lowercased()
         var values = RegexUtilities.allMatches(#"\d{2,3}\s*fps"#, in: text).compactMap { Int($0.filter(\.isNumber)) }
         for key in ["fps", "frameRate", "frame_rate"] {
-            if let value = Double(DownloaderInfra.string(meta[key]) ?? ""), value > 0 {
+            if let value = Double(JSONValueUtilities.string(meta[key]) ?? ""), value > 0 {
                 values.append(Int(value.rounded()))
             }
         }
@@ -577,16 +577,16 @@ enum XHSNativeDownloader {
     private static func videoHDRHint(urlText: String, meta: [String: Any]) -> Int {
         let text = ([
             urlText,
-            DownloaderInfra.nonEmptyString(meta["hdrType"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["hdr_type"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["dynamicRange"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["dynamic_range"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["qualityType"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["quality_type"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["videoCodec"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["codec"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["format"]) ?? "",
-            DownloaderInfra.nonEmptyString(meta["streamType"]) ?? ""
+            JSONValueUtilities.nonEmptyString(meta["hdrType"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["hdr_type"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["dynamicRange"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["dynamic_range"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["qualityType"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["quality_type"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["videoCodec"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["codec"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["format"]) ?? "",
+            JSONValueUtilities.nonEmptyString(meta["streamType"]) ?? ""
         ]).joined(separator: " ").lowercased()
         if text.contains("dolby") || text.contains("dvhe") || text.contains("dovi") {
             return 4
@@ -597,17 +597,17 @@ enum XHSNativeDownloader {
         if text.contains("10bit") || text.contains("10-bit") || text.contains("main10") {
             return 2
         }
-        if DownloaderInfra.boolValue(meta["hdr"]) || DownloaderInfra.boolValue(meta["isHDR"]) || DownloaderInfra.boolValue(meta["is_hdr"]) {
+        if JSONValueUtilities.boolValue(meta["hdr"]) || JSONValueUtilities.boolValue(meta["isHDR"]) || JSONValueUtilities.boolValue(meta["is_hdr"]) {
             return 3
         }
-        if DownloaderInfra.intValue(meta["hdrType"]) > 1 || DownloaderInfra.intValue(meta["hdr_type"]) > 1 {
+        if JSONValueUtilities.intValue(meta["hdrType"]) > 1 || JSONValueUtilities.intValue(meta["hdr_type"]) > 1 {
             return 2
         }
         return 0
     }
 
     private static func imageURL(from imageURLText: String, token: String) -> URL? {
-        let decoded = DownloaderInfra.formatURL(imageURLText)
+        let decoded = MediaFileUtilities.formatURL(imageURLText)
         let firstPathComponent = token.split(separator: "/").first.map(String.init) ?? ""
         if firstPathComponent.range(of: #"^\d{12}$"#, options: .regularExpression) != nil,
            let originalURL = URL(string: decoded) {
@@ -703,7 +703,7 @@ enum XHSNativeDownloader {
                 for sourceURL in task.urls {
                     do {
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, progress: progress)
-                        let suffix = DownloaderInfra.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
+                        let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
                         try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
@@ -781,16 +781,16 @@ enum XHSNativeDownloader {
         guard let destination = CGImageDestinationCreateWithURL(temporaryURL as CFURL, type, count, nil) else { return }
         for index in 0..<count {
             guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
-            let properties = DownloaderInfra.mutableDictionary(CGImageSourceCopyPropertiesAtIndex(source, index, nil))
-            let tiff = DownloaderInfra.mutableDictionary(properties[kCGImagePropertyTIFFDictionary])
+            let properties = JSONValueUtilities.mutableDictionary(CGImageSourceCopyPropertiesAtIndex(source, index, nil))
+            let tiff = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyTIFFDictionary])
             tiff.removeObject(forKey: kCGImagePropertyTIFFImageDescription)
             tiff.removeObject(forKey: "ImageDescription")
             properties[kCGImagePropertyTIFFDictionary] = tiff
-            let iptc = DownloaderInfra.mutableDictionary(properties[kCGImagePropertyIPTCDictionary])
+            let iptc = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyIPTCDictionary])
             iptc.removeObject(forKey: kCGImagePropertyIPTCCaptionAbstract)
             iptc.removeObject(forKey: "Caption/Abstract")
             properties[kCGImagePropertyIPTCDictionary] = iptc
-            let exif = DownloaderInfra.mutableDictionary(properties[kCGImagePropertyExifDictionary])
+            let exif = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyExifDictionary])
             exif.removeObject(forKey: kCGImagePropertyExifUserComment)
             properties[kCGImagePropertyExifDictionary] = exif
             CGImageDestinationAddImage(destination, image, properties)
@@ -800,7 +800,7 @@ enum XHSNativeDownloader {
     }
 
     private static func extractImageToken(_ value: String) -> String {
-        let decoded = DownloaderInfra.formatURL(value)
+        let decoded = MediaFileUtilities.formatURL(value)
         guard let url = URL(string: decoded) else { return "" }
         var parts = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).split(separator: "/").map(String.init)
         if parts.count >= 3, parts.first?.range(of: #"^\d{12}$"#, options: .regularExpression) != nil {

@@ -38,6 +38,9 @@
 		111111111111111111111136 /* ThumbnailItemViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111037 /* ThumbnailItemViews.swift */; };
 		111111111111111111111137 /* ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111038 /* ThumbnailService.swift */; };
 		111111111111111111111138 /* DownloaderInfra.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111047 /* DownloaderInfra.swift */; };
+		111111111111111111111139 /* JSONValueUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111048 /* JSONValueUtilities.swift */; };
+		11111111111111111111113A /* MediaFileUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111049 /* MediaFileUtilities.swift */; };
+		11111111111111111111113B /* ThumbnailCollectionCoordinatorUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -98,6 +101,9 @@
 		111111111111111111111037 /* ThumbnailItemViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailItemViews.swift; sourceTree = "<group>"; };
 		111111111111111111111038 /* ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailService.swift; sourceTree = "<group>"; };
 		111111111111111111111047 /* DownloaderInfra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderInfra.swift; sourceTree = "<group>"; };
+		111111111111111111111048 /* JSONValueUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValueUtilities.swift; sourceTree = "<group>"; };
+		111111111111111111111049 /* MediaFileUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaFileUtilities.swift; sourceTree = "<group>"; };
+		11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailCollectionCoordinatorUtilities.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,6 +145,7 @@
 				11111111111111111111103A /* PairCollectionView.swift */,
 				11111111111111111111103B /* DownloadCollectionView.swift */,
 				111111111111111111111033 /* CompletedCollectionView.swift */,
+				11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */,
 				111111111111111111111034 /* MainWindowController.swift */,
 				111111111111111111111035 /* NativeWindowToolbarController.swift */,
 				111111111111111111111036 /* PageControllers.swift */,
@@ -156,6 +163,8 @@
 				11111111111111111111102E /* FileSystemUtilities.swift */,
 				11111111111111111111102F /* RegexUtilities.swift */,
 				111111111111111111111047 /* DownloaderInfra.swift */,
+				111111111111111111111048 /* JSONValueUtilities.swift */,
+				111111111111111111111049 /* MediaFileUtilities.swift */,
 			);
 			path = Utilities;
 			sourceTree = "<group>";
@@ -338,6 +347,9 @@
 				111111111111111111111136 /* ThumbnailItemViews.swift in Sources */,
 				111111111111111111111137 /* ThumbnailService.swift in Sources */,
 				111111111111111111111138 /* DownloaderInfra.swift in Sources */,
+				111111111111111111111139 /* JSONValueUtilities.swift in Sources */,
+				11111111111111111111113A /* MediaFileUtilities.swift in Sources */,
+				11111111111111111111113B /* ThumbnailCollectionCoordinatorUtilities.swift in Sources */,
 
 				111111111111111111111123 /* LivePhotoToolRunner.swift in Sources */,
 				111111111111111111111124 /* PhotoLibraryImporter.swift in Sources */,

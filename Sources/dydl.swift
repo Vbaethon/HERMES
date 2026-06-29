@@ -479,12 +479,12 @@ enum DouyinNativeDownloader {
         var seen = Set<String>()
         for pattern in patterns {
             for rawValue in RegexUtilities.allMatches(pattern, in: text) {
-                let cleaned = DownloaderInfra.trimURLPunctuation(rawValue)
+                let cleaned = MediaFileUtilities.trimURLPunctuation(rawValue)
                 guard let url = URL(string: cleaned), seen.insert(url.absoluteString).inserted else { continue }
                 links.append(url)
             }
         }
-        let trimmedText = DownloaderInfra.trimURLPunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmedText = MediaFileUtilities.trimURLPunctuation(text.trimmingCharacters(in: .whitespacesAndNewlines))
         if trimmedText.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
            let url = URL(string: trimmedText),
            let host = url.host?.lowercased(),
@@ -618,40 +618,40 @@ enum DouyinNativeDownloader {
 
     private static func applyDouyinSeed(_ seed: [String: Any], to info: inout DouyinSeedInfo) {
         if info.desc == nil {
-            info.desc = DownloaderInfra.nonEmptyString(seed["desc"]) ?? DownloaderInfra.nonEmptyString(seed["caption"])
+            info.desc = JSONValueUtilities.nonEmptyString(seed["desc"]) ?? JSONValueUtilities.nonEmptyString(seed["caption"])
         }
         if info.author == nil, let author = seed["author"] as? [String: Any] {
-            info.author = DownloaderInfra.nonEmptyString(author["nickname"])
-                ?? DownloaderInfra.nonEmptyString(author["unique_id"])
-                ?? DownloaderInfra.nonEmptyString(author["short_id"])
+            info.author = JSONValueUtilities.nonEmptyString(author["nickname"])
+                ?? JSONValueUtilities.nonEmptyString(author["unique_id"])
+                ?? JSONValueUtilities.nonEmptyString(author["short_id"])
         }
         if info.authorID == nil, let author = seed["author"] as? [String: Any] {
-            info.authorID = DownloaderInfra.nonEmptyString(author["unique_id"])
-                ?? DownloaderInfra.nonEmptyString(author["short_id"])
-                ?? DownloaderInfra.nonEmptyString(author["uid"])
-                ?? DownloaderInfra.nonEmptyString(author["sec_uid"])
+            info.authorID = JSONValueUtilities.nonEmptyString(author["unique_id"])
+                ?? JSONValueUtilities.nonEmptyString(author["short_id"])
+                ?? JSONValueUtilities.nonEmptyString(author["uid"])
+                ?? JSONValueUtilities.nonEmptyString(author["sec_uid"])
         }
 	        guard let video = seed["video"] as? [String: Any] else { return }
 	        if info.width == nil {
-	            let width = DownloaderInfra.intValue(video["width"])
+	            let width = JSONValueUtilities.intValue(video["width"])
 	            if width > 0 { info.width = width }
 	        }
 	        if info.height == nil {
-	            let height = DownloaderInfra.intValue(video["height"])
+	            let height = JSONValueUtilities.intValue(video["height"])
 	            if height > 0 { info.height = height }
 	        }
 	        if info.fps == nil {
-	            let fps = DownloaderInfra.intValue(video["fps"]) != 0 ? DownloaderInfra.intValue(video["fps"]) : DownloaderInfra.intValue(video["FPS"]) != 0 ? DownloaderInfra.intValue(video["FPS"]) : DownloaderInfra.intValue(video["frame_rate"])
+	            let fps = JSONValueUtilities.intValue(video["fps"]) != 0 ? JSONValueUtilities.intValue(video["fps"]) : JSONValueUtilities.intValue(video["FPS"]) != 0 ? JSONValueUtilities.intValue(video["FPS"]) : JSONValueUtilities.intValue(video["frame_rate"])
 	            if fps > 0 { info.fps = fps }
 	        }
         for playAddr in douyinPlayAddrDictionaries(from: video) {
             if info.videoID == nil,
-               let uri = DownloaderInfra.nonEmptyString(playAddr["uri"]),
+               let uri = JSONValueUtilities.nonEmptyString(playAddr["uri"]),
                isLikelyDouyinVideoID(uri) {
                 info.videoID = uri
             }
             for urlString in stringArray(playAddr["url_list"]) {
-                guard let playURL = URL(string: DownloaderInfra.formatURL(urlString)) else { continue }
+                guard let playURL = URL(string: MediaFileUtilities.formatURL(urlString)) else { continue }
                 if info.playURL == nil {
                     info.playURL = playURL
                 }
@@ -687,7 +687,7 @@ enum DouyinNativeDownloader {
             return values
         }
         if let values = value as? [Any] {
-            return values.compactMap { DownloaderInfra.string($0) }
+            return values.compactMap { JSONValueUtilities.string($0) }
         }
         return []
     }
@@ -2042,13 +2042,13 @@ enum DouyinNativeDownloader {
     static func parseAweme(_ aweme: [String: Any]) -> AwemeInfo {
         let author = aweme["author"] as? [String: Any] ?? [:]
         var info = AwemeInfo()
-        info.awemeID = DownloaderInfra.nonEmptyString(aweme["aweme_id"]) ?? DownloaderInfra.nonEmptyString(aweme["group_id"]) ?? ""
-        info.desc = DownloaderInfra.nonEmptyString(aweme["desc"]) ?? DownloaderInfra.nonEmptyString(aweme["caption"]) ?? ""
-        info.author = DownloaderInfra.nonEmptyString(author["nickname"]) ?? DownloaderInfra.nonEmptyString(author["unique_id"]) ?? DownloaderInfra.nonEmptyString(author["uid"]) ?? "unknown"
-        info.authorID = DownloaderInfra.nonEmptyString(author["unique_id"])
-            ?? DownloaderInfra.nonEmptyString(author["short_id"])
-            ?? DownloaderInfra.nonEmptyString(author["uid"])
-            ?? DownloaderInfra.nonEmptyString(author["sec_uid"])
+        info.awemeID = JSONValueUtilities.nonEmptyString(aweme["aweme_id"]) ?? JSONValueUtilities.nonEmptyString(aweme["group_id"]) ?? ""
+        info.desc = JSONValueUtilities.nonEmptyString(aweme["desc"]) ?? JSONValueUtilities.nonEmptyString(aweme["caption"]) ?? ""
+        info.author = JSONValueUtilities.nonEmptyString(author["nickname"]) ?? JSONValueUtilities.nonEmptyString(author["unique_id"]) ?? JSONValueUtilities.nonEmptyString(author["uid"]) ?? "unknown"
+        info.authorID = JSONValueUtilities.nonEmptyString(author["unique_id"])
+            ?? JSONValueUtilities.nonEmptyString(author["short_id"])
+            ?? JSONValueUtilities.nonEmptyString(author["uid"])
+            ?? JSONValueUtilities.nonEmptyString(author["sec_uid"])
             ?? ""
 
         let images = aweme["images"] as? [[String: Any]]
@@ -2094,13 +2094,13 @@ enum DouyinNativeDownloader {
                 imageCandidates.append((offset + 1, imageDict, imageURL, bestVideo))
             }
         }
-        let metaWidth = DownloaderInfra.intValue(aweme["width"])
-        let metaHeight = DownloaderInfra.intValue(aweme["height"])
+        let metaWidth = JSONValueUtilities.intValue(aweme["width"])
+        let metaHeight = JSONValueUtilities.intValue(aweme["height"])
         var bestByIndex: [Int: (image: [String: Any], imageURL: URL, video: VideoSelection?)] = [:]
         for candidate in imageCandidates {
-            let score = imageURLScore(candidate.imageURL, metaWidth: DownloaderInfra.intValue(candidate.image["width"]) != 0 ? DownloaderInfra.intValue(candidate.image["width"]) : metaWidth, metaHeight: DownloaderInfra.intValue(candidate.image["height"]) != 0 ? DownloaderInfra.intValue(candidate.image["height"]) : metaHeight)
+            let score = imageURLScore(candidate.imageURL, metaWidth: JSONValueUtilities.intValue(candidate.image["width"]) != 0 ? JSONValueUtilities.intValue(candidate.image["width"]) : metaWidth, metaHeight: JSONValueUtilities.intValue(candidate.image["height"]) != 0 ? JSONValueUtilities.intValue(candidate.image["height"]) : metaHeight)
             if let existing = bestByIndex[candidate.index] {
-                let existingScore = imageURLScore(existing.imageURL, metaWidth: DownloaderInfra.intValue(existing.image["width"]) != 0 ? DownloaderInfra.intValue(existing.image["width"]) : metaWidth, metaHeight: DownloaderInfra.intValue(existing.image["height"]) != 0 ? DownloaderInfra.intValue(existing.image["height"]) : metaHeight)
+                let existingScore = imageURLScore(existing.imageURL, metaWidth: JSONValueUtilities.intValue(existing.image["width"]) != 0 ? JSONValueUtilities.intValue(existing.image["width"]) : metaWidth, metaHeight: JSONValueUtilities.intValue(existing.image["height"]) != 0 ? JSONValueUtilities.intValue(existing.image["height"]) : metaHeight)
                 if score <= existingScore { continue }
             }
             bestByIndex[candidate.index] = (candidate.image, candidate.imageURL, candidate.video)
@@ -2113,8 +2113,8 @@ enum DouyinNativeDownloader {
                 videoURL: best.video?.url,
                 sourceMarkedHDR: best.video?.sourceMarkedHDR ?? false,
                 streamMarkedHDR: best.video?.streamMarkedHDR ?? false,
-                width: DownloaderInfra.intValue(best.image["width"]),
-                height: DownloaderInfra.intValue(best.image["height"]),
+                width: JSONValueUtilities.intValue(best.image["width"]),
+                height: JSONValueUtilities.intValue(best.image["height"]),
                 videoWidth: best.video?.width ?? 0,
                 videoHeight: best.video?.height ?? 0
             ))
@@ -2232,8 +2232,8 @@ enum DouyinNativeDownloader {
     }
 
     private static func bestImageURL(from image: [String: Any]) -> URL? {
-        let metaWidth = DownloaderInfra.intValue(image["width"])
-        let metaHeight = DownloaderInfra.intValue(image["height"])
+        let metaWidth = JSONValueUtilities.intValue(image["width"])
+        let metaHeight = JSONValueUtilities.intValue(image["height"])
         var candidates: [(score: Int64, url: URL)] = []
         let urlList = (image["url_list"] as? [String] ?? [])
             .filter { !$0.contains("water-v2") }
@@ -2241,7 +2241,7 @@ enum DouyinNativeDownloader {
         let allRaw = urlList.isEmpty ? downloadList : urlList
         var seen = Set<String>()
         for raw in allRaw {
-            let formatted = DownloaderInfra.formatURL(raw)
+            let formatted = MediaFileUtilities.formatURL(raw)
             guard !formatted.isEmpty, seen.insert(formatted).inserted,
                   let url = URL(string: formatted) else { continue }
             let score = imageURLScore(url, metaWidth: metaWidth, metaHeight: metaHeight)
@@ -2255,8 +2255,8 @@ enum DouyinNativeDownloader {
 
     private static func livePhotoVideosInAweme(_ aweme: [String: Any], imageCount: Int) -> [VideoSelection] {
         guard imageCount > 0 else { return [] }
-        let metaWidth = DownloaderInfra.intValue(aweme["width"])
-        let metaHeight = DownloaderInfra.intValue(aweme["height"])
+        let metaWidth = JSONValueUtilities.intValue(aweme["width"])
+        let metaHeight = JSONValueUtilities.intValue(aweme["height"])
         var selections: [VideoSelection] = []
         var seen = Set<String>()
 
@@ -2333,8 +2333,8 @@ enum DouyinNativeDownloader {
             candidates = nestedVideoCandidates(in: video, meta: video, inheritedMeta: nil)
         }
         if candidates.isEmpty {
-            let fallbackWidth = DownloaderInfra.intValue(video["width"])
-            let fallbackHeight = DownloaderInfra.intValue(video["height"])
+            let fallbackWidth = JSONValueUtilities.intValue(video["width"])
+            let fallbackHeight = JSONValueUtilities.intValue(video["height"])
             let urls = douyinVideoURLsInStrings(video, width: fallbackWidth, height: fallbackHeight)
             if let firstURL = urls.first {
                 candidates = [(0, VideoSelection(
@@ -2493,9 +2493,9 @@ enum DouyinNativeDownloader {
                 return best
             }
             if let urlString = image[key] as? String,
-               let url = URL(string: DownloaderInfra.formatURL(urlString)) {
-                let width = DownloaderInfra.intValue(image["width"])
-                let height = DownloaderInfra.intValue(image["height"])
+               let url = URL(string: MediaFileUtilities.formatURL(urlString)) {
+                let width = JSONValueUtilities.intValue(image["width"])
+                let height = JSONValueUtilities.intValue(image["height"])
                 if debugEnabled {
                     print("[DouyinDebug] Live Photo video found via key '\(key)' (string url: \(url))")
                 }
@@ -2510,8 +2510,8 @@ enum DouyinNativeDownloader {
             }
             return best
         }
-        let width = DownloaderInfra.intValue(image["width"])
-        let height = DownloaderInfra.intValue(image["height"])
+        let width = JSONValueUtilities.intValue(image["width"])
+        let height = JSONValueUtilities.intValue(image["height"])
         let urls = douyinVideoURLsInStrings(image, width: width, height: height)
         if let firstURL = urls.first {
             if debugEnabled {
@@ -2545,7 +2545,7 @@ enum DouyinNativeDownloader {
     }
 
     private static func videoURLsInText(_ text: String) -> [URL] {
-        let decoded = DownloaderInfra.formatURL(text)
+        let decoded = MediaFileUtilities.formatURL(text)
             .replacingOccurrences(of: "&amp;", with: "&")
         let percentDecoded = decoded.removingPercentEncoding ?? decoded
         let normalizedValues = [
@@ -2558,7 +2558,7 @@ enum DouyinNativeDownloader {
         let pattern = #"https?:\\?/\\?/(?:[^\s\"'<>\\]|\\/)+"#
         for value in normalizedValues {
             for rawMatch in RegexUtilities.allMatches(pattern, in: value) {
-                let cleaned = DownloaderInfra.trimURLPunctuation(DownloaderInfra.formatURL(rawMatch))
+                let cleaned = MediaFileUtilities.trimURLPunctuation(MediaFileUtilities.formatURL(rawMatch))
                     .replacingOccurrences(of: "\\/", with: "/")
                 guard let url = URL(string: cleaned) else { continue }
                 guard isLikelyDouyinVideoPlaybackURL(url) else { continue }
@@ -2585,20 +2585,20 @@ enum DouyinNativeDownloader {
 
     private static func videoCandidates(from playAddr: [String: Any], meta: [String: Any], inheritedMeta: [String: Any]?) -> [(score: Int64, selection: VideoSelection)] {
         let urls = playAddr["url_list"] as? [String] ?? []
-        let width = DownloaderInfra.intValue(playAddr["width"]) != 0
-            ? DownloaderInfra.intValue(playAddr["width"])
-            : (DownloaderInfra.intValue(meta["width"]) != 0 ? DownloaderInfra.intValue(meta["width"]) : DownloaderInfra.intValue(inheritedMeta?["width"]))
-        let height = DownloaderInfra.intValue(playAddr["height"]) != 0
-            ? DownloaderInfra.intValue(playAddr["height"])
-            : (DownloaderInfra.intValue(meta["height"]) != 0 ? DownloaderInfra.intValue(meta["height"]) : DownloaderInfra.intValue(inheritedMeta?["height"]))
-        let dataSize = DownloaderInfra.intValue(playAddr["data_size"])
-        let bitRate = DownloaderInfra.intValue(meta["bit_rate"])
-        let fps = DownloaderInfra.intValue(meta["FPS"]) != 0 ? DownloaderInfra.intValue(meta["FPS"]) : DownloaderInfra.intValue(meta["fps"])
-        let format = (DownloaderInfra.string(meta["format"]) ?? "").lowercased()
+        let width = JSONValueUtilities.intValue(playAddr["width"]) != 0
+            ? JSONValueUtilities.intValue(playAddr["width"])
+            : (JSONValueUtilities.intValue(meta["width"]) != 0 ? JSONValueUtilities.intValue(meta["width"]) : JSONValueUtilities.intValue(inheritedMeta?["width"]))
+        let height = JSONValueUtilities.intValue(playAddr["height"]) != 0
+            ? JSONValueUtilities.intValue(playAddr["height"])
+            : (JSONValueUtilities.intValue(meta["height"]) != 0 ? JSONValueUtilities.intValue(meta["height"]) : JSONValueUtilities.intValue(inheritedMeta?["height"]))
+        let dataSize = JSONValueUtilities.intValue(playAddr["data_size"])
+        let bitRate = JSONValueUtilities.intValue(meta["bit_rate"])
+        let fps = JSONValueUtilities.intValue(meta["FPS"]) != 0 ? JSONValueUtilities.intValue(meta["FPS"]) : JSONValueUtilities.intValue(meta["fps"])
+        let format = (JSONValueUtilities.string(meta["format"]) ?? "").lowercased()
         let definition = (
-            (DownloaderInfra.string(meta["gear_name"]) ?? "") + " " +
-            (DownloaderInfra.string(meta["quality_type"]) ?? "") + " " +
-            (DownloaderInfra.string(meta["video_extra"]) ?? "")
+            (JSONValueUtilities.string(meta["gear_name"]) ?? "") + " " +
+            (JSONValueUtilities.string(meta["quality_type"]) ?? "") + " " +
+            (JSONValueUtilities.string(meta["video_extra"]) ?? "")
         ).lowercased()
         var score = Int64(width * height) * 1_000_000_000
             + Int64(fps) * 100_000_000
@@ -2619,29 +2619,29 @@ enum DouyinNativeDownloader {
         } else if definition.contains("1080") {
             score += 2_000_000_000
         }
-        if DownloaderInfra.boolValue(meta["is_h265"]) || DownloaderInfra.boolValue(meta["is_bytevc1"]) {
+        if JSONValueUtilities.boolValue(meta["is_h265"]) || JSONValueUtilities.boolValue(meta["is_bytevc1"]) {
             score += 1_000_000_000
         }
         let streamHDRText = [
-            DownloaderInfra.string(meta["HDR_bit"]) ?? "",
-            DownloaderInfra.string(meta["HDR_type"]) ?? "",
-            DownloaderInfra.string(meta["hdr_bit"]) ?? "",
-            DownloaderInfra.string(meta["hdr_type"]) ?? "",
-            DownloaderInfra.string(meta["video_extra"]) ?? ""
+            JSONValueUtilities.string(meta["HDR_bit"]) ?? "",
+            JSONValueUtilities.string(meta["HDR_type"]) ?? "",
+            JSONValueUtilities.string(meta["hdr_bit"]) ?? "",
+            JSONValueUtilities.string(meta["hdr_type"]) ?? "",
+            JSONValueUtilities.string(meta["video_extra"]) ?? ""
         ].joined(separator: " ").lowercased()
         let inheritedHDRText = [
-            DownloaderInfra.string(inheritedMeta?["HDR_bit"]) ?? "",
-            DownloaderInfra.string(inheritedMeta?["HDR_type"]) ?? "",
-            DownloaderInfra.string(inheritedMeta?["hdr_bit"]) ?? "",
-            DownloaderInfra.string(inheritedMeta?["hdr_type"]) ?? "",
-            DownloaderInfra.string(inheritedMeta?["video_extra"]) ?? ""
+            JSONValueUtilities.string(inheritedMeta?["HDR_bit"]) ?? "",
+            JSONValueUtilities.string(inheritedMeta?["HDR_type"]) ?? "",
+            JSONValueUtilities.string(inheritedMeta?["hdr_bit"]) ?? "",
+            JSONValueUtilities.string(inheritedMeta?["hdr_type"]) ?? "",
+            JSONValueUtilities.string(inheritedMeta?["video_extra"]) ?? ""
         ].joined(separator: " ").lowercased()
         let combinedHDRText = "\(streamHDRText) \(inheritedHDRText)"
         let streamMarkedHDR = isHDRText(streamHDRText)
         let sourceMarkedHDR = streamMarkedHDR
             || isHDRText(inheritedHDRText)
-            || DownloaderInfra.boolValue(meta["is_source_HDR"])
-            || DownloaderInfra.boolValue(inheritedMeta?["is_source_HDR"])
+            || JSONValueUtilities.boolValue(meta["is_source_HDR"])
+            || JSONValueUtilities.boolValue(inheritedMeta?["is_source_HDR"])
         if combinedHDRText.contains("dolby") || combinedHDRText.contains("dovi") || combinedHDRText.contains("dvhe") {
             score += 3_000_000_000
         } else if isHDRText(combinedHDRText) {
@@ -2651,7 +2651,7 @@ enum DouyinNativeDownloader {
             score += 500_000_000
         }
         let parsedURLs = urls.compactMap { value -> URL? in
-            guard let url = URL(string: DownloaderInfra.formatURL(value)) else {
+            guard let url = URL(string: MediaFileUtilities.formatURL(value)) else {
                 return nil
             }
             let preferredURL = preferredDouyinPlaybackURL(url, width: width, height: height)
@@ -2806,7 +2806,7 @@ enum DouyinNativeDownloader {
                 let temporaryURL = task.destination.appendingPathExtension("part")
                 try await downloadOnceAsync(task.url, to: temporaryURL, progress: progress)
                 try validateDownloadedFile(temporaryURL, source: task.url)
-                let suffix = DownloaderInfra.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
+                let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                 let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                 try? FileManager.default.removeItem(at: finalURL)
                 try FileManager.default.moveItem(at: temporaryURL, to: finalURL)

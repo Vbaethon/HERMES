@@ -63,89 +63,34 @@ enum PairCollectionView {
         let scrollPosition = ThumbnailScrollPositionController()
         private var scrollToTopRequestID: Int
         private var isApplyingSelection = false
-        private var isApplyingAnimatedItems = false
-        private var pendingItems: [PairItem]?
+        private let updateState = ThumbnailCollectionUpdateState<PairItem>()
 
         init(scrollToTopRequestID: Int) {
             self.scrollToTopRequestID = scrollToTopRequestID
         }
 
         func handleScrollToTopRequest(_ newRequestID: Int) {
-            guard scrollToTopRequestID != newRequestID else { return }
-            scrollToTopRequestID = newRequestID
-            guard let collectionView else { return }
-            scrollPosition.scrollToDefaultStart(collectionView: collectionView)
+            ThumbnailCollectionCoordinatorUtilities.handleScrollToTopRequest(
+                currentRequestID: &scrollToTopRequestID,
+                newRequestID: newRequestID,
+                collectionView: collectionView,
+                scrollPosition: scrollPosition
+            )
         }
 
         func applyItems(_ newItems: [PairItem]) {
-            guard let collectionView else {
-                items = newItems
-                return
-            }
-            guard !isApplyingAnimatedItems else {
-                pendingItems = newItems
-                return
-            }
-
-            let oldIDs = items.map(\.id)
-            let newIDs = newItems.map(\.id)
-            guard oldIDs != newIDs else {
-                items = newItems
-                updateVisibleItems()
-                return
-            }
-
-            var workingIDs = oldIDs
-            let preservedScrollOriginY = scrollPosition.currentOriginY()
-
-            let deletedIndexPaths = Set(oldIDs.enumerated().compactMap { index, id in
-                newIDs.contains(id) ? nil : IndexPath(item: index, section: 0)
-            })
-            for indexPath in deletedIndexPaths.sorted(by: { $0.item > $1.item }) {
-                workingIDs.remove(at: indexPath.item)
-            }
-
-            var insertedIndexPaths = Set<IndexPath>()
-            for (index, id) in newIDs.enumerated() where !workingIDs.contains(id) {
-                workingIDs.insert(id, at: index)
-                insertedIndexPaths.insert(IndexPath(item: index, section: 0))
-            }
-
-            var moves: [(from: IndexPath, to: IndexPath)] = []
-            for (targetIndex, id) in newIDs.enumerated()
-                where workingIDs.indices.contains(targetIndex) && workingIDs[targetIndex] != id {
-                guard let sourceIndex = workingIDs.firstIndex(of: id) else { continue }
-                moves.append((
-                    from: IndexPath(item: sourceIndex, section: 0),
-                    to: IndexPath(item: targetIndex, section: 0)
-                ))
-                workingIDs.moveElement(from: sourceIndex, toOffset: targetIndex > sourceIndex ? targetIndex + 1 : targetIndex)
-            }
-
-            items = newItems
-            isApplyingAnimatedItems = true
-            NSAnimationContext.runAnimationGroup { context in
-                context.allowsImplicitAnimation = true
-                collectionView.performBatchUpdates {
-                    collectionView.deleteItems(at: deletedIndexPaths)
-                    collectionView.insertItems(at: insertedIndexPaths)
-                    for move in moves {
-                        collectionView.moveItem(at: move.from, to: move.to)
-                    }
-                } completionHandler: { [weak self] _ in
-                    guard let self else { return }
-                    self.isApplyingAnimatedItems = false
-                    self.updateVisibleItems()
-                    self.applySelection()
-                    self.scrollPosition.restore(to: preservedScrollOriginY)
-                    if let pendingItems = self.pendingItems {
-                        self.pendingItems = nil
-                        if self.items != pendingItems {
-                            self.applyItems(pendingItems)
-                        }
-                    }
-                }
-            }
+            ThumbnailCollectionCoordinatorUtilities.applyAnimatedItems(
+                currentItems: items,
+                newItems: newItems,
+                setItems: { [weak self] in self?.items = $0 },
+                currentItemsProvider: { [weak self] in self?.items ?? [] },
+                collectionView: collectionView,
+                scrollPosition: scrollPosition,
+                updateState: updateState,
+                performVisibleUpdate: { [weak self] in self?.updateVisibleItems() },
+                applySelection: { [weak self] in self?.applySelection() },
+                replay: { [weak self] pendingItems, _ in self?.applyItems(pendingItems) }
+            )
         }
 
         private func updateVisibleItems() {
@@ -163,32 +108,32 @@ enum PairCollectionView {
         }
 
         func applySelection() {
-            guard let collectionView else { return }
-            let selectedIDs = model?.selectedPairIDs ?? []
-            let indexPaths = ThumbnailCollectionSelection.indexPaths(for: items, selectedIDs: selectedIDs)
-            guard collectionView.selectionIndexPaths != indexPaths else { return }
-            isApplyingSelection = true
-            ThumbnailCollectionSelection.apply(indexPaths, to: collectionView)
-            isApplyingSelection = false
+            ThumbnailCollectionCoordinatorUtilities.applySelection(
+                items: items,
+                selectedIDs: model?.selectedPairIDs ?? [],
+                collectionView: collectionView,
+                isApplyingSelection: &isApplyingSelection
+            )
         }
 
         func syncSelection(from collectionView: NSCollectionView) {
-            guard !isApplyingSelection else { return }
-            model?.selectedPairIDs = ThumbnailCollectionSelection.selectedIDs(in: collectionView, items: items)
+            guard let selectedIDs = ThumbnailCollectionCoordinatorUtilities.selectedIDs(
+                in: collectionView,
+                items: items,
+                isApplyingSelection: isApplyingSelection
+            ) else { return }
+            model?.selectedPairIDs = selectedIDs
         }
 
         func contextMenu(for collectionView: NSCollectionView, event: NSEvent) -> NSMenu? {
-            guard ThumbnailCollectionSelection.selectClickedItemForContextMenu(
-                in: collectionView,
+            ThumbnailCollectionCoordinatorUtilities.contextMenu(
+                for: collectionView,
                 event: event,
                 itemCount: items.count,
                 syncSelection: { syncSelection(from: collectionView) },
-                applySelection: { applySelection() }
-            ) else {
-                return nil
-            }
-
-            return makeContextMenu()
+                applySelection: { applySelection() },
+                makeMenu: { makeContextMenu() }
+            )
         }
 
         private func makeContextMenu() -> NSMenu? {
@@ -288,17 +233,21 @@ enum PairCollectionView {
         }
 
         func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
-            for indexPath in indexPaths {
-                (collectionView.item(at: indexPath) as? ThumbnailCollectionItem)?.setSelectedAppearance(true)
-            }
-            syncSelection(from: collectionView)
+            ThumbnailCollectionCoordinatorUtilities.updateSelectionAppearance(
+                in: collectionView,
+                at: indexPaths,
+                isSelected: true,
+                syncSelection: { syncSelection(from: collectionView) }
+            )
         }
 
         func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
-            for indexPath in indexPaths {
-                (collectionView.item(at: indexPath) as? ThumbnailCollectionItem)?.setSelectedAppearance(false)
-            }
-            syncSelection(from: collectionView)
+            ThumbnailCollectionCoordinatorUtilities.updateSelectionAppearance(
+                in: collectionView,
+                at: indexPaths,
+                isSelected: false,
+                syncSelection: { syncSelection(from: collectionView) }
+            )
         }
     }
 }
