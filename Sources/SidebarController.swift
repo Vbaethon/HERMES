@@ -261,12 +261,13 @@ private final class FinderSidebarCellView: NSTableCellView {
         )
         let symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
         symbolImage?.isTemplate = true
-        symbolView.image = symbolImage?.withSymbolConfiguration(symbolConfiguration) ?? symbolImage
+        symbolView.symbolConfiguration = symbolConfiguration
+        symbolView.image = symbolImage
         symbolView.contentTintColor = .controlAccentColor
         titleField.stringValue = title
         titleField.font = titleFont
         countField.font = countFont
-        updateSymbolMetrics()
+        updateSymbolMetrics(pointSize: titleFont.pointSize)
 
         if let count {
             countField.stringValue = count.formatted()
@@ -304,9 +305,9 @@ private final class FinderSidebarCellView: NSTableCellView {
         }
     }
 
-    private func updateSymbolMetrics() {
-        let imageSize = symbolView.image?.size ?? NSSize(width: 16, height: 16)
-        symbolWidthConstraint?.constant = ceil(imageSize.width)
-        symbolHeightConstraint?.constant = ceil(imageSize.height)
+    private func updateSymbolMetrics(pointSize: CGFloat) {
+        let dimension = ceil(pointSize)
+        symbolWidthConstraint?.constant = dimension
+        symbolHeightConstraint?.constant = dimension
     }
 }
