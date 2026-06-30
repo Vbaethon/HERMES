@@ -900,6 +900,7 @@ final class ImporterModel: ObservableObject {
                     return
                 }
                 self.applyDownloadedItems(scannedItems)
+                self.cleanupEmptyDownloadFolders()
             } while self.needsAnotherDownloadRefresh
             self.isRefreshingDownloads = false
         }
@@ -926,6 +927,39 @@ final class ImporterModel: ObservableObject {
         downloadStatusText = itemCount == 0
             ? "输入分享链接开始下载。"
             : "已识别 \(itemCount) 个素材，已合成 \(composedCount) 组。"
+    }
+
+    private func cleanupEmptyDownloadFolders() {
+        let folder = downloadOutputFolder
+        let composedFolder = downloadComposedFolder
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var directories: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.hasDirectoryPath else { continue }
+            let standardized = url.standardizedFileURL
+            let composedStandardized = composedFolder.standardizedFileURL
+            if standardized == composedStandardized || standardized.path.hasPrefix(composedStandardized.path + "/") {
+                enumerator.skipDescendants()
+                continue
+            }
+            directories.append(url)
+        }
+
+        // 按路径深度倒序（最深优先），确保子目录先处理
+        directories.sort { $0.path.components(separatedBy: "/").count > $1.path.components(separatedBy: "/").count }
+
+        for dir in directories {
+            if let contents = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles),
+               contents.isEmpty {
+                Self.moveToTrash(dir)
+            }
+        }
     }
 
     func processDownloadPairs() async {

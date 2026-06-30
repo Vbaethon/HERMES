@@ -46,6 +46,7 @@
 		111111111111111111111140 /* NativePanelPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104F /* NativePanelPresenter.swift */; };
 		111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111050 /* DownloaderNetworkPolicy.swift */; };
 		111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */; };
+		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -114,6 +115,7 @@
 		11111111111111111111104F /* NativePanelPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativePanelPresenter.swift; sourceTree = "<group>"; };
 		111111111111111111111050 /* DownloaderNetworkPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderNetworkPolicy.swift; sourceTree = "<group>"; };
 		111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuPlaybackLogVideoExtractor.swift; sourceTree = "<group>"; };
+		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -178,6 +180,7 @@
 				111111111111111111111047 /* DownloaderInfra.swift */,
 				111111111111111111111050 /* DownloaderNetworkPolicy.swift */,
 				111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */,
+				111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */,
 				111111111111111111111048 /* JSONValueUtilities.swift */,
 				111111111111111111111049 /* MediaFileUtilities.swift */,
 			);
@@ -368,6 +371,7 @@
 				111111111111111111111138 /* DownloaderInfra.swift in Sources */,
 				111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */,
 				111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */,
+				111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */,
 				111111111111111111111139 /* JSONValueUtilities.swift in Sources */,
 				11111111111111111111113A /* MediaFileUtilities.swift in Sources */,
 

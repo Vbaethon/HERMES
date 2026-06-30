@@ -25,4 +25,10 @@ final class DewuPlaybackLogTests: XCTestCase {
             hasShareVideoURLs: false
         ))
     }
+
+    func testContinuesToVideoStageAfterStaticImageFailureWhenVideoIsPossible() {
+        XCTAssertTrue(DewuDownloadRecoveryPolicy.shouldContinueAfterStaticImageFailure(canStillReachVideoStage: true))
+        XCTAssertFalse(DewuDownloadRecoveryPolicy.shouldFailAfterStaticImageFailure(downloadedVideoCount: 1))
+        XCTAssertTrue(DewuDownloadRecoveryPolicy.shouldFailAfterStaticImageFailure(downloadedVideoCount: 0))
+    }
 }

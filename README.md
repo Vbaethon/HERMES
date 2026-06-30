@@ -50,6 +50,7 @@ or attaches logs/debug tooling depending on the selected mode.
 
 ## 更新说明
 
+- 2026-06-30: 得物混合图文帖下载时，静态图失败不再阻断后续 Live Photo 视频解析和下载。
 - 2026-06-30: 修复得物 Live Photo 下载在详情接口无视频时过早停止的问题，继续读取 App 播放日志补齐伴随视频。
 - 2026-06-30: 下载网络层新增直连策略，禁用系统代理配置，过滤 DoH 假 IP/内网 IP，并在受保护域名 404 时走兼容解析兜底。
 - 2026-06-30: 缩略图取消 HERMES 自己的成功/失败缓存，改为每次请求 Quick Look 系统缩略图结果。

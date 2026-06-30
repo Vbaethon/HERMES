@@ -8,7 +8,10 @@ enum DewuPlaybackLogVideoExtractor {
         let pattern = #"https?://video-cdn-auth(?:-[a-z]+)?\.dewu\.com/[^\s"'<>]+?\.mp4\?auth_key=[^\s"'<>]+"#
         for match in allMatches(pattern, in: decoded) {
             let cleaned = String(match.trimmingCharacters(in: CharacterSet(charactersIn: ",);]}\"")))
-            guard let url = URL(string: cleaned) else { continue }
+            let urlString = cleaned
+                .replacingOccurrences(of: "\\u002F", with: "/")
+                .replacingOccurrences(of: "\\/", with: "/")
+            guard let url = URL(string: urlString) else { continue }
             let key = url.path
             if seen.insert(key).inserted {
                 urls.append(url)
@@ -33,6 +36,7 @@ enum DewuPlaybackLogVideoExtractor {
 
     private static func decodeLogText(_ text: String) -> String {
         text
+            .replacingOccurrences(of: "\\u002F", with: "/")
             .replacingOccurrences(of: "\\/", with: "/")
             .replacingOccurrences(of: "&amp;", with: "&")
             .replacingOccurrences(of: "&quot;", with: "\"")
