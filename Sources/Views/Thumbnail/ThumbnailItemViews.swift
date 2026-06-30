@@ -20,9 +20,11 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.layer?.backgroundColor = NSColor.clear.cgColor
 
         let imageView = ThumbnailImageView(frame: rootView.bounds)
-        imageView.imageFrameStyle = .photo
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.imageAlignment = .alignCenter
+        imageView.wantsLayer = true
+        imageView.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
+        imageView.layer?.cornerCurve = .continuous
+        imageView.layer?.masksToBounds = true
 
         rootView.addSubview(imageView)
         rootView.imageView = imageView
@@ -50,7 +52,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.addSubview(badgeLabel)
         rootView.badgeLabel = badgeLabel
         rootView.onEffectiveAppearanceChanged = { [weak self] in
-            self?.updateBorderAppearance()
+            self?.updateBorderAppearance(isSelected: self?.isSelected ?? false)
         }
         view = rootView
     }
@@ -63,23 +65,19 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask = nil
         representedURL = nil
         imageView?.image = nil
+        imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
+        thumbnailView?.updateImageFrame(for: nil)
     }
 
     override var isSelected: Bool {
         didSet {
-            updateBorderAppearance()
-        }
-    }
-
-    override var highlightState: NSCollectionViewItem.HighlightState {
-        didSet {
-            updateBorderAppearance()
+            updateBorderAppearance(isSelected: isSelected)
         }
     }
 
     func setSelectedAppearance(_ selected: Bool) {
-        thumbnailView?.setRingState(ringState(isSelected: selected))
+        updateBorderAppearance(isSelected: selected)
     }
 
     func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo) {
@@ -87,7 +85,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             thumbnailStatus = status
             self.mediaKind = mediaKind
             loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
-            updateBorderAppearance()
+            updateBorderAppearance(isSelected: isSelected)
             view.toolTip = url.lastPathComponent
             if imageView?.image == nil, thumbnailTask == nil {
                 startThumbnailLoad(for: url)
@@ -103,16 +101,26 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         representedURL = url
         thumbnailStatus = status
         self.mediaKind = mediaKind
-        imageView?.image = nil
+        let cachedImage = SystemThumbnailProvider.shared.cachedThumbnail(for: url)
+        if let cachedImage {
+            showLoadedThumbnail(cachedImage, animated: true)
+        } else {
+            imageView?.alphaValue = 0
+            imageView?.image = nil
+            thumbnailView?.updateImageFrame(for: nil)
+        }
         loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
-        updateBorderAppearance()
+        updateBorderAppearance(isSelected: isSelected)
         view.toolTip = url.lastPathComponent
+
+        guard cachedImage == nil else { return }
         startThumbnailLoad(for: url)
     }
 
     private func startThumbnailLoad(for url: URL) {
         thumbnailTask?.cancel()
         thumbnailTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
             let image = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,
@@ -121,14 +129,28 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.representedURL == url, !Task.isCancelled else { return }
-                self.showLoadedThumbnail(image)
+                let shouldFadeIn = self.imageView?.image == nil
+                self.showLoadedThumbnail(image, animated: shouldFadeIn)
             }
         }
     }
 
     @MainActor
-    private func showLoadedThumbnail(_ image: NSImage) {
-        imageView?.image = image
+    private func showLoadedThumbnail(_ image: NSImage, animated: Bool) {
+        guard let imageView else { return }
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            imageView.alphaValue = 0
+            imageView.image = image
+            thumbnailView?.updateImageFrame(for: image)
+            NSAnimationContext.runAnimationGroup { context in
+                context.allowsImplicitAnimation = true
+                imageView.animator().alphaValue = 1
+            }
+        } else {
+            imageView.image = image
+            thumbnailView?.updateImageFrame(for: image)
+            imageView.alphaValue = 1
+        }
     }
 
     private func loadBadgeIfNeeded(for url: URL, mediaKind: ThumbnailMediaKind) {
@@ -144,6 +166,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
         badgeTask?.cancel()
         badgeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(320))
             guard !Task.isCancelled else { return }
             let durationText = await loadVideoDurationText(from: url)
             guard !Task.isCancelled else { return }
@@ -154,17 +177,13 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         }
     }
 
-    private func updateBorderAppearance() {
-        thumbnailView?.setRingState(ringState(isSelected: isSelected))
-    }
-
-    private func ringState(isSelected: Bool) -> ThumbnailStateRing {
-        if isSelected || highlightState != .none {
-            return .selected
+    private func updateBorderAppearance(isSelected: Bool) {
+        if isSelected {
+            thumbnailView?.setRingState(.selected)
         } else if thumbnailStatus == .failed {
-            return .failed
+            thumbnailView?.setRingState(.failed)
         } else {
-            return .none
+            thumbnailView?.setRingState(.none)
         }
     }
 }
@@ -215,22 +234,14 @@ final class ThumbnailStateRingView: NSView {
         guard let layer else { return }
         switch state {
         case .selected:
-            layer.borderColor = resolvedBorderColor(
-                activeColor: .selectedContentBackgroundColor,
-                inactiveColor: .unemphasizedSelectedContentBackgroundColor
-            ).cgColor
+            layer.borderColor = (window?.isKeyWindow == true)
+                ? NSColor.selectedContentBackgroundColor.cgColor
+                : NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
         case .failed:
-            layer.borderColor = resolvedBorderColor(activeColor: .systemRed).cgColor
+            layer.borderColor = NSColor.systemRed.cgColor
         case .none:
             break
         }
-    }
-
-    private func resolvedBorderColor(activeColor: NSColor, inactiveColor: NSColor? = nil) -> NSColor {
-        guard window?.isKeyWindow != true else {
-            return activeColor
-        }
-        return inactiveColor ?? activeColor.withSystemEffect(.disabled)
     }
 }
 
@@ -286,15 +297,27 @@ final class ThumbnailItemView: NSView {
 
     override func layout() {
         super.layout()
-        updateImageFrame()
+        updateImageFrame(for: imageView?.image)
         updateBadgeFrames()
     }
 
-    private func updateImageFrame() {
+    func updateImageFrame(for image: NSImage?) {
         guard let imageView else { return }
-        let frame = bounds
-        imageView.frame = frame
+        guard let image, image.size.width > 0, image.size.height > 0 else {
+            interactiveFrame = .zero
+            imageView.frame = .zero
+            ringView?.frame = .zero
+            updateBadgeFrames()
+            return
+        }
+
+        let maxSide = min(bounds.width, bounds.height)
+        let scale = min(maxSide / image.size.width, maxSide / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        let frame = NSRect(origin: origin, size: size)
         interactiveFrame = frame
+        imageView.frame = frame
         updateRingFrame()
         updateBadgeFrames()
     }

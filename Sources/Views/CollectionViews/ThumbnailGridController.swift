@@ -73,19 +73,19 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
 
     func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true) {
         let oldItemsByID = itemByID
-        let changedItemIDs = newItems.compactMap { item -> String? in
-            guard let oldItem = oldItemsByID[item.id], oldItem != item else { return nil }
-            return item.id
-        }
         itemByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         items = newItems
+
+        for item in newItems {
+            if let oldItem = oldItemsByID[item.id],
+               oldItem.url != item.url || oldItem.contentVersion != item.contentVersion {
+                SystemThumbnailProvider.shared.invalidate(item.url)
+            }
+        }
 
         var snapshot = NSDiffableDataSourceSnapshot<String, String>()
         snapshot.appendSections([Section.main])
         snapshot.appendItems(newItems.map(\.id), toSection: Section.main)
-        if !changedItemIDs.isEmpty {
-            snapshot.reloadItems(changedItemIDs)
-        }
 
         let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
