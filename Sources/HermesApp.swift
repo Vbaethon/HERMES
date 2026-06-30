@@ -110,6 +110,14 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         let composeItem = NSMenuItem(title: "合成 Live Photo", action: #selector(startImport(_:)), keyEquivalent: "\r")
         composeItem.target = self
         fileMenu.addItem(composeItem)
+        fileMenu.addItem(.separator())
+        let openFolderItem = NSMenuItem(title: "打开当前文件夹", action: #selector(openCurrentFolder(_:)), keyEquivalent: "o")
+        openFolderItem.keyEquivalentModifierMask = [.command, .shift]
+        openFolderItem.target = self
+        fileMenu.addItem(openFolderItem)
+        let chooseFolderItem = NSMenuItem(title: "选择当前文件夹...", action: #selector(chooseCurrentFolder(_:)), keyEquivalent: "")
+        chooseFolderItem.target = self
+        fileMenu.addItem(chooseFolderItem)
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
@@ -125,38 +133,31 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
         editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
 
-        let navMenuItem = NSMenuItem()
-        mainMenu.addItem(navMenuItem)
-        let navMenu = NSMenu(title: "导航")
-        navMenuItem.submenu = navMenu
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: "显示")
+        viewMenuItem.submenu = viewMenu
         let queueItem = NSMenuItem(title: "开始", action: #selector(selectQueue(_:)), keyEquivalent: "1")
         queueItem.target = self
-        navMenu.addItem(queueItem)
+        viewMenu.addItem(queueItem)
         let downloadsItem = NSMenuItem(title: "下载器", action: #selector(selectDownloads(_:)), keyEquivalent: "2")
         downloadsItem.target = self
-        navMenu.addItem(downloadsItem)
+        viewMenu.addItem(downloadsItem)
         let completedItem = NSMenuItem(title: "已完成", action: #selector(selectCompleted(_:)), keyEquivalent: "3")
         completedItem.target = self
-        navMenu.addItem(completedItem)
-
-        let actionMenuItem = NSMenuItem()
-        mainMenu.addItem(actionMenuItem)
-        let actionMenu = NSMenu(title: "操作")
-        actionMenuItem.submenu = actionMenu
+        viewMenu.addItem(completedItem)
+        viewMenu.addItem(.separator())
         let refreshItem = NSMenuItem(title: "刷新当前页面", action: #selector(refreshCurrentPage(_:)), keyEquivalent: "r")
         refreshItem.target = self
-        actionMenu.addItem(refreshItem)
-        let openFolderItem = NSMenuItem(title: "打开当前文件夹", action: #selector(openCurrentFolder(_:)), keyEquivalent: "o")
-        openFolderItem.keyEquivalentModifierMask = [.command, .shift]
-        openFolderItem.target = self
-        actionMenu.addItem(openFolderItem)
-        let chooseFolderItem = NSMenuItem(title: "选择当前文件夹...", action: #selector(chooseCurrentFolder(_:)), keyEquivalent: "")
-        chooseFolderItem.target = self
-        actionMenu.addItem(chooseFolderItem)
-        actionMenu.addItem(.separator())
+        viewMenu.addItem(refreshItem)
+
+        let toolsMenuItem = NSMenuItem()
+        mainMenu.addItem(toolsMenuItem)
+        let toolsMenu = NSMenu(title: "工具")
+        toolsMenuItem.submenu = toolsMenu
         let clearCookieItem = NSMenuItem(title: "清除小红书 Cookie", action: #selector(clearXHSCookie(_:)), keyEquivalent: "")
         clearCookieItem.target = self
-        actionMenu.addItem(clearCookieItem)
+        toolsMenu.addItem(clearCookieItem)
 
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
