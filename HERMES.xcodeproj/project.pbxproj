@@ -43,6 +43,7 @@
 		11111111111111111111113D /* ThumbnailGridController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104C /* ThumbnailGridController.swift */; };
 		11111111111111111111113E /* SystemThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104D /* SystemThumbnailProvider.swift */; };
 		11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104E /* SystemWindowBackgroundController.swift */; };
+		111111111111111111111140 /* NativePanelPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104F /* NativePanelPresenter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -108,6 +109,7 @@
 		11111111111111111111104C /* ThumbnailGridController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridController.swift; sourceTree = "<group>"; };
 		11111111111111111111104D /* SystemThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/SystemThumbnailProvider.swift; sourceTree = "<group>"; };
 		11111111111111111111104E /* SystemWindowBackgroundController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/SystemWindowBackgroundController.swift; sourceTree = "<group>"; };
+		11111111111111111111104F /* NativePanelPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativePanelPresenter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -152,6 +154,7 @@
 				11111111111111111111104C /* ThumbnailGridController.swift */,
 				111111111111111111111034 /* MainWindowController.swift */,
 				111111111111111111111035 /* NativeWindowToolbarController.swift */,
+				11111111111111111111104F /* NativePanelPresenter.swift */,
 				111111111111111111111036 /* PageControllers.swift */,
 				11111111111111111111104E /* SystemWindowBackgroundController.swift */,
 				111111111111111111111037 /* ThumbnailItemViews.swift */,
@@ -349,6 +352,7 @@
 				111111111111111111111132 /* CompletedCollectionView.swift in Sources */,
 				111111111111111111111133 /* MainWindowController.swift in Sources */,
 				111111111111111111111134 /* NativeWindowToolbarController.swift in Sources */,
+				111111111111111111111140 /* NativePanelPresenter.swift in Sources */,
 				111111111111111111111135 /* PageControllers.swift in Sources */,
 				11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */,
 				111111111111111111111136 /* ThumbnailItemViews.swift in Sources */,

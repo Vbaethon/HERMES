@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import SQLite3
 
@@ -17,26 +16,11 @@ enum DewuLogStore {
         return roots.sorted { FileSystemUtilities.modificationDate($0) > FileSystemUtilities.modificationDate($1) }
     }
 
-    @MainActor
-    static func authorizeDataRootIfNeeded() -> Bool {
-        if !dataRoots().isEmpty {
-            return true
-        }
+    static func hasDataRootAccess() -> Bool {
+        !dataRoots().isEmpty
+    }
 
-        let panel = NSOpenPanel()
-        panel.title = "选择得物数据文件夹"
-        panel.message = "请选择得物容器里的 Data 文件夹，用于读取本机日志中的 Live Photo 视频记录。"
-        panel.prompt = "授权"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers", isDirectory: true)
-
-        guard panel.runModal() == .OK, let selectedURL = panel.url?.standardizedFileURL else {
-            return false
-        }
-
+    static func authorizeDataRoot(_ selectedURL: URL) -> Bool {
         guard let dataRoot = normalizedDataRoot(from: selectedURL), viableDataRoot(at: dataRoot) != nil else {
             return false
         }

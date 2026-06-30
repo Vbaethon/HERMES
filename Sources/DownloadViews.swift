@@ -395,6 +395,7 @@ final class CircularGlassIconButton: NSView {
 @MainActor
 final class DownloadBarView: NSView {
     private let model: ImporterModel
+    private let startDownload: () -> Void
     private let glassSurface: NSView
     private let contentHost = NSView()
     private var textContainer: DownloadShareTextContainerView?
@@ -404,8 +405,9 @@ final class DownloadBarView: NSView {
     private var textInputHeightConstraint: NSLayoutConstraint?
     private var focusRequestID = 0
 
-    init(model: ImporterModel) {
+    init(model: ImporterModel, startDownload: @escaping () -> Void) {
         self.model = model
+        self.startDownload = startDownload
         self.glassSurface = Self.makeGlassSurface()
         super.init(frame: .zero)
         setupGlassSurface()
@@ -528,7 +530,7 @@ final class DownloadBarView: NSView {
     }
 
     @objc private func startDownload(_ sender: Any?) {
-        Task { await model.downloadShare() }
+        startDownload()
     }
 }
 
@@ -1023,10 +1025,10 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
     private var coordinator: DownloadCollectionView.Coordinator?
     private var cancellables = Set<AnyCancellable>()
 
-    init(model: ImporterModel) {
+    init(model: ImporterModel, startDownload: @escaping () -> Void) {
         self.model = model
         self.emptyView = EmptyStateView(title: "还没有下载内容", symbolName: AppSymbol.download.normal, message: model.downloadStatusText)
-        self.downloadBar = DownloadBarView(model: model)
+        self.downloadBar = DownloadBarView(model: model, startDownload: startDownload)
         super.init(nibName: nil, bundle: nil)
     }
 

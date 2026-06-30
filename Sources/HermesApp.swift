@@ -165,6 +165,7 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     static let openImportPanel = Notification.Name("OpenImportPanel")
     static let startImport = Notification.Name("StartImport")
+    static let startDownload = Notification.Name("StartDownload")
     static let selectSidebarSection = Notification.Name("SelectSidebarSection")
     static let refreshCurrentPage = Notification.Name("RefreshCurrentPage")
     static let openCurrentFolder = Notification.Name("OpenCurrentFolder")

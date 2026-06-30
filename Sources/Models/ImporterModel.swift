@@ -108,6 +108,10 @@ final class ImporterModel: ObservableObject {
     @Published var downloadStatusText = "输入分享链接开始下载。"
     @Published private(set) var downloadProgressItems: [DownloadProgressItem] = []
     @Published private(set) var downloadInputResetID = 0
+    var needsDewuLogAccessForCurrentDownload: Bool {
+        let shareText = downloadShareText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.shouldPrepareDewuLogAccess(for: shareText) && !DewuLogStore.hasDataRootAccess()
+    }
 
     private var isRefreshingCompleted = false
     private var importedCompletedStems = Set<String>()
@@ -368,25 +372,8 @@ final class ImporterModel: ObservableObject {
         }
     }
 
-    func chooseFiles() {
-        let panel = NSOpenPanel()
-        panel.title = "选择照片、视频或文件夹"
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-        if panel.runModal() == .OK {
-            addFiles(panel.urls)
-        }
-    }
-
-    func chooseOutputFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "选择新的导出位置"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let parentFolder = panel.url {
-            moveOutputFolder(to: parentFolder)
-        }
+    func selectOutputParentFolder(_ parentFolder: URL) {
+        moveOutputFolder(to: parentFolder)
     }
 
     private func authorizedOutputFolderForUserAction() -> URL? {
@@ -725,24 +712,17 @@ final class ImporterModel: ObservableObject {
         NSWorkspace.shared.open(folder)
     }
 
-    func chooseDownloadOutputFolder() {
+    func selectDownloadOutputFolder(_ folder: URL) {
         guard !isDownloading, !isProcessingDownloads else { return }
-        let panel = NSOpenPanel()
-        panel.title = "选择下载文件夹"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let folder = panel.url {
-            let standardizedFolder = folder.standardizedFileURL
-            let didChooseNewFolder = downloadOutputFolder.standardizedFileURL != standardizedFolder
-            downloadOutputFolder = standardizedFolder
-            Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
-            if didChooseNewFolder {
-                Self.clearThumbnailCaches()
-            }
-            refreshDownloads()
-            downloadStatusText = "下载文件夹已设置为“\(downloadOutputFolder.path)”。"
+        let standardizedFolder = folder.standardizedFileURL
+        let didChooseNewFolder = downloadOutputFolder.standardizedFileURL != standardizedFolder
+        downloadOutputFolder = standardizedFolder
+        Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
+        if didChooseNewFolder {
+            Self.clearThumbnailCaches()
         }
+        refreshDownloads()
+        downloadStatusText = "下载文件夹已设置为“\(downloadOutputFolder.path)”。"
     }
 
     func downloadShare() async {
@@ -758,7 +738,7 @@ final class ImporterModel: ObservableObject {
             return
         }
         guard let outputRoot = authorizedDownloadOutputFolderForUserAction() else { return }
-        if Self.shouldPrepareDewuLogAccess(for: shareText), !DewuLogStore.authorizeDataRootIfNeeded() {
+        if Self.shouldPrepareDewuLogAccess(for: shareText), !DewuLogStore.hasDataRootAccess() {
             downloadStatusText = "未授权得物日志文件夹，将只使用分享页公开媒体。"
         }
         let task = DownloadQueueTask(

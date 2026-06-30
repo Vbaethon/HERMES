@@ -15,10 +15,10 @@ final class DetailPagesController: NSViewController {
     private var activeSelection: SidebarSection?
     private var cancellables = Set<AnyCancellable>()
 
-    init(model: ImporterModel) {
+    init(model: ImporterModel, startDownload: @escaping () -> Void) {
         self.model = model
         self.queueController = QueuePageController(model: model)
-        self.downloadController = DownloadPageController(model: model)
+        self.downloadController = DownloadPageController(model: model, startDownload: startDownload)
         self.completedController = CompletedPageController(model: model)
         super.init(nibName: nil, bundle: nil)
     }
@@ -36,14 +36,7 @@ final class DetailPagesController: NSViewController {
         super.viewDidLoad()
         for controller in [queueController, downloadController, completedController] {
             addChild(controller)
-            controller.view.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(controller.view)
-            NSLayoutConstraint.activate([
-                controller.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                controller.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                controller.view.topAnchor.constraint(equalTo: view.topAnchor),
-                controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-            ])
+            view.addPinnedSubview(controller.view)
         }
         for controller in thumbnailPageControllers {
             controller.setVisible(false)
@@ -90,6 +83,19 @@ final class DetailPagesController: NSViewController {
 
     private var thumbnailPageControllers: [any ThumbnailPageController] {
         [queueController, downloadController, completedController]
+    }
+}
+
+private extension NSView {
+    func addPinnedSubview(_ subview: NSView) {
+        subview.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(subview)
+        NSLayoutConstraint.activate([
+            subview.leadingAnchor.constraint(equalTo: leadingAnchor),
+            subview.trailingAnchor.constraint(equalTo: trailingAnchor),
+            subview.topAnchor.constraint(equalTo: topAnchor),
+            subview.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
     }
 }
 

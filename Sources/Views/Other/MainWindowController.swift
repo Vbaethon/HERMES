@@ -34,14 +34,18 @@ final class MainWindowController: NSWindowController {
                 }
             }
         )
-        detailController = DetailPagesController(model: model)
+        detailController = DetailPagesController(model: model) {
+            NotificationCenter.default.post(name: .startDownload, object: nil)
+        }
         toolbarController = NativeWindowToolbarController(
             model: model,
             windowTitle: "HERMES",
             windowSubtitle: model.queueSubtitle,
             clearQueue: { [model] in model.clear() },
             clearCompleted: {},
-            clearDownloads: {}
+            clearDownloads: {},
+            presentImportPanel: {},
+            presentFolderChooser: {}
         )
 
         let window = NSWindow(contentViewController: splitViewController)
@@ -55,6 +59,8 @@ final class MainWindowController: NSWindowController {
 
         toolbarController.clearCompleted = { [weak self] in self?.presentCompletedClearConfirmation() }
         toolbarController.clearDownloads = { [weak self] in self?.presentDownloadClearConfirmation() }
+        toolbarController.presentImportPanel = { [weak self] in self?.presentImportPanel() }
+        toolbarController.presentFolderChooser = { [weak self] in self?.chooseCurrentFolder() }
         configureSplitView()
         configureWindow()
         bindModel()
@@ -223,11 +229,14 @@ final class MainWindowController: NSWindowController {
     private func installNotifications() {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .openImportPanel, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.model.chooseFiles() }
+            Task { @MainActor in self?.presentImportPanel() }
         })
         observers.append(center.addObserver(forName: .startImport, object: nil, queue: .main) { [weak self] _ in
             guard let model = self?.model else { return }
             Task { await model.processPairs() }
+        })
+        observers.append(center.addObserver(forName: .startDownload, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.startDownload() }
         })
         observers.append(center.addObserver(forName: .selectSidebarSection, object: nil, queue: .main) { [weak self] notification in
             guard let self, let section = notification.object as? SidebarSection else { return }
@@ -294,6 +303,19 @@ final class MainWindowController: NSWindowController {
         }
     }
 
+    private func presentImportPanel() {
+        guard let urls = NativePanelPresenter.chooseImportURLs() else { return }
+        model.addFiles(urls)
+    }
+
+    private func startDownload() {
+        if model.needsDewuLogAccessForCurrentDownload,
+           let dataRoot = NativePanelPresenter.chooseDewuDataRoot() {
+            _ = DewuLogStore.authorizeDataRoot(dataRoot)
+        }
+        Task { await model.downloadShare() }
+    }
+
     private func openCurrentFolder() {
         switch model.selection ?? .queue {
         case .queue:
@@ -308,11 +330,14 @@ final class MainWindowController: NSWindowController {
     private func chooseCurrentFolder() {
         switch model.selection ?? .queue {
         case .queue:
-            model.chooseOutputFolder()
+            guard let folder = NativePanelPresenter.chooseOutputParentFolder() else { return }
+            model.selectOutputParentFolder(folder)
         case .downloads:
-            model.chooseDownloadOutputFolder()
+            guard let folder = NativePanelPresenter.chooseDownloadOutputFolder() else { return }
+            model.selectDownloadOutputFolder(folder)
         case .completed:
-            model.chooseOutputFolder()
+            guard let folder = NativePanelPresenter.chooseOutputParentFolder() else { return }
+            model.selectOutputParentFolder(folder)
         }
     }
 
@@ -340,74 +365,42 @@ final class MainWindowController: NSWindowController {
     }
 
     private func presentCompletedClearConfirmation() {
-        let alert = NSAlert()
-        alert.messageText = completedClearAlertTitle
-        alert.informativeText = completedClearAlertMessage
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: completedClearPrimaryButtonTitle)
-        alert.addButton(withTitle: "同时移到废纸篓")
-        alert.addButton(withTitle: "取消")
-
-        if alert.buttons.indices.contains(1) {
-            alert.buttons[1].hasDestructiveAction = true
-        }
-
-        if let cancelButton = alert.buttons.last {
-            cancelButton.keyEquivalent = "\u{1b}"
-        }
-
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            switch response {
-            case .alertFirstButtonReturn:
+        NativePanelPresenter.presentDestructiveConfirmation(
+            in: window,
+            title: completedClearAlertTitle,
+            message: completedClearAlertMessage,
+            primaryButtonTitle: completedClearPrimaryButtonTitle
+        ) { [weak self] choice in
+            guard let self else { return }
+            switch choice {
+            case .primary:
                 self.model.clearVisibleCompleted(deleteFiles: false)
-            case .alertSecondButtonReturn:
+            case .deleteFiles:
                 self.model.clearVisibleCompleted(deleteFiles: true)
-            default:
+            case .cancel:
                 break
             }
-        }
-
-        if let window = NSApp.keyWindow {
-            alert.beginSheetModal(for: window, completionHandler: handleResponse)
-        } else {
-            handleResponse(alert.runModal())
         }
     }
 
     private func presentDownloadClearConfirmation() {
-        let alert = NSAlert()
-        alert.messageText = downloadClearTargetsSelection ? "确定要删除选中的照片吗？" : "确定要清空吗？"
-        alert.informativeText = downloadClearTargetsSelection
-            ? "删除会移除选中照片的记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。"
-            : "清空会移除当前筛选中的全部记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: downloadClearTargetsSelection ? "删除" : "清空")
-        alert.addButton(withTitle: "同时移到废纸篓")
-        alert.addButton(withTitle: "取消")
-
-        if alert.buttons.indices.contains(1) {
-            alert.buttons[1].hasDestructiveAction = true
-        }
-
-        if let cancelButton = alert.buttons.last {
-            cancelButton.keyEquivalent = "\u{1b}"
-        }
-
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            switch response {
-            case .alertFirstButtonReturn:
+        NativePanelPresenter.presentDestructiveConfirmation(
+            in: window,
+            title: downloadClearTargetsSelection ? "确定要删除选中的照片吗？" : "确定要清空吗？",
+            message: downloadClearTargetsSelection
+                ? "删除会移除选中照片的记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。"
+                : "清空会移除当前筛选中的全部记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。",
+            primaryButtonTitle: downloadClearTargetsSelection ? "删除" : "清空"
+        ) { [weak self] choice in
+            guard let self else { return }
+            switch choice {
+            case .primary:
                 self.model.clearVisibleDownloads(deleteFiles: false)
-            case .alertSecondButtonReturn:
+            case .deleteFiles:
                 self.model.clearVisibleDownloads(deleteFiles: true)
-            default:
+            case .cancel:
                 break
             }
-        }
-
-        if let window = NSApp.keyWindow {
-            alert.beginSheetModal(for: window, completionHandler: handleResponse)
-        } else {
-            handleResponse(alert.runModal())
         }
     }
 

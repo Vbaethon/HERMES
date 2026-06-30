@@ -9,6 +9,8 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
     let clearQueue: () -> Void
     var clearCompleted: () -> Void
     var clearDownloads: () -> Void
+    var presentImportPanel: () -> Void
+    var presentFolderChooser: () -> Void
 
     private enum ID {
         static let toolbar = "HermesNativeToolbar"
@@ -42,13 +44,24 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             var downloadFilter: DownloadFilter
         }
 
-    init(model: ImporterModel, windowTitle: String, windowSubtitle: String, clearQueue: @escaping () -> Void, clearCompleted: @escaping () -> Void, clearDownloads: @escaping () -> Void) {
+    init(
+        model: ImporterModel,
+        windowTitle: String,
+        windowSubtitle: String,
+        clearQueue: @escaping () -> Void,
+        clearCompleted: @escaping () -> Void,
+        clearDownloads: @escaping () -> Void,
+        presentImportPanel: @escaping () -> Void,
+        presentFolderChooser: @escaping () -> Void
+    ) {
         self.model = model
         self.windowTitle = windowTitle
         self.windowSubtitle = windowSubtitle
         self.clearQueue = clearQueue
         self.clearCompleted = clearCompleted
         self.clearDownloads = clearDownloads
+        self.presentImportPanel = presentImportPanel
+        self.presentFolderChooser = presentFolderChooser
         super.init()
     }
 
@@ -438,12 +451,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         @objc private func chooseFolder(_ sender: Any?) {
-            switch model.selection ?? .queue {
-            case .queue, .completed:
-                model.chooseOutputFolder()
-            case .downloads:
-                model.chooseDownloadOutputFolder()
-            }
+            presentFolderChooser()
         }
 
         @objc private func clear(_ sender: Any?) {
@@ -458,7 +466,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         @objc private func addFiles(_ sender: Any?) {
-            model.chooseFiles()
+            presentImportPanel()
         }
 
         @objc private func compose(_ sender: Any?) {
