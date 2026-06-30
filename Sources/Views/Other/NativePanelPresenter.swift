@@ -34,17 +34,31 @@ enum NativePanelPresenter {
         return panel.runModal() == .OK ? panel.url?.standardizedFileURL : nil
     }
 
-    static func chooseDewuDataRoot() -> URL? {
-        let panel = NSOpenPanel()
-        panel.title = "选择得物数据文件夹"
-        panel.message = "请选择得物容器里的 Data 文件夹，用于读取本机日志中的 Live Photo 视频记录。"
-        panel.prompt = "授权"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers", isDirectory: true)
-        return panel.runModal() == .OK ? panel.url?.standardizedFileURL : nil
+    /// Trigger macOS native TCC privacy prompt by directly reading the Dewu database.
+    /// macOS shows "App wants to access data from other apps" — user clicks Allow.
+    static func authorizeDewuDataRootIfNeeded() -> Bool {
+        guard !DewuLogStore.hasDataRootAccess() else { return true }
+
+        guard let candidate = DewuLogStore.dataRoots().first else { return false }
+        let dbDir = candidate.appendingPathComponent(
+            "Library/DUCaches/logger/sqlite3/never/com.shizhuang.Logger.v2",
+            isDirectory: true
+        )
+        guard let enumerator = FileManager.default.enumerator(
+            at: dbDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+
+        // Walk into a date subdirectory and read a .db file to trigger TCC
+        while let url = enumerator.nextObject() as? URL {
+            guard url.lastPathComponent.hasSuffix(".db"),
+                  let handle = try? FileHandle(forReadingFrom: url) else { continue }
+            _ = try? handle.readToEnd()
+            try? handle.close()
+            return DewuLogStore.authorizeDataRoot(candidate)
+        }
+        return false
     }
 
     static func presentDestructiveConfirmation(

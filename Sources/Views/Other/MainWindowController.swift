@@ -309,9 +309,8 @@ final class MainWindowController: NSWindowController {
     }
 
     private func startDownload() {
-        if model.needsDewuLogAccessForCurrentDownload,
-           let dataRoot = NativePanelPresenter.chooseDewuDataRoot() {
-            _ = DewuLogStore.authorizeDataRoot(dataRoot)
+        if model.needsDewuLogAccessForCurrentDownload {
+            _ = NativePanelPresenter.authorizeDewuDataRootIfNeeded()
         }
         Task { await model.downloadShare() }
     }

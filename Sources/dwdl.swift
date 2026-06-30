@@ -15,7 +15,6 @@ enum DewuNativeDownloader {
         do {
             let shareURL = try extractShareURL(from: shareText)
             let pageInfo = try await parseSharePage(shareURL)
-            fputs("[HERMES-DEWU] parseSharePage: contentID=\(pageInfo.contentID), images=\(pageInfo.images.count), videos=\(pageInfo.videos.count), isVideoPost=\(pageInfo.isVideoPost)\n", stderr)
             guard !pageInfo.contentID.isEmpty else {
                 return .failure("未能从分享页解析 contentId/trendId。")
             }
@@ -63,20 +62,16 @@ enum DewuNativeDownloader {
             var videoURLs: [URL] = []
             var videoSource = "App 接口 JSON"
             let roots = DewuLogStore.dataRoots()
-            fputs("[HERMES-DEWU] dataRoots count=\(roots.count)\n", stderr)
             let recentDatabaseLimit = 3
             let databases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
-            fputs("[HERMES-DEWU] logDatabases count=\(databases.count)\n", stderr)
             var didFetchAPIDetail = false
             var didConfirmNoAPIVideo = false
             if !databases.isEmpty {
                 let apiResult = await fetchAPIMediaResult(contentID: pageInfo.contentID, databases: databases)
                 mediaPairs = apiResult.pairs
                 didFetchAPIDetail = apiResult.didFetchDetail
-                fputs("[HERMES-DEWU] fetchAPIMediaResult: didFetchDetail=\(didFetchAPIDetail), pairs=\(mediaPairs.count)\n", stderr)
                 if !mediaPairs.isEmpty {
                     videoURLs = bestVideoVariants(mediaPairs.map(\.videoURL))
-                    fputs("[HERMES-DEWU] API videoURLs count=\(videoURLs.count)\n", stderr)
                     videoSource = "App 接口 JSON"
                     lines.append(pageInfo.isVideoPost ? "已从本机得物 App 接口 JSON 找到视频源。" : "已从本机得物 App 接口 JSON 找到 Live Photo 视频。")
                 } else if didFetchAPIDetail {
@@ -118,14 +113,10 @@ enum DewuNativeDownloader {
 
                 if videoURLs.isEmpty {
                     let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
-                    fputs("[HERMES-DEWU] searching playback logs, recentDatabases=\(recentDatabases.count)\n", stderr)
                     videoURLs = bestVideoVariants(await waitForMediaVideoURLs(contentID: pageInfo.contentID, databases: recentDatabases, timeout: min(max(waitSeconds, 1), 8)))
-                    fputs("[HERMES-DEWU] after waitForMediaVideoURLs: videoURLs=\(videoURLs.count)\n", stderr)
                     if videoURLs.isEmpty {
                         let allDatabases = DewuLogStore.logDatabases(roots: roots)
-                        fputs("[HERMES-DEWU] trying all databases, count=\(allDatabases.count)\n", stderr)
                         videoURLs = bestVideoVariants(extractMediaVideoURLsFromLogs(contentID: pageInfo.contentID, databases: allDatabases))
-                        fputs("[HERMES-DEWU] after extractMediaVideoURLsFromLogs: videoURLs=\(videoURLs.count)\n", stderr)
                     }
                         videoSource = "播放日志"
                     }
@@ -135,10 +126,8 @@ enum DewuNativeDownloader {
             if videoURLs.isEmpty, !shareVideoURLs.isEmpty {
                 videoURLs = shareVideoURLs
                 videoSource = "分享页视频"
-                fputs("[HERMES-DEWU] fallback to shareVideoURLs: count=\(videoURLs.count)\n", stderr)
             }
 
-            fputs("[HERMES-DEWU] final state: videoURLs=\(videoURLs.count), imageSources=\(imageSources.count), shareVideoURLs=\(shareVideoURLs.count)\n", stderr)
 
             if videoURLs.isEmpty, pageInfo.images.isEmpty {
                 return .failure("没有可下载的帖子媒体。")
@@ -335,10 +324,8 @@ enum DewuNativeDownloader {
         order by id desc
         limit 20
         """
-        var totalChecked = 0
         for db in databases {
             let rows = DewuLogStore.query(db: db, sql: sql, bindings: ["%contentId=\(contentID)%", "%contentId%3D\(contentID)%"])
-            totalChecked += rows.count
             for row in rows {
                 guard let text = row.first,
                       let data = text.data(using: .utf8),
@@ -347,11 +334,9 @@ enum DewuNativeDownloader {
                       payload["pre_request_header"] != nil else {
                     continue
                 }
-                fputs("[HERMES-DEWU] latestTrendDetailRequest: found matching request\n", stderr)
                 return payload
             }
         }
-        fputs("[HERMES-DEWU] latestTrendDetailRequest: checked \(totalChecked) rows across \(databases.count) DBs, no match\n", stderr)
         return nil
     }
 
@@ -363,10 +348,8 @@ enum DewuNativeDownloader {
         guard let requestInfo = latestTrendDetailRequest(contentID: contentID, databases: databases),
               let urlText = requestInfo["pre_request_url"] as? String,
               let url = URL(string: urlText) else {
-            fputs("[HERMES-DEWU] fetchAPIMediaResult: no trend-detail request info found in DB\n", stderr)
             return APIMediaResult(pairs: [], didFetchDetail: false)
         }
-        fputs("[HERMES-DEWU] fetchAPIMediaResult: requesting \(urlText.prefix(120))...\n", stderr)
         let headers = requestInfo["pre_request_header"] as? [String: Any] ?? [:]
         let headerStrings = headers.compactMapValues { value -> String? in
             let text = JSONValueUtilities.string(value)
@@ -375,11 +358,9 @@ enum DewuNativeDownloader {
         }
         guard let data = try? await requestAsync(url, headers: headerStrings),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            fputs("[HERMES-DEWU] fetchAPIMediaResult: API request failed or invalid JSON\n", stderr)
             return APIMediaResult(pairs: [], didFetchDetail: false)
         }
         let pairs = extractAPIMediaPairs(json)
-        fputs("[HERMES-DEWU] fetchAPIMediaResult: success, extracted \(pairs.count) media pairs\n", stderr)
         return APIMediaResult(pairs: pairs, didFetchDetail: true)
     }
 
@@ -507,24 +488,17 @@ enum DewuNativeDownloader {
         """
         var urls: [URL] = []
         var seen = Set<String>()
-        var totalRows = 0
         for db in databases {
             for row in DewuLogStore.query(db: db, sql: sql, bindings: ["%\(contentID)%", "%\(contentID)%"]) {
-                totalRows += 1
                 let text = MediaFileUtilities.htmlDecode((row.first ?? "").replacingOccurrences(of: "\\/", with: "/"))
-                let before = urls.count
                 for url in DewuPlaybackLogVideoExtractor.videoURLs(in: text) {
                     let key = url.path
                     if seen.insert(key).inserted {
                         urls.append(url)
                     }
                 }
-                if urls.count > before {
-                    fputs("[HERMES-DEWU] extractMediaVideoURLsFromLogs: found \(urls.count - before) URL(s) in row\n", stderr)
-                }
             }
         }
-        fputs("[HERMES-DEWU] extractMediaVideoURLsFromLogs: scanned \(totalRows) rows, extracted \(urls.count) unique URLs\n", stderr)
         return urls
     }
 
@@ -624,18 +598,6 @@ enum DewuNativeDownloader {
     }
 
     private static func openDewuApp(_ url: URL) {
-        let runningNames = ["DUApp", "得物"]
-        let alreadyRunning = runningNames.contains { name in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            process.arguments = ["-x", name]
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
-            try? process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        }
-        guard !alreadyRunning else { return }
         if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.siwuai.duapp") {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false

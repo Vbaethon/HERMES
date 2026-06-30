@@ -17,7 +17,22 @@ enum DewuLogStore {
     }
 
     static func hasDataRootAccess() -> Bool {
-        !dataRoots().isEmpty
+        // Only count authorized roots (security-scoped access).
+        // Discovered roots may exist on disk but cannot actually be read
+        // without security-scoped bookmark authorization.
+        guard let authorizedRoot = resolveAuthorizedDataRoot(),
+              viableDataRoot(at: authorizedRoot) != nil else {
+            return false
+        }
+        // Verify we can actually read a database from this root
+        let databases = logDatabases(root: authorizedRoot)
+        for db in databases {
+            if let copy = readableCopy(of: db) {
+                if copy != db { try? FileManager.default.removeItem(at: copy) }
+                return true
+            }
+        }
+        return !databases.isEmpty && FileManager.default.isReadableFile(atPath: databases[0].path)
     }
 
     static func authorizeDataRoot(_ selectedURL: URL) -> Bool {
@@ -180,6 +195,23 @@ enum DewuLogStore {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("hermes-db-\(UUID().uuidString).db")
         if copyWithFileManager(db, to: tmp) || copyWithSecurityScope(db, to: tmp) {
+            // Also copy WAL and SHM files so SQLite can read recent writes
+            let walSource = URL(fileURLWithPath: db.path + "-wal")
+            let shmSource = URL(fileURLWithPath: db.path + "-shm")
+            let walDest = URL(fileURLWithPath: tmp.path + "-wal")
+            let shmDest = URL(fileURLWithPath: tmp.path + "-shm")
+            if FileManager.default.fileExists(atPath: walSource.path) {
+                _ = copyWithFileManager(walSource, to: walDest)
+                if !FileManager.default.fileExists(atPath: walDest.path) {
+                    _ = copyWithSecurityScope(walSource, to: walDest)
+                }
+            }
+            if FileManager.default.fileExists(atPath: shmSource.path) {
+                _ = copyWithFileManager(shmSource, to: shmDest)
+                if !FileManager.default.fileExists(atPath: shmDest.path) {
+                    _ = copyWithSecurityScope(shmSource, to: shmDest)
+                }
+            }
             return tmp
         }
         return FileManager.default.isReadableFile(atPath: db.path) ? db : nil

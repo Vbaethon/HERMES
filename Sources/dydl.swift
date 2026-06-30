@@ -2322,7 +2322,8 @@ enum DouyinNativeDownloader {
         let playAddrKeys = [
             "play_addr_h264", "play_addr", "play_addr_bytevc1", "play_addr_265", "play_addr_lowbr",
             "play_addr_h265", "play_addr_266", "play_addr_av1", "play_addr_origin",
-            "play_addr_uhdr", "play_addr_hdr", "play_addr_origin_hdr"
+            "play_addr_uhdr", "play_addr_hdr", "play_addr_origin_hdr",
+            "download_addr"
         ]
         for key in playAddrKeys {
             if let playAddr = video[key] as? [String: Any] {
@@ -2371,7 +2372,8 @@ enum DouyinNativeDownloader {
         let playAddrKeys = [
             "play_addr_h264", "play_addr", "play_addr_bytevc1", "play_addr_265", "play_addr_lowbr",
             "play_addr_h265", "play_addr_266", "play_addr_av1", "play_addr_origin",
-            "play_addr_uhdr", "play_addr_hdr", "play_addr_origin_hdr"
+            "play_addr_uhdr", "play_addr_hdr", "play_addr_origin_hdr",
+            "download_addr"
         ]
         for key in playAddrKeys {
             if let playAddr = dictionary[key] as? [String: Any] {
@@ -2661,7 +2663,17 @@ enum DouyinNativeDownloader {
             ?? parsedURLs.first { isDirectDouyinVideoURL($0) }
             ?? parsedURLs.first
         guard let preferred else { return [] }
-        return [(score, VideoSelection(
+        var finalScore = score
+        // Play URLs (aweme/v1/play) redirect to CDN's best quality for the
+        // requested ratio.  When all bit_rate entries share the same inherited
+        // resolution (e.g. 1440×2560 inherited from the video dict even though
+        // each stream is 720p), boost the play URL so it can beat the 720p
+        // CDN entries and deliver the resolution the seed data advertises.
+        let preferredText = preferred.absoluteString.lowercased()
+        if preferredText.contains("/aweme/v1/play") {
+            finalScore += 6_000_000_000
+        }
+        return [(finalScore, VideoSelection(
             url: preferred,
             width: width,
             height: height,
@@ -2703,10 +2715,12 @@ enum DouyinNativeDownloader {
 	            if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL: play URL with correct ratio \(desiredRatio), returning as-is") }
 	            return url
 	        }
-	        components?.queryItems = queryItems.map { item in
-	            item.name == "ratio" ? URLQueryItem(name: item.name, value: desiredRatio) : item
-	        }
-	        let result = components?.url ?? url
+        components?.queryItems = queryItems.map { item in
+            item.name == "ratio" ? URLQueryItem(name: item.name, value: desiredRatio) : item
+        }
+        // Strip watermark=1 from play URLs — HERMES always downloads non-watermarked media.
+        components?.queryItems = components?.queryItems?.filter { $0.name != "watermark" }
+        let result = components?.url ?? url
 	        if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL output: \(result.absoluteString) (desired ratio: \(desiredRatio), was: \(currentRatio))") }
 	        return result
 	    }
