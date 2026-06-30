@@ -72,8 +72,29 @@ enum XHSNativeDownloader {
 
             try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
             var lines: [String] = []
-            for link in links {
-                let note = try await fetchNote(link, cookie: cookie)
+            for (linkIndex, link) in links.enumerated() {
+                let linkFraction = Double(linkIndex) / Double(links.count)
+                let linkWidth = 1.0 / Double(links.count)
+                /// 页面抓取阶段占每个链接的 20% 工作量。
+                let scanRatio = 0.2
+
+                if let progress {
+                    await progress(linkFraction + 0.02 * linkWidth)
+                }
+                let fetchProgress: DownloaderInfra.ProgressHandler?
+                if let progress {
+                    fetchProgress = { fraction in
+                        await progress(linkFraction + (0.02 + fraction * (scanRatio - 0.02)) * linkWidth)
+                    }
+                } else {
+                    fetchProgress = nil
+                }
+
+                let note = try await fetchNote(link, cookie: cookie, progress: fetchProgress)
+
+                if let progress {
+                    await progress(linkFraction + scanRatio * linkWidth)
+                }
                 let author = FileNaming.sanitizeFileName(note.author.isEmpty ? "unknown" : note.author, fallback: "unknown")
                 let rawUserID = note.userID.isEmpty ? (accountIDHint ?? "") : note.userID
                 let userID = rawUserID.isEmpty ? "" : cleanAccountName(rawUserID)
@@ -120,7 +141,15 @@ enum XHSNativeDownloader {
                     throw NSError(domain: "XHSDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "没有可下载的小红书媒体。"])
                 }
 
-                try await download(tasks, progress: progress)
+                let downloadProgress: DownloaderInfra.ProgressHandler?
+                if let progress {
+                    downloadProgress = { fraction in
+                        await progress(linkFraction + scanRatio * linkWidth + fraction * (1 - scanRatio) * linkWidth)
+                    }
+                } else {
+                    downloadProgress = nil
+                }
+                try await download(tasks, progress: downloadProgress)
                 let liveCount = note.items.filter { $0.liveURL != nil }.count
                 let videoCount = note.videoURL == nil ? 0 : 1
                 lines.append([
@@ -197,34 +226,42 @@ enum XHSNativeDownloader {
         return responseURL ?? url
     }
 
-    private static func fetchNote(_ url: URL, cookie: String? = nil) async throws -> NoteInfo {
+    private static func fetchNote(_ url: URL, cookie: String? = nil, progress: DownloaderInfra.ProgressHandler? = nil) async throws -> NoteInfo {
         var notes: [NoteInfo] = []
         var desktopMessage: String?
         var firstError: Error?
         do {
+            if let progress { await progress(0.1) }
             var desktopResult = try await fetchNoteOnce(url, requestUserAgent: desktopUserAgent, cookie: cookie)
+            if let progress { await progress(0.5) }
             desktopMessage = desktopResult.sourceMessage
             if desktopResult.note.hasMedia {
                 desktopResult.note.requestUserAgent = desktopUserAgent
                 notes.append(desktopResult.note)
             }
         } catch {
+            if let progress { await progress(0.1) }
             firstError = error
         }
 
         var mobileMessage: String?
         do {
+            if let progress { await progress(0.6) }
             var mobileResult = try await fetchNoteOnce(url, requestUserAgent: mobileUserAgent, cookie: cookie)
+            if let progress { await progress(0.95) }
             mobileMessage = mobileResult.sourceMessage
             if mobileResult.note.hasMedia {
                 mobileResult.note.requestUserAgent = mobileUserAgent
                 notes.append(mobileResult.note)
             }
         } catch {
+            if let progress { await progress(0.6) }
             if firstError == nil {
                 firstError = error
             }
         }
+
+        if let progress { await progress(1) }
 
         if let bestNote = notes.max(by: { lhs, rhs in
             let lhsScore = noteScore(lhs)

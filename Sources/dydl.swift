@@ -390,7 +390,7 @@ enum DouyinNativeDownloader {
                 let scanProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
                     scanProgress = { fraction in
-                        await progress(linkFraction + max(0.04, fraction * scanRatio) * linkWidth)
+                        await progress(linkFraction + (0.04 + fraction * (scanRatio - 0.04)) * linkWidth)
                     }
                 } else {
                     scanProgress = nil

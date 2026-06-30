@@ -1665,33 +1665,32 @@ final class ImporterModel: ObservableObject {
 
     private nonisolated static func downloadProgressDownloadDetail(for entry: String) -> String {
         if isDouyinShareText(entry) {
-            return "保存抖音媒体"
+            return "下载抖音媒体…"
         } else if isXHSShareText(entry) {
-            return "保存小红书媒体"
+            return "下载小红书媒体…"
         } else if isDewuShareText(entry) {
-            return "保存得物媒体"
+            return "下载得物媒体…"
         }
-        return "保存媒体文件"
+        return "下载媒体文件…"
     }
 
     private nonisolated static func downloadProgressDetail(for entry: String, fraction: CGFloat) -> String {
         if fraction < 0.04 {
-            return "解析分享链接"
+            return "解析链接…"
+        }
+        if fraction < 0.10 {
+            return "获取媒体信息…"
         }
         if fraction < DownloadProgressMilestone.scanEnd {
-            if isDouyinShareText(entry) {
-                return "查找抖音可用媒体"
-            } else if isXHSShareText(entry) {
-                return "读取小红书媒体信息"
-            } else if isDewuShareText(entry) {
-                return "读取得物媒体信息"
-            }
-            return "读取媒体信息"
+            return "扫描本地缓存…"
+        }
+        if fraction < 0.50 {
+            return "准备下载资源…"
         }
         if fraction < DownloadProgressMilestone.downloadEnd {
             return downloadProgressDownloadDetail(for: entry)
         }
-        return "整理下载结果"
+        return "整理文件…"
     }
 
     private nonisolated static func downloadShareEntries(from text: String) -> [String] {

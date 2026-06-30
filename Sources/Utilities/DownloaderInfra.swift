@@ -130,8 +130,14 @@ enum DownloaderInfra {
         var lastPublished: Double = -1
 
         func publishIfNeeded(force: Bool = false) async {
-            guard expectedLength > 0 else { return }
-            let fraction = min(max(Double(receivedLength) / Double(expectedLength), 0), 1)
+            let fraction: Double
+            if expectedLength > 0 {
+                fraction = min(max(Double(receivedLength) / Double(expectedLength), 0), 1)
+            } else {
+                // 无 Content-Length 时用渐进估算：已收块数 / (已收块数 + 6)，逼近 0.95
+                let chunks = Double(receivedLength) / (128.0 * 1024.0)
+                fraction = min(chunks / (chunks + 6.0), 0.95)
+            }
             if force || fraction - lastPublished >= 0.01 {
                 lastPublished = fraction
                 await progress?(fraction)

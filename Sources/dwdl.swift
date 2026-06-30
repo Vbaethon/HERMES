@@ -14,7 +14,9 @@ enum DewuNativeDownloader {
     ) async -> ToolRunResult {
         do {
             let shareURL = try extractShareURL(from: shareText)
+            if let progress { await progress(0.05) }
             let pageInfo = try await parseSharePage(shareURL)
+            if let progress { await progress(0.15) }
             guard !pageInfo.contentID.isEmpty else {
                 return .failure("未能从分享页解析 contentId/trendId。")
             }
@@ -47,7 +49,15 @@ enum DewuNativeDownloader {
                     tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs))
                 }
                 do {
-                    try await download(tasks, progress: progress)
+                    let imageDownloadProgress: DownloaderInfra.ProgressHandler?
+                    if let progress {
+                        imageDownloadProgress = { fraction in
+                            await progress(0.15 + fraction * 0.03)
+                        }
+                    } else {
+                        imageDownloadProgress = nil
+                    }
+                    try await download(tasks, progress: imageDownloadProgress)
                 } catch {
                     staticImageDownloadError = error
                     if DewuDownloadRecoveryPolicy.shouldContinueAfterStaticImageFailure(canStillReachVideoStage: true) {
@@ -67,7 +77,9 @@ enum DewuNativeDownloader {
             var didFetchAPIDetail = false
             var didConfirmNoAPIVideo = false
             if !databases.isEmpty {
+                if let progress { await progress(0.18) }
                 let apiResult = await fetchAPIMediaResult(contentID: pageInfo.contentID, databases: databases)
+                if let progress { await progress(0.25) }
                 mediaPairs = apiResult.pairs
                 didFetchAPIDetail = apiResult.didFetchDetail
                 if !mediaPairs.isEmpty {
@@ -103,7 +115,11 @@ enum DewuNativeDownloader {
                     lines.append(didFetchAPIDetail ? "App 接口未返回 Live Photo 视频，继续读取播放日志..." : "本机没有当前帖子的详情接口记录，正在后台打开得物 App 生成签名请求...")
                     Task.detached { openDewuApp(shareURL) }
                     if !didFetchAPIDetail {
-                        mediaPairs = await waitForAPIMediaPairs(contentID: pageInfo.contentID, roots: roots, databaseLimit: recentDatabaseLimit, timeout: waitSeconds)
+                        if let progress { await progress(0.30) }
+                        mediaPairs = await waitForAPIMediaPairs(contentID: pageInfo.contentID, roots: roots, databaseLimit: recentDatabaseLimit, timeout: waitSeconds, progress: { fraction in
+                            if let progress { Task { @Sendable in await progress(0.30 + fraction * 0.08) } }
+                        })
+                        if let progress { await progress(0.40) }
                         if mediaPairs.isEmpty {
                             mediaPairs = await fetchAPIMediaPairs(contentID: pageInfo.contentID, databases: DewuLogStore.logDatabases(roots: roots))
                         }
@@ -112,8 +128,10 @@ enum DewuNativeDownloader {
                     }
 
                 if videoURLs.isEmpty {
+                    if let progress { await progress(0.45) }
                     let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
                     videoURLs = bestVideoVariants(await waitForMediaVideoURLs(contentID: pageInfo.contentID, databases: recentDatabases, timeout: min(max(waitSeconds, 1), 8)))
+                    if let progress { await progress(0.50) }
                     if videoURLs.isEmpty {
                         let allDatabases = DewuLogStore.logDatabases(roots: roots)
                         videoURLs = bestVideoVariants(extractMediaVideoURLsFromLogs(contentID: pageInfo.contentID, databases: allDatabases))
@@ -145,7 +163,15 @@ enum DewuNativeDownloader {
                         let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
                         tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs))
                     }
-                    try await download(tasks, progress: progress)
+                    let apiImageDownloadProgress: DownloaderInfra.ProgressHandler?
+                    if let progress {
+                        apiImageDownloadProgress = { fraction in
+                            await progress(0.40 + fraction * 0.10)
+                        }
+                    } else {
+                        apiImageDownloadProgress = nil
+                    }
+                    try await download(tasks, progress: apiImageDownloadProgress)
                 }
             }
 
@@ -165,7 +191,15 @@ enum DewuNativeDownloader {
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: videoName(stillURL: stillURL, videoURL: url), usedNames: &usedNames)
                     tasks.append(DownloadTask(url: url, destination: destination))
                 }
-                try await download(tasks, progress: progress)
+                let videoDownloadProgress: DownloaderInfra.ProgressHandler?
+                if let progress {
+                    videoDownloadProgress = { fraction in
+                        await progress(0.50 + fraction * 0.50)
+                    }
+                } else {
+                    videoDownloadProgress = nil
+                }
+                try await download(tasks, progress: videoDownloadProgress)
                 if staticImageDownloadError != nil {
                     lines.append("部分静态图下载失败，已保留可下载的视频。")
                 }
@@ -364,25 +398,31 @@ enum DewuNativeDownloader {
         return APIMediaResult(pairs: pairs, didFetchDetail: true)
     }
 
-    private static func waitForAPIMediaPairs(contentID: String, databases: [URL], timeout: TimeInterval) async -> [APIMediaPair] {
+    private static func waitForAPIMediaPairs(contentID: String, databases: [URL], timeout: TimeInterval, progress: DownloaderInfra.ProgressHandler? = nil) async -> [APIMediaPair] {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             let pairs = await fetchAPIMediaPairs(contentID: contentID, databases: databases)
             if !pairs.isEmpty || Date() >= deadline {
+                if let progress { await progress(1) }
                 return pairs
             }
+            let elapsed = timeout > 0 ? min(deadline.timeIntervalSinceNow / timeout, 1) : 0
+            if let progress { await progress(elapsed) }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
 
-    private static func waitForAPIMediaPairs(contentID: String, roots: [URL], databaseLimit: Int, timeout: TimeInterval) async -> [APIMediaPair] {
+    private static func waitForAPIMediaPairs(contentID: String, roots: [URL], databaseLimit: Int, timeout: TimeInterval, progress: DownloaderInfra.ProgressHandler? = nil) async -> [APIMediaPair] {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             let databases = DewuLogStore.logDatabases(roots: roots, limit: databaseLimit)
             let pairs = await fetchAPIMediaPairs(contentID: contentID, databases: databases)
             if !pairs.isEmpty || Date() >= deadline {
+                if let progress { await progress(1) }
                 return pairs
             }
+            let elapsed = timeout > 0 ? min(deadline.timeIntervalSinceNow / timeout, 1) : 0
+            if let progress { await progress(elapsed) }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
