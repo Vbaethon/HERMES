@@ -1,6 +1,7 @@
 import AppKit
 
 enum SystemWindowBackgroundController {
+    @MainActor
     static func configureMainWindow(_ window: NSWindow) {
         window.toolbarStyle = .unified
         window.styleMask.insert(.fullSizeContentView)
@@ -9,6 +10,7 @@ enum SystemWindowBackgroundController {
         window.backgroundColor = .windowBackgroundColor
     }
 
+    @MainActor
     static func makePageBackgroundView() -> NSView {
         SystemPageBackgroundView()
     }

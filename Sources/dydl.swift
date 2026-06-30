@@ -2719,7 +2719,9 @@ enum DouyinNativeDownloader {
             item.name == "ratio" ? URLQueryItem(name: item.name, value: desiredRatio) : item
         }
         // Strip watermark=1 from play URLs — HERMES always downloads non-watermarked media.
-        components?.queryItems = components?.queryItems?.filter { $0.name != "watermark" }
+        if let filtered = components?.queryItems?.filter({ $0.name != "watermark" }) {
+            components?.queryItems = filtered
+        }
         let result = components?.url ?? url
 	        if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL output: \(result.absoluteString) (desired ratio: \(desiredRatio), was: \(currentRatio))") }
 	        return result

@@ -7,8 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-
-
 		111111111111111111111102 /* dwdl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111002 /* dwdl.swift */; };
 		111111111111111111111103 /* rndl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111003 /* rndl.swift */; };
 		111111111111111111111104 /* tool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111004 /* tool.swift */; };
@@ -24,26 +22,26 @@
 		111111111111111111111128 /* HermesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111029 /* HermesApp.swift */; };
 		111111111111111111111129 /* SidebarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102A /* SidebarController.swift */; };
 		11111111111111111111112A /* EmptyStateViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102B /* EmptyStateViews.swift */; };
-			11111111111111111111112B /* DownloadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102C /* DownloadViews.swift */; };
+		11111111111111111111112B /* DownloadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102C /* DownloadViews.swift */; };
 		11111111111111111111112C /* FileNaming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102D /* FileNaming.swift */; };
 		11111111111111111111112D /* FileSystemUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102E /* FileSystemUtilities.swift */; };
 		11111111111111111111112E /* RegexUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102F /* RegexUtilities.swift */; };
-		11111111111111111111112F /* ImporterModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111039 /* ImporterModel.swift */; };
-		111111111111111111111130 /* PairCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103A /* PairCollectionView.swift */; };
-		111111111111111111111131 /* DownloadCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103B /* DownloadCollectionView.swift */; };
-		111111111111111111111132 /* CompletedCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111033 /* CompletedCollectionView.swift */; };
-		111111111111111111111133 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111034 /* MainWindowController.swift */; };
-		111111111111111111111134 /* NativeWindowToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111035 /* NativeWindowToolbarController.swift */; };
-		111111111111111111111135 /* PageControllers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111036 /* PageControllers.swift */; };
-		111111111111111111111136 /* ThumbnailItemViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111037 /* ThumbnailItemViews.swift */; };
-		111111111111111111111137 /* ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111038 /* ThumbnailService.swift */; };
+		11111111111111111111112F /* Models/ImporterModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111039 /* Models/ImporterModel.swift */; };
+		111111111111111111111130 /* Views/CollectionViews/PairCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */; };
+		111111111111111111111131 /* Views/CollectionViews/DownloadCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */; };
+		111111111111111111111132 /* Views/CollectionViews/CompletedCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */; };
+		111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111034 /* Views/Other/MainWindowController.swift */; };
+		111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */; };
+		111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111036 /* Views/Other/PageControllers.swift */; };
+		111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */; };
+		111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */; };
 		111111111111111111111138 /* DownloaderInfra.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111047 /* DownloaderInfra.swift */; };
 		111111111111111111111139 /* JSONValueUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111048 /* JSONValueUtilities.swift */; };
 		11111111111111111111113A /* MediaFileUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111049 /* MediaFileUtilities.swift */; };
-		11111111111111111111113D /* ThumbnailGridController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104C /* ThumbnailGridController.swift */; };
-		11111111111111111111113E /* SystemThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104D /* SystemThumbnailProvider.swift */; };
-		11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104E /* SystemWindowBackgroundController.swift */; };
-		111111111111111111111140 /* NativePanelPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104F /* NativePanelPresenter.swift */; };
+		11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */; };
+		11111111111111111111113E /* Views/Thumbnail/SystemThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */; };
+		11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */; };
+		111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */; };
 		111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111050 /* DownloaderNetworkPolicy.swift */; };
 		111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */; };
 		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
@@ -74,8 +72,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-
-
 		111111111111111111111002 /* dwdl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = dwdl.swift; sourceTree = "<group>"; };
 		111111111111111111111003 /* rndl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rndl.swift; sourceTree = "<group>"; };
 		111111111111111111111004 /* tool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = tool.swift; sourceTree = "<group>"; };
@@ -97,22 +93,22 @@
 		11111111111111111111102D /* FileNaming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNaming.swift; sourceTree = "<group>"; };
 		11111111111111111111102E /* FileSystemUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSystemUtilities.swift; sourceTree = "<group>"; };
 		11111111111111111111102F /* RegexUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegexUtilities.swift; sourceTree = "<group>"; };
-		111111111111111111111039 /* ImporterModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ImporterModel.swift; sourceTree = "<group>"; };
-		11111111111111111111103A /* PairCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/PairCollectionView.swift; sourceTree = "<group>"; };
-		11111111111111111111103B /* DownloadCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/DownloadCollectionView.swift; sourceTree = "<group>"; };
-		111111111111111111111033 /* CompletedCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/CompletedCollectionView.swift; sourceTree = "<group>"; };
-		111111111111111111111034 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MainWindowController.swift; sourceTree = "<group>"; };
-		111111111111111111111035 /* NativeWindowToolbarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativeWindowToolbarController.swift; sourceTree = "<group>"; };
-		111111111111111111111036 /* PageControllers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/PageControllers.swift; sourceTree = "<group>"; };
-		111111111111111111111037 /* ThumbnailItemViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailItemViews.swift; sourceTree = "<group>"; };
-		111111111111111111111038 /* ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailService.swift; sourceTree = "<group>"; };
+		111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/CompletedCollectionView.swift; sourceTree = "<group>"; };
+		111111111111111111111034 /* Views/Other/MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MainWindowController.swift; sourceTree = "<group>"; };
+		111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativeWindowToolbarController.swift; sourceTree = "<group>"; };
+		111111111111111111111036 /* Views/Other/PageControllers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/PageControllers.swift; sourceTree = "<group>"; };
+		111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailItemViews.swift; sourceTree = "<group>"; };
+		111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailService.swift; sourceTree = "<group>"; };
+		111111111111111111111039 /* Models/ImporterModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ImporterModel.swift; sourceTree = "<group>"; };
+		11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/PairCollectionView.swift; sourceTree = "<group>"; };
+		11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/DownloadCollectionView.swift; sourceTree = "<group>"; };
 		111111111111111111111047 /* DownloaderInfra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderInfra.swift; sourceTree = "<group>"; };
 		111111111111111111111048 /* JSONValueUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValueUtilities.swift; sourceTree = "<group>"; };
 		111111111111111111111049 /* MediaFileUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaFileUtilities.swift; sourceTree = "<group>"; };
-		11111111111111111111104C /* ThumbnailGridController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridController.swift; sourceTree = "<group>"; };
-		11111111111111111111104D /* SystemThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/SystemThumbnailProvider.swift; sourceTree = "<group>"; };
-		11111111111111111111104E /* SystemWindowBackgroundController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/SystemWindowBackgroundController.swift; sourceTree = "<group>"; };
-		11111111111111111111104F /* NativePanelPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativePanelPresenter.swift; sourceTree = "<group>"; };
+		11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridController.swift; sourceTree = "<group>"; };
+		11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/SystemThumbnailProvider.swift; sourceTree = "<group>"; };
+		11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/SystemWindowBackgroundController.swift; sourceTree = "<group>"; };
+		11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativePanelPresenter.swift; sourceTree = "<group>"; };
 		111111111111111111111050 /* DownloaderNetworkPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderNetworkPolicy.swift; sourceTree = "<group>"; };
 		111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuPlaybackLogVideoExtractor.swift; sourceTree = "<group>"; };
 		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
@@ -138,8 +134,8 @@
 /* Begin PBXGroup section */
 		111111111111111111111013 /* Sources */ = {
 			isa = PBXGroup;
-				children = (
-					111111111111111111111029 /* HermesApp.swift */,
+			children = (
+				111111111111111111111029 /* HermesApp.swift */,
 				111111111111111111111002 /* dwdl.swift */,
 				111111111111111111111003 /* rndl.swift */,
 				111111111111111111111017 /* dydl.swift */,
@@ -153,38 +149,22 @@
 				111111111111111111111025 /* PhotoLibraryImporter.swift */,
 				111111111111111111111026 /* DewuLogStore.swift */,
 				111111111111111111111004 /* tool.swift */,
-				111111111111111111111039 /* ImporterModel.swift */,
-				11111111111111111111103A /* PairCollectionView.swift */,
-				11111111111111111111103B /* DownloadCollectionView.swift */,
-				111111111111111111111033 /* CompletedCollectionView.swift */,
-				11111111111111111111104C /* ThumbnailGridController.swift */,
-				111111111111111111111034 /* MainWindowController.swift */,
-				111111111111111111111035 /* NativeWindowToolbarController.swift */,
-				11111111111111111111104F /* NativePanelPresenter.swift */,
-				111111111111111111111036 /* PageControllers.swift */,
-				11111111111111111111104E /* SystemWindowBackgroundController.swift */,
-				111111111111111111111037 /* ThumbnailItemViews.swift */,
-				111111111111111111111038 /* ThumbnailService.swift */,
-				11111111111111111111104D /* SystemThumbnailProvider.swift */,
+				111111111111111111111039 /* Models/ImporterModel.swift */,
+				11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */,
+				11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */,
+				111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */,
+				11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */,
+				111111111111111111111034 /* Views/Other/MainWindowController.swift */,
+				111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */,
+				11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */,
+				111111111111111111111036 /* Views/Other/PageControllers.swift */,
+				11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */,
+				111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */,
+				111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */,
+				11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */,
 				111111111111111111111040 /* Utilities */,
 			);
 			path = Sources;
-			sourceTree = "<group>";
-		};
-		111111111111111111111040 /* Utilities */ = {
-			isa = PBXGroup;
-			children = (
-				11111111111111111111102D /* FileNaming.swift */,
-				11111111111111111111102E /* FileSystemUtilities.swift */,
-				11111111111111111111102F /* RegexUtilities.swift */,
-				111111111111111111111047 /* DownloaderInfra.swift */,
-				111111111111111111111050 /* DownloaderNetworkPolicy.swift */,
-				111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */,
-				111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */,
-				111111111111111111111048 /* JSONValueUtilities.swift */,
-				111111111111111111111049 /* MediaFileUtilities.swift */,
-			);
-			path = Utilities;
 			sourceTree = "<group>";
 		};
 		111111111111111111111014 /* Build */ = {
@@ -213,14 +193,29 @@
 			path = Assets;
 			sourceTree = "<group>";
 		};
-		111111111111111111111021 /* = */ = {
+		111111111111111111111021 = {
 			isa = PBXGroup;
 			children = (
 				111111111111111111111013 /* Sources */,
 				111111111111111111111014 /* Build */,
 				111111111111111111111018 /* Products */,
 			);
-			name = "";
+			sourceTree = "<group>";
+		};
+		111111111111111111111040 /* Utilities */ = {
+			isa = PBXGroup;
+			children = (
+				11111111111111111111102D /* FileNaming.swift */,
+				11111111111111111111102E /* FileSystemUtilities.swift */,
+				11111111111111111111102F /* RegexUtilities.swift */,
+				111111111111111111111047 /* DownloaderInfra.swift */,
+				111111111111111111111050 /* DownloaderNetworkPolicy.swift */,
+				111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */,
+				111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */,
+				111111111111111111111048 /* JSONValueUtilities.swift */,
+				111111111111111111111049 /* MediaFileUtilities.swift */,
+			);
+			path = Utilities;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -274,7 +269,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2650;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					111111111111111111111011 = {
 						CreatedOnToolsVersion = 26.5;
@@ -355,30 +350,29 @@
 				11111111111111111111112C /* FileNaming.swift in Sources */,
 				11111111111111111111112D /* FileSystemUtilities.swift in Sources */,
 				11111111111111111111112E /* RegexUtilities.swift in Sources */,
-				11111111111111111111112F /* ImporterModel.swift in Sources */,
-				111111111111111111111130 /* PairCollectionView.swift in Sources */,
-				111111111111111111111131 /* DownloadCollectionView.swift in Sources */,
-				111111111111111111111132 /* CompletedCollectionView.swift in Sources */,
-				111111111111111111111133 /* MainWindowController.swift in Sources */,
-				111111111111111111111134 /* NativeWindowToolbarController.swift in Sources */,
-				111111111111111111111140 /* NativePanelPresenter.swift in Sources */,
-				111111111111111111111135 /* PageControllers.swift in Sources */,
-				11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */,
-				111111111111111111111136 /* ThumbnailItemViews.swift in Sources */,
-				111111111111111111111137 /* ThumbnailService.swift in Sources */,
-				11111111111111111111113D /* ThumbnailGridController.swift in Sources */,
-				11111111111111111111113E /* SystemThumbnailProvider.swift in Sources */,
+				11111111111111111111112F /* Models/ImporterModel.swift in Sources */,
+				111111111111111111111130 /* Views/CollectionViews/PairCollectionView.swift in Sources */,
+				111111111111111111111131 /* Views/CollectionViews/DownloadCollectionView.swift in Sources */,
+				111111111111111111111132 /* Views/CollectionViews/CompletedCollectionView.swift in Sources */,
+				111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */,
+				111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */,
+				111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */,
+				111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */,
+				11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */,
+				111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */,
+				111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */,
+				11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */,
+				11111111111111111111113E /* Views/Thumbnail/SystemThumbnailProvider.swift in Sources */,
 				111111111111111111111138 /* DownloaderInfra.swift in Sources */,
 				111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */,
 				111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */,
 				111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */,
 				111111111111111111111139 /* JSONValueUtilities.swift in Sources */,
 				11111111111111111111113A /* MediaFileUtilities.swift in Sources */,
-
 				111111111111111111111123 /* LivePhotoToolRunner.swift in Sources */,
 				111111111111111111111124 /* PhotoLibraryImporter.swift in Sources */,
 				111111111111111111111125 /* DewuLogStore.swift in Sources */,
-				);
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		111111111111111111111114 /* Sources */ = {
@@ -404,6 +398,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
@@ -431,7 +426,9 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -456,6 +453,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -465,6 +463,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
@@ -492,7 +491,9 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -510,6 +511,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -525,7 +527,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 0593;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = FJP7ATDRW3;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Build/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
@@ -557,7 +561,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 0593;
+				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = FJP7ATDRW3;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Build/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
@@ -584,6 +590,7 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -601,6 +608,7 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
