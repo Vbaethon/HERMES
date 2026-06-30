@@ -63,7 +63,7 @@ enum DownloaderInfra {
             }
             return data
         } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error) else { throw error }
+            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
             return try await DownloaderHTTPCompatibility.dataAsync(for: req).0
         }
     }
@@ -97,7 +97,7 @@ enum DownloaderInfra {
         do {
             try await streamDownload(req, to: destination, session: session, progress: progress)
         } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error) else { throw error }
+            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination)
             await progress?(1)

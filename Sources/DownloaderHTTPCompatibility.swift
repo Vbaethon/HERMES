@@ -24,6 +24,7 @@ enum DownloaderHTTPCompatibility {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.waitsForConnectivity = false
+        DownloaderNetworkPolicy.configureDirectSession(configuration)
     }
 
     /// Creates a pre-configured ephemeral URLSession for downloading platform media.
@@ -52,19 +53,6 @@ enum DownloaderHTTPCompatibility {
 
     // MARK: - DNS-over-HTTPS resolver for domains affected by DNS poisoning
 
-    /// Domains whose DNS may be poisoned — resolve via DoH and pass --resolve to curl.
-    private static let dnsOverrideSuffixes: [String] = [
-        // Xiaohongshu
-        "xhslink.com",
-        "xiaohongshu.com",
-        "xhscdn.com",
-        // Douyin
-        "douyin.com",
-        "iesdouyin.com",
-        "douyinvod.com",
-        "snssdk.com"
-    ]
-
     /// DNS cache: host → IPs.  Protected by an actor for sendable safety.
     private static let dnsCacheActor = DNSCacheStore()
     private static let dnsCacheTTL: TimeInterval = 300
@@ -81,18 +69,6 @@ enum DownloaderHTTPCompatibility {
         func store(_ host: String, ips: [String]) {
             cache[host] = (ips: ips, timestamp: Date())
         }
-    }
-
-    /// Returns true if the host matches a domain known to suffer DNS poisoning.
-    private static func hostNeedsDNSOverride(_ host: String?) -> Bool {
-        guard let host else { return false }
-        let lowercased = host.lowercased()
-        for suffix in dnsOverrideSuffixes {
-            if lowercased == suffix || lowercased.hasSuffix("." + suffix) {
-                return true
-            }
-        }
-        return false
     }
 
     /// Resolve a hostname via DNS-over-HTTPS. Returns cached result when available.
@@ -130,6 +106,7 @@ enum DownloaderHTTPCompatibility {
                     ips.append(ip)
                 }
             }
+            ips = DownloaderNetworkPolicy.publicIPv4Addresses(from: ips)
             if !ips.isEmpty {
                 succeededProvider = provider.name
                 break
@@ -152,7 +129,16 @@ enum DownloaderHTTPCompatibility {
     }
 
     static func shouldFallback(after error: Error) -> Bool {
+        shouldFallback(after: error, for: nil)
+    }
+
+    static func shouldFallback(after error: Error, for request: URLRequest?) -> Bool {
         let nsError = error as NSError
+        if let request,
+           DownloaderNetworkPolicy.shouldFallbackHTTPStatus(nsError.code, for: request) {
+            return true
+        }
+
         return nsError.domain == NSURLErrorDomain
             && [
                 NSURLErrorSecureConnectionFailed,
@@ -209,9 +195,10 @@ enum DownloaderHTTPCompatibility {
             "--retry-all-errors",
             "--output", outputURL.path
         ]
+        arguments.append(contentsOf: DownloaderNetworkPolicy.directCurlArguments)
 
         // --resolve to bypass DNS poisoning for XHS domains
-        if let host = url.host, hostNeedsDNSOverride(host) {
+        if let host = url.host, DownloaderNetworkPolicy.hostNeedsDNSOverride(host) {
             let realIPs = await resolveHostViaDoH(host)
             let ports = Set([url.port ?? (url.scheme == "https" ? 443 : 80), 80, 443])
             for ip in realIPs.prefix(4) {

@@ -842,7 +842,7 @@ enum XHSNativeDownloader {
         do {
             try await DownloaderInfra.downloadOnceAsync(requestURL, to: destination, userAgent: requestUserAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress)
         } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error) else { throw error }
+            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else { throw error }
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination)
             await progress?(1)

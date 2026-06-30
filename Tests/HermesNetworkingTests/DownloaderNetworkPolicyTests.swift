@@ -1,25 +1,22 @@
 import Foundation
-import Testing
+import XCTest
 @testable import HermesNetworking
 
-@Suite("Downloader network policy")
-struct DownloaderNetworkPolicyTests {
-    @Test("download sessions ignore system proxy settings")
-    func downloadSessionDisablesSystemProxies() {
+final class DownloaderNetworkPolicyTests: XCTestCase {
+    func testDownloadSessionDisablesSystemProxies() {
         let configuration = URLSessionConfiguration.ephemeral
 
         DownloaderHTTPCompatibility.tuneDownloadSession(configuration)
 
         let proxyDictionary = configuration.connectionProxyDictionary ?? [:]
-        #expect(proxyDictionary[kCFNetworkProxiesHTTPEnable as String] as? Int == 0)
-        #expect(proxyDictionary[kCFNetworkProxiesHTTPSEnable as String] as? Int == 0)
-        #expect(proxyDictionary[kCFNetworkProxiesSOCKSEnable as String] as? Int == 0)
-        #expect(proxyDictionary[kCFNetworkProxiesProxyAutoConfigEnable as String] as? Int == 0)
-        #expect(proxyDictionary[kCFNetworkProxiesProxyAutoDiscoveryEnable as String] as? Int == 0)
+        XCTAssertEqual(proxyDictionary[kCFNetworkProxiesHTTPEnable as String] as? Int, 0)
+        XCTAssertEqual(proxyDictionary[kCFNetworkProxiesHTTPSEnable as String] as? Int, 0)
+        XCTAssertEqual(proxyDictionary[kCFNetworkProxiesSOCKSEnable as String] as? Int, 0)
+        XCTAssertEqual(proxyDictionary[kCFNetworkProxiesProxyAutoConfigEnable as String] as? Int, 0)
+        XCTAssertEqual(proxyDictionary[kCFNetworkProxiesProxyAutoDiscoveryEnable as String] as? Int, 0)
     }
 
-    @Test("DoH results keep public IPs and reject fake or private IPs")
-    func filtersUnsafeResolvedAddresses() {
+    func testFiltersUnsafeResolvedAddresses() {
         let rawIPs = [
             "198.18.6.204",
             "10.0.0.8",
@@ -33,18 +30,22 @@ struct DownloaderNetworkPolicyTests {
 
         let filtered = DownloaderNetworkPolicy.publicIPv4Addresses(from: rawIPs)
 
-        #expect(filtered == ["106.54.99.69", "118.195.253.242"])
+        XCTAssertEqual(filtered, ["106.54.99.69", "118.195.253.242"])
     }
 
-    @Test("404 from a protected host should use compatibility fallback")
-    func http404OnProtectedHostUsesFallback() throws {
-        let request = URLRequest(url: try #require(URL(string: "https://xhslink.com/o/example")))
+    func testHTTP404OnProtectedHostUsesFallback() throws {
+        let url = try XCTUnwrap(URL(string: "https://xhslink.com/o/example"))
+        let request = URLRequest(url: url)
         let error = NSError(
             domain: "XHSDownloader",
             code: 404,
             userInfo: [NSLocalizedDescriptionKey: "HTTP 404: https://xhslink.com/o/example"]
         )
 
-        #expect(DownloaderHTTPCompatibility.shouldFallback(after: error, for: request))
+        XCTAssertTrue(DownloaderHTTPCompatibility.shouldFallback(after: error, for: request))
+    }
+
+    func testCurlCompatibilityArgumentsDisableProxyConfiguration() {
+        XCTAssertEqual(DownloaderNetworkPolicy.directCurlArguments, ["--disable", "--noproxy", "*", "--ipv4"])
     }
 }
