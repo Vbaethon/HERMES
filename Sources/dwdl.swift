@@ -675,6 +675,10 @@ enum DewuNativeDownloader {
                 return components.url
             }
         }
+        if components.percentEncodedQuery != nil {
+            components.percentEncodedQuery = nil
+            return components.url
+        }
         return url
     }
 
