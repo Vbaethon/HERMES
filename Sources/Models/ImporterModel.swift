@@ -54,7 +54,6 @@ final class ImporterModel: ObservableObject {
     @Published var selectedCompletedIDs = Set<CompletedItem.ID>()
     @Published var completedFilter: CompletedFilter = .all {
         didSet {
-            completedScrollToTopRequestID += 1
             retainVisibleCompletedSelection()
         }
     }
@@ -85,10 +84,6 @@ final class ImporterModel: ObservableObject {
     @Published var isProcessing = false
     @Published var statusText = "拖入照片和视频，或点击添加文件。"
     @Published var isImportingCompleted = false
-    var queueScrollOriginY: CGFloat = 0
-    var completedScrollOriginY: CGFloat = 0
-    @Published var queueScrollToTopRequestID = 0
-    @Published var completedScrollToTopRequestID = 0
     @Published var downloadShareText = ""
     @Published var downloadOutputFolder: URL {
         didSet {
@@ -103,7 +98,6 @@ final class ImporterModel: ObservableObject {
     @Published var selectedDownloadItemIDs = Set<DownloadGridItem.ID>()
     @Published var downloadFilter: DownloadFilter = .all {
         didSet {
-            downloadScrollToTopRequestID += 1
             rebuildVisibleDownloadItems()
             retainVisibleDownloadSelection()
         }
@@ -113,8 +107,6 @@ final class ImporterModel: ObservableObject {
     @Published var isImportingDownloadMedia = false
     @Published var downloadStatusText = "输入分享链接开始下载。"
     @Published private(set) var downloadProgressItems: [DownloadProgressItem] = []
-    var downloadScrollOriginY: CGFloat = 0
-    @Published var downloadScrollToTopRequestID = 0
     @Published private(set) var downloadInputResetID = 0
 
     private var isRefreshingCompleted = false
@@ -497,8 +489,7 @@ final class ImporterModel: ObservableObject {
     }
 
     private nonisolated static func clearThumbnailCaches() {
-        thumbnailCache.removeAll()
-        ThumbnailDiskCache.removeAll()
+        SystemThumbnailProvider.shared.removeAll()
     }
 
     private nonisolated static func withSecurityScopedAccess<T>(to url: URL, _ body: () throws -> T) rethrows -> T {
@@ -1322,25 +1313,6 @@ final class ImporterModel: ObservableObject {
     func retainVisibleDownloadSelection() {
         let visibleIDs = Set(visibleDownloadItems.map(\.id))
         selectedDownloadItemIDs = selectedDownloadItemIDs.intersection(visibleIDs)
-    }
-
-    func resetCompletedScrollToTop() {
-        completedScrollToTopRequestID += 1
-    }
-
-    func resetDownloadScrollToTop() {
-        downloadScrollToTopRequestID += 1
-    }
-
-    func resetSelectedPageScrollToTop() {
-        switch selection ?? .queue {
-        case .queue:
-            queueScrollToTopRequestID += 1
-        case .downloads:
-            downloadScrollToTopRequestID += 1
-        case .completed:
-            completedScrollToTopRequestID += 1
-        }
     }
 
     func clearVisibleCompleted(deleteFiles: Bool) {

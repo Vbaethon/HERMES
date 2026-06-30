@@ -1,23 +1,10 @@
 import AppKit
 import Combine
 
-final class ThemedBackgroundView: NSView {
-    override var wantsUpdateLayer: Bool { true }
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func updateLayer() {
-        super.updateLayer()
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-    }
+@MainActor
+protocol ThumbnailPageController: AnyObject {
+    func setVisible(_ visible: Bool)
+    func reload()
 }
 
 final class DetailPagesController: NSViewController {
@@ -25,6 +12,7 @@ final class DetailPagesController: NSViewController {
     private let queueController: QueuePageController
     private let downloadController: DownloadPageController
     private let completedController: CompletedPageController
+    private var activeSelection: SidebarSection?
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel) {
@@ -41,10 +29,7 @@ final class DetailPagesController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = ThemedBackgroundView()
-        rootView.wantsLayer = true
-        rootView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        view = rootView
+        view = SystemWindowBackgroundController.makePageBackgroundView()
     }
 
     override func viewDidLoad() {
@@ -60,6 +45,9 @@ final class DetailPagesController: NSViewController {
                 controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
             ])
         }
+        for controller in thumbnailPageControllers {
+            controller.setVisible(false)
+        }
         reload()
 
         model.$selection
@@ -70,9 +58,11 @@ final class DetailPagesController: NSViewController {
 
     func reload() {
         let selection = model.selection ?? .queue
-        queueController.setVisible(selection == .queue)
-        downloadController.setVisible(selection == .downloads)
-        completedController.setVisible(selection == .completed)
+        let selectionChanged = activeSelection != selection
+        if selectionChanged {
+            controller(for: activeSelection)?.setVisible(false)
+            activeSelection = selection
+        }
         switch selection {
         case .queue:
             queueController.reload()
@@ -81,15 +71,33 @@ final class DetailPagesController: NSViewController {
         case .completed:
             completedController.reload()
         }
+        if selectionChanged {
+            controller(for: selection)?.setVisible(true)
+        }
+    }
+
+    private func controller(for selection: SidebarSection?) -> (any ThumbnailPageController)? {
+        guard let selection else { return nil }
+        switch selection {
+        case .queue:
+            return queueController
+        case .downloads:
+            return downloadController
+        case .completed:
+            return completedController
+        }
+    }
+
+    private var thumbnailPageControllers: [any ThumbnailPageController] {
+        [queueController, downloadController, completedController]
     }
 }
 
-final class QueuePageController: NSViewController {
+final class QueuePageController: NSViewController, ThumbnailPageController {
     private let model: ImporterModel
     private var scrollView: NSScrollView?
     private var coordinator: PairCollectionView.Coordinator?
     private let emptyView: DropZoneView
-    private var isVisible = false
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel) {
@@ -104,10 +112,7 @@ final class QueuePageController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = ThemedBackgroundView()
-        rootView.wantsLayer = true
-        rootView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        view = rootView
+        view = SystemWindowBackgroundController.makePageBackgroundView()
     }
 
     override func viewDidLoad() {
@@ -116,9 +121,7 @@ final class QueuePageController: NSViewController {
 
         let pair = PairCollectionView.make(
             items: model.pairs,
-            model: model,
-            scrollToTopRequestID: model.queueScrollToTopRequestID,
-            isVisible: isVisible
+            model: model
         )
         scrollView = pair.0
         coordinator = pair.1
@@ -148,9 +151,7 @@ final class QueuePageController: NSViewController {
     }
 
     func setVisible(_ visible: Bool) {
-        isVisible = visible
         view.isHidden = !visible
-        coordinator?.scrollPosition.setActive(visible)
     }
 
     func reload() {
@@ -167,19 +168,16 @@ final class QueuePageController: NSViewController {
             scrollView: scrollView,
             coordinator: coordinator,
             items: model.pairs,
-            model: model,
-            scrollToTopRequestID: model.queueScrollToTopRequestID,
-            isVisible: isVisible
+            model: model
         )
     }
 }
 
-final class CompletedPageController: NSViewController {
+final class CompletedPageController: NSViewController, ThumbnailPageController {
     private let model: ImporterModel
     private let emptyView = EmptyStateView(title: "还没有完成项目", symbolName: AppSymbol.completed.normal, message: "合成完成后会显示在这里。")
     private var scrollView: NSScrollView?
     private var coordinator: CompletedCollectionView.Coordinator?
-    private var isVisible = false
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel) {
@@ -193,10 +191,7 @@ final class CompletedPageController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = ThemedBackgroundView()
-        rootView.wantsLayer = true
-        rootView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        view = rootView
+        view = SystemWindowBackgroundController.makePageBackgroundView()
     }
 
     override func viewDidLoad() {
@@ -206,9 +201,7 @@ final class CompletedPageController: NSViewController {
         let pair = CompletedCollectionView.make(
             items: model.visibleCompleted,
             filter: model.completedFilter,
-            model: model,
-            scrollToTopRequestID: model.completedScrollToTopRequestID,
-            isVisible: isVisible
+            model: model
         )
         scrollView = pair.0
         coordinator = pair.1
@@ -243,9 +236,7 @@ final class CompletedPageController: NSViewController {
     }
 
     func setVisible(_ visible: Bool) {
-        isVisible = visible
         view.isHidden = !visible
-        coordinator?.scrollPosition.setActive(visible)
     }
 
     func reload() {
@@ -271,9 +262,7 @@ final class CompletedPageController: NSViewController {
             coordinator: coordinator,
             items: visibleCompleted,
             filter: model.completedFilter,
-            model: model,
-            scrollToTopRequestID: model.completedScrollToTopRequestID,
-            isVisible: isVisible
+            model: model
         )
     }
 }

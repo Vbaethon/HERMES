@@ -29,9 +29,7 @@ final class MainWindowController: NSWindowController {
                 }
             },
             onSelect: { [model] section in
-                if section == model.selection {
-                    model.resetSelectedPageScrollToTop()
-                } else {
+                if section != model.selection {
                     model.selection = section
                 }
             }
@@ -93,11 +91,7 @@ final class MainWindowController: NSWindowController {
         window.isRestorable = false
         window.title = pageTitle
         window.subtitle = pageSubtitle
-        window.toolbarStyle = .unified
-        window.styleMask.insert(.fullSizeContentView)
-        window.titlebarAppearsTransparent = false
-        window.isOpaque = true
-        window.backgroundColor = .windowBackgroundColor
+        SystemWindowBackgroundController.configureMainWindow(window)
         updateWindowSizeLimits()
     }
 
@@ -284,9 +278,7 @@ final class MainWindowController: NSWindowController {
     }
 
     private func selectSidebarSection(_ section: SidebarSection) {
-        if section == model.selection {
-            model.resetSelectedPageScrollToTop()
-        } else {
+        if section != model.selection {
             model.selection = section
         }
     }
@@ -294,7 +286,7 @@ final class MainWindowController: NSWindowController {
     private func refreshCurrentPage() {
         switch model.selection ?? .queue {
         case .queue:
-            model.resetSelectedPageScrollToTop()
+            break
         case .downloads:
             model.refreshDownloads()
         case .completed:

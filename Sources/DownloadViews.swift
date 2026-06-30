@@ -73,25 +73,6 @@ private enum DownloadInputMetrics {
 
 // MARK: - Download Share Text Views
 
-final class DownloadShareClipView: NSClipView {
-    var allowsDocumentScrolling = false {
-        didSet {
-            guard !allowsDocumentScrolling else { return }
-            var bounds = self.bounds
-            bounds.origin = .zero
-            self.bounds = bounds
-        }
-    }
-
-    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
-        var constrainedBounds = super.constrainBoundsRect(proposedBounds)
-        if !allowsDocumentScrolling {
-            constrainedBounds.origin = .zero
-        }
-        return constrainedBounds
-    }
-}
-
 final class DownloadShareTextContainerView: NSView {
     let scrollView = NSScrollView()
 
@@ -177,9 +158,6 @@ enum DownloadShareTextInput {
         coordinator.model = model
         let containerView = DownloadShareTextContainerView()
         let scrollView = containerView.scrollView
-        let clipView = DownloadShareClipView()
-        clipView.drawsBackground = false
-        scrollView.contentView = clipView
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = false
@@ -241,7 +219,6 @@ enum DownloadShareTextInput {
         coordinator.model = model
         let allowsTextScrolling = lineCount >= DownloadInputMetrics.maxVisibleLineCount
         coordinator.allowsTextScrolling = allowsTextScrolling
-        (scrollView.contentView as? DownloadShareClipView)?.allowsDocumentScrolling = allowsTextScrolling
         scrollView.hasVerticalScroller = allowsTextScrolling
         textView.isVerticallyResizable = allowsTextScrolling
         textView.textContainer?.heightTracksTextView = false
@@ -293,13 +270,6 @@ enum DownloadShareTextInput {
             textView.frame.size.width = contentSize.width
             if !allowsTextScrolling {
                 textView.frame.size.height = contentSize.height
-            }
-
-            if allowsTextScrolling {
-                if textView.window?.firstResponder === textView {
-                    textView.scrollRangeToVisible(textView.selectedRange())
-                    scrollView.reflectScrolledClipView(scrollView.contentView)
-                }
             }
         }
     }
@@ -1044,14 +1014,13 @@ final class DownloadProgressStackView: NSView {
 // MARK: - Download Page Controller
 
 @MainActor
-final class DownloadPageController: NSViewController {
+final class DownloadPageController: NSViewController, ThumbnailPageController {
     private let model: ImporterModel
     private let emptyView: EmptyStateView
     private let downloadBar: DownloadBarView
     private let progressStack = DownloadProgressStackView()
     private var scrollView: NSScrollView?
     private var coordinator: DownloadCollectionView.Coordinator?
-    private var isVisible = false
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel) {
@@ -1067,10 +1036,7 @@ final class DownloadPageController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = ThemedBackgroundView()
-        rootView.wantsLayer = true
-        rootView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        view = rootView
+        view = SystemWindowBackgroundController.makePageBackgroundView()
     }
 
     override func viewDidLoad() {
@@ -1086,9 +1052,7 @@ final class DownloadPageController: NSViewController {
             items: model.visibleDownloadItems,
             filter: model.downloadFilter,
             model: model,
-            scrollToTopRequestID: model.downloadScrollToTopRequestID,
-            bottomContentInset: bottomInset,
-            isVisible: isVisible
+            bottomContentInset: bottomInset
         )
         scrollView = pair.0
         coordinator = pair.1
@@ -1153,9 +1117,7 @@ final class DownloadPageController: NSViewController {
     }
 
     func setVisible(_ visible: Bool) {
-        isVisible = visible
         view.isHidden = !visible
-        coordinator?.scrollPosition.setActive(visible)
     }
 
     func reload() {
@@ -1179,9 +1141,7 @@ final class DownloadPageController: NSViewController {
                 items: model.visibleDownloadItems,
                 filter: model.downloadFilter,
                 model: model,
-                scrollToTopRequestID: model.downloadScrollToTopRequestID,
-                bottomContentInset: bottomInset,
-                isVisible: isVisible
+                bottomContentInset: bottomInset
             )
         }
     }

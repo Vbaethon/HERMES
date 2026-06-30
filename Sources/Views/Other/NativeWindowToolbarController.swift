@@ -84,11 +84,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
 
         private func configureWindowChrome(_ window: NSWindow) {
             window.isRestorable = false
-            window.toolbarStyle = .unified
-            window.styleMask.insert(.fullSizeContentView)
-            window.titlebarAppearsTransparent = false
-            window.isOpaque = true
-            window.backgroundColor = .windowBackgroundColor
+            SystemWindowBackgroundController.configureMainWindow(window)
         }
 
         func reloadToolbarIfNeeded() {
@@ -405,7 +401,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         private var refreshHelp: String {
             switch model.selection ?? .queue {
             case .queue:
-                "回到顶部"
+                "刷新"
             case .downloads:
                 "刷新"
             case .completed:
@@ -424,7 +420,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         @objc private func refresh(_ sender: Any?) {
             switch model.selection ?? .queue {
             case .queue:
-                model.resetSelectedPageScrollToTop()
+                break
             case .downloads:
                 model.refreshDownloads()
             case .completed:
@@ -506,9 +502,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             let filters = CompletedFilter.allCases
             guard filters.indices.contains(sender.selectedSegment) else { return }
             let selected = filters[sender.selectedSegment]
-            if selected == model.completedFilter {
-                model.resetCompletedScrollToTop()
-            } else {
+            if selected != model.completedFilter {
                 model.completedFilter = selected
             }
         }
@@ -517,9 +511,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             let filters = DownloadFilter.allCases
             guard filters.indices.contains(sender.selectedSegment) else { return }
             let selected = filters[sender.selectedSegment]
-            if selected == model.downloadFilter {
-                model.resetDownloadScrollToTop()
-            } else {
+            if selected != model.downloadFilter {
                 model.downloadFilter = selected
             }
         }

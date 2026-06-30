@@ -23,9 +23,7 @@ final class SettingsViewController: NSViewController {
     private let completedAddToAlbumButton = NSButton(checkboxWithTitle: "从已完成导入时添加到 HERMES 相簿", target: nil, action: nil)
 
     override func loadView() {
-        view = ThemedBackgroundView()
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        view = SystemWindowBackgroundController.makePageBackgroundView()
     }
 
     override func viewDidLoad() {

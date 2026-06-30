@@ -101,7 +101,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         representedURL = url
         thumbnailStatus = status
         self.mediaKind = mediaKind
-        let cachedImage = thumbnailCache.image(for: url)
+        let cachedImage = SystemThumbnailProvider.shared.cachedThumbnail(for: url)
         if let cachedImage {
             showLoadedThumbnail(cachedImage, animated: true)
         } else {
@@ -122,18 +122,15 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
-            let image = await loadThumbnailImage(from: url, maxPixelSize: ThumbnailCollectionStyle.thumbnailMaxPixelSize)
+            let image = await SystemThumbnailProvider.shared.thumbnail(
+                for: url,
+                maxPixelSize: ThumbnailCollectionStyle.thumbnailMaxPixelSize
+            )
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.representedURL == url, !Task.isCancelled else { return }
                 let shouldFadeIn = self.imageView?.image == nil
-                if let image {
-                    self.showLoadedThumbnail(image, animated: shouldFadeIn)
-                } else {
-                    self.imageView?.image = nil
-                    self.thumbnailView?.updateImageFrame(for: nil)
-                    self.imageView?.alphaValue = 0
-                }
+                self.showLoadedThumbnail(image, animated: shouldFadeIn)
             }
         }
     }
@@ -170,7 +167,6 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask?.cancel()
         badgeTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(320))
-            await thumbnailScrollActivity.waitUntilIdle()
             guard !Task.isCancelled else { return }
             let durationText = await loadVideoDurationText(from: url)
             guard !Task.isCancelled else { return }
@@ -223,12 +219,12 @@ final class ThumbnailStateRingView: NSView {
         let center = NotificationCenter.default
         keyWindowObservers.append(
             center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                self?.updateBorderColor()
+                Task { @MainActor [weak self] in self?.updateBorderColor() }
             }
         )
         keyWindowObservers.append(
             center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
-                self?.updateBorderColor()
+                Task { @MainActor [weak self] in self?.updateBorderColor() }
             }
         )
         updateBorderColor()

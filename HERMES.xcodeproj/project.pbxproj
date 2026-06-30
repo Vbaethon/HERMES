@@ -40,7 +40,9 @@
 		111111111111111111111138 /* DownloaderInfra.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111047 /* DownloaderInfra.swift */; };
 		111111111111111111111139 /* JSONValueUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111048 /* JSONValueUtilities.swift */; };
 		11111111111111111111113A /* MediaFileUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111049 /* MediaFileUtilities.swift */; };
-		11111111111111111111113B /* ThumbnailCollectionCoordinatorUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */; };
+		11111111111111111111113D /* ThumbnailGridController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104C /* ThumbnailGridController.swift */; };
+		11111111111111111111113E /* SystemThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104D /* SystemThumbnailProvider.swift */; };
+		11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104E /* SystemWindowBackgroundController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -103,7 +105,9 @@
 		111111111111111111111047 /* DownloaderInfra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderInfra.swift; sourceTree = "<group>"; };
 		111111111111111111111048 /* JSONValueUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValueUtilities.swift; sourceTree = "<group>"; };
 		111111111111111111111049 /* MediaFileUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaFileUtilities.swift; sourceTree = "<group>"; };
-		11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailCollectionCoordinatorUtilities.swift; sourceTree = "<group>"; };
+		11111111111111111111104C /* ThumbnailGridController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridController.swift; sourceTree = "<group>"; };
+		11111111111111111111104D /* SystemThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/SystemThumbnailProvider.swift; sourceTree = "<group>"; };
+		11111111111111111111104E /* SystemWindowBackgroundController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/SystemWindowBackgroundController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -145,12 +149,14 @@
 				11111111111111111111103A /* PairCollectionView.swift */,
 				11111111111111111111103B /* DownloadCollectionView.swift */,
 				111111111111111111111033 /* CompletedCollectionView.swift */,
-				11111111111111111111104A /* ThumbnailCollectionCoordinatorUtilities.swift */,
+				11111111111111111111104C /* ThumbnailGridController.swift */,
 				111111111111111111111034 /* MainWindowController.swift */,
 				111111111111111111111035 /* NativeWindowToolbarController.swift */,
 				111111111111111111111036 /* PageControllers.swift */,
+				11111111111111111111104E /* SystemWindowBackgroundController.swift */,
 				111111111111111111111037 /* ThumbnailItemViews.swift */,
 				111111111111111111111038 /* ThumbnailService.swift */,
+				11111111111111111111104D /* SystemThumbnailProvider.swift */,
 				111111111111111111111040 /* Utilities */,
 			);
 			path = Sources;
@@ -344,12 +350,14 @@
 				111111111111111111111133 /* MainWindowController.swift in Sources */,
 				111111111111111111111134 /* NativeWindowToolbarController.swift in Sources */,
 				111111111111111111111135 /* PageControllers.swift in Sources */,
+				11111111111111111111113F /* SystemWindowBackgroundController.swift in Sources */,
 				111111111111111111111136 /* ThumbnailItemViews.swift in Sources */,
 				111111111111111111111137 /* ThumbnailService.swift in Sources */,
+				11111111111111111111113D /* ThumbnailGridController.swift in Sources */,
+				11111111111111111111113E /* SystemThumbnailProvider.swift in Sources */,
 				111111111111111111111138 /* DownloaderInfra.swift in Sources */,
 				111111111111111111111139 /* JSONValueUtilities.swift in Sources */,
 				11111111111111111111113A /* MediaFileUtilities.swift in Sources */,
-				11111111111111111111113B /* ThumbnailCollectionCoordinatorUtilities.swift in Sources */,
 
 				111111111111111111111123 /* LivePhotoToolRunner.swift in Sources */,
 				111111111111111111111124 /* PhotoLibraryImporter.swift in Sources */,
