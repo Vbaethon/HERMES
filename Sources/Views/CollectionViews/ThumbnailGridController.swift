@@ -72,16 +72,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true) {
-        let oldItemsByID = itemByID
         itemByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         items = newItems
-
-        for item in newItems {
-            if let oldItem = oldItemsByID[item.id],
-               oldItem.url != item.url || oldItem.contentVersion != item.contentVersion {
-                SystemThumbnailProvider.shared.invalidate(item.url)
-            }
-        }
 
         var snapshot = NSDiffableDataSourceSnapshot<String, String>()
         snapshot.appendSections([Section.main])

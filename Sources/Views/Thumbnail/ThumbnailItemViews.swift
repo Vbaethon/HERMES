@@ -101,19 +101,13 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         representedURL = url
         thumbnailStatus = status
         self.mediaKind = mediaKind
-        let cachedImage = SystemThumbnailProvider.shared.cachedThumbnail(for: url)
-        if let cachedImage {
-            showLoadedThumbnail(cachedImage, animated: true)
-        } else {
-            imageView?.alphaValue = 0
-            imageView?.image = nil
-            thumbnailView?.updateImageFrame(for: nil)
-        }
+        imageView?.alphaValue = 0
+        imageView?.image = nil
+        thumbnailView?.updateImageFrame(for: nil)
         loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
         updateBorderAppearance(isSelected: isSelected)
         view.toolTip = url.lastPathComponent
 
-        guard cachedImage == nil else { return }
         startThumbnailLoad(for: url)
     }
 

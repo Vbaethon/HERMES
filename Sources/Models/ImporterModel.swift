@@ -475,10 +475,6 @@ final class ImporterModel: ObservableObject {
         UserDefaults.standard.string(forKey: downloadOutputFolderDefaultsKey)
     }
 
-    private nonisolated static func clearThumbnailCaches() {
-        SystemThumbnailProvider.shared.removeAll()
-    }
-
     private nonisolated static func withSecurityScopedAccess<T>(to url: URL, _ body: () throws -> T) rethrows -> T {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
@@ -594,12 +590,8 @@ final class ImporterModel: ObservableObject {
                 detachedRecordFiles,
                 to: destinationFolder
             )
-            let didMoveToNewFolder = outputFolder.standardizedFileURL != destinationFolder.standardizedFileURL
             outputFolder = destinationFolder
             Self.saveOutputFolderBookmark(for: destinationFolder)
-            if didMoveToNewFolder {
-                Self.clearThumbnailCaches()
-            }
             relocateCompletedRecords(
                 from: sourceFolder,
                 to: destinationFolder,
@@ -715,12 +707,8 @@ final class ImporterModel: ObservableObject {
     func selectDownloadOutputFolder(_ folder: URL) {
         guard !isDownloading, !isProcessingDownloads else { return }
         let standardizedFolder = folder.standardizedFileURL
-        let didChooseNewFolder = downloadOutputFolder.standardizedFileURL != standardizedFolder
         downloadOutputFolder = standardizedFolder
         Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
-        if didChooseNewFolder {
-            Self.clearThumbnailCaches()
-        }
         refreshDownloads()
         downloadStatusText = "下载文件夹已设置为“\(downloadOutputFolder.path)”。"
     }
