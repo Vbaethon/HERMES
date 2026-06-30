@@ -42,6 +42,7 @@ enum XHSNativeDownloader {
         var stripsDescription: Bool
         var requestUserAgent: String
         var videoHDRHint: VideoHDRHint?
+        var cookie: String?
     }
 
     private struct VideoHDRHint {
@@ -59,7 +60,8 @@ enum XHSNativeDownloader {
     static func run(
         shareText: String,
         destinationRoot: URL,
-        progress: DownloaderInfra.ProgressHandler? = nil
+        progress: DownloaderInfra.ProgressHandler? = nil,
+        cookie: String? = nil
     ) async -> ToolRunResult {
         do {
             let links = try await extractLinks(from: shareText)
@@ -71,7 +73,7 @@ enum XHSNativeDownloader {
             try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
             var lines: [String] = []
             for link in links {
-                let note = try await fetchNote(link)
+                let note = try await fetchNote(link, cookie: cookie)
                 let author = FileNaming.sanitizeFileName(note.author.isEmpty ? "unknown" : note.author, fallback: "unknown")
                 let rawUserID = note.userID.isEmpty ? (accountIDHint ?? "") : note.userID
                 let userID = rawUserID.isEmpty ? "" : cleanAccountName(rawUserID)
@@ -88,7 +90,8 @@ enum XHSNativeDownloader {
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).bin", usedNames: &usedNames),
                         stripsDescription: false,
                         requestUserAgent: note.requestUserAgent,
-                        videoHDRHint: nil
+                        videoHDRHint: nil,
+                        cookie: cookie
                     ))
                     if let liveURL = item.liveURL {
                         tasks.append(DownloadTask(
@@ -96,7 +99,8 @@ enum XHSNativeDownloader {
                             destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).mp4", usedNames: &usedNames),
                             stripsDescription: false,
                             requestUserAgent: note.requestUserAgent,
-                            videoHDRHint: nil
+                            videoHDRHint: nil,
+                            cookie: cookie
                         ))
                     }
                 }
@@ -107,7 +111,8 @@ enum XHSNativeDownloader {
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: originalURLFilename(videoURL, defaultName: "video.mp4"), usedNames: &usedNames),
                         stripsDescription: false,
                         requestUserAgent: note.requestUserAgent,
-                        videoHDRHint: note.videoHDRHint
+                        videoHDRHint: note.videoHDRHint,
+                        cookie: cookie
                     ))
                 }
 
@@ -192,12 +197,12 @@ enum XHSNativeDownloader {
         return responseURL ?? url
     }
 
-    private static func fetchNote(_ url: URL) async throws -> NoteInfo {
+    private static func fetchNote(_ url: URL, cookie: String? = nil) async throws -> NoteInfo {
         var notes: [NoteInfo] = []
         var desktopMessage: String?
         var firstError: Error?
         do {
-            var desktopResult = try await fetchNoteOnce(url, requestUserAgent: desktopUserAgent)
+            var desktopResult = try await fetchNoteOnce(url, requestUserAgent: desktopUserAgent, cookie: cookie)
             desktopMessage = desktopResult.sourceMessage
             if desktopResult.note.hasMedia {
                 desktopResult.note.requestUserAgent = desktopUserAgent
@@ -209,7 +214,7 @@ enum XHSNativeDownloader {
 
         var mobileMessage: String?
         do {
-            var mobileResult = try await fetchNoteOnce(url, requestUserAgent: mobileUserAgent)
+            var mobileResult = try await fetchNoteOnce(url, requestUserAgent: mobileUserAgent, cookie: cookie)
             mobileMessage = mobileResult.sourceMessage
             if mobileResult.note.hasMedia {
                 mobileResult.note.requestUserAgent = mobileUserAgent
@@ -221,7 +226,14 @@ enum XHSNativeDownloader {
             }
         }
 
-        if let bestNote = notes.max(by: { noteScore($0) < noteScore($1) }) {
+        if let bestNote = notes.max(by: { lhs, rhs in
+            let lhsScore = noteScore(lhs)
+            let rhsScore = noteScore(rhs)
+            if lhsScore != rhsScore { return lhsScore < rhsScore }
+            // Tiebreaker: mobile UA responses typically carry richer stream metadata
+            // (width, height, videoBitrate, etc.) that desktop responses strip out.
+            return lhs.requestUserAgent == mobileUserAgent
+        }) {
             return bestNote
         }
         if let firstError {
@@ -232,8 +244,8 @@ enum XHSNativeDownloader {
         throw NSError(domain: "XHSDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "没有可下载的小红书媒体。\(detail)"])
     }
 
-    private static func fetchNoteOnce(_ url: URL, requestUserAgent: String) async throws -> (note: NoteInfo, sourceMessage: String?) {
-        let (data, _) = try await requestAsync(url, readsBody: true, requestUserAgent: requestUserAgent)
+    private static func fetchNoteOnce(_ url: URL, requestUserAgent: String, cookie: String? = nil) async throws -> (note: NoteInfo, sourceMessage: String?) {
+        let (data, _) = try await requestAsync(url, readsBody: true, requestUserAgent: requestUserAgent, cookie: cookie)
         let html = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
         let state = try extractInitialState(from: html)
         guard let note = extractNote(from: state) else {
@@ -384,19 +396,7 @@ enum XHSNativeDownloader {
                     opaque["hdr_type"] = hdrType
                 }
                 inheritVideoHDRMetadata(from: mediaV2VideoMeta, into: &opaque)
-                if let hdURL = JSONValueUtilities.nonEmptyString(opaque["hd_screencast_stream"]) {
-                    var item = opaque
-                    item["master_url"] = hdURL
-                    item["video_codec"] = "h265"
-                    item["stream_quality_hint"] = "hd_screencast"
-                    candidates.append(StreamCandidate(codec: "h265", item: item))
-                }
-                if let defaultURL = JSONValueUtilities.nonEmptyString(opaque["default_screencast_stream"]) {
-                    var item = opaque
-                    item["master_url"] = defaultURL
-                    item["stream_quality_hint"] = "default_screencast"
-                    candidates.append(StreamCandidate(codec: "h264", item: item))
-                }
+                candidates.append(contentsOf: screencastCandidates(from: opaque, inheritedMeta: mediaV2VideoMeta))
             }
         }
 
@@ -450,6 +450,23 @@ enum XHSNativeDownloader {
         return candidates
     }
 
+    private static func screencastCandidates(from dict: [String: Any], inheritedMeta: [String: Any] = [:]) -> [StreamCandidate] {
+        var candidates: [StreamCandidate] = []
+        for (key, codec, hint) in [
+            ("hd_screencast_stream", "h265", "hd_screencast"),
+            ("default_screencast_stream", "h264", "default_screencast")
+        ] as [(String, String, String)] {
+            if let urlString = JSONValueUtilities.nonEmptyString(dict[key]) {
+                var item = dict
+                item["master_url"] = urlString
+                item["stream_quality_hint"] = hint
+                inheritVideoHDRMetadata(from: inheritedMeta, into: &item)
+                candidates.append(StreamCandidate(codec: codec, item: item))
+            }
+        }
+        return candidates
+    }
+
     private static func nestedStreamCandidates(in value: Any, depth: Int = 0) -> [StreamCandidate] {
         guard depth <= 5 else { return [] }
         if let mediaV2Text = value as? String, mediaV2Text.contains("stream"),
@@ -463,7 +480,8 @@ enum XHSNativeDownloader {
             return []
         }
 
-        var candidates = streamCandidates(from: dictionary)
+        var candidates = streamCandidates(from: dictionary, inheritedMeta: dictionary)
+        candidates.append(contentsOf: screencastCandidates(from: dictionary, inheritedMeta: dictionary))
         for nestedValue in dictionary.values {
             candidates.append(contentsOf: nestedStreamCandidates(in: nestedValue, depth: depth + 1))
         }
@@ -698,7 +716,7 @@ enum XHSNativeDownloader {
         return nil
     }
 
-    private static func requestAsync(_ url: URL, readsBody: Bool, requestUserAgent: String = mobileUserAgent) async throws -> (Data, URL?) {
+    private static func requestAsync(_ url: URL, readsBody: Bool, requestUserAgent: String = mobileUserAgent, cookie: String? = nil) async throws -> (Data, URL?) {
         let requestURL = secureXHSURL(url)
         var request = URLRequest(url: requestURL)
         request.httpMethod = "GET"
@@ -708,6 +726,9 @@ enum XHSNativeDownloader {
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
         request.setValue("https://www.xiaohongshu.com/explore", forHTTPHeaderField: "Referer")
+        if let cookie, !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
 
         if requestURL.host?.lowercased() == "xhslink.com"
             || DownloaderHTTPCompatibility.shouldUseDirectly(for: request) {
@@ -768,7 +789,7 @@ enum XHSNativeDownloader {
                 let temporaryURL = task.destination.appendingPathExtension("part")
                 for sourceURL in task.urls {
                     do {
-                        try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, progress: progress)
+                        try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, cookie: task.cookie, progress: progress)
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
@@ -825,6 +846,7 @@ enum XHSNativeDownloader {
         _ url: URL,
         to destination: URL,
         requestUserAgent: String,
+        cookie: String? = nil,
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
         let requestURL = secureXHSURL(url)
@@ -833,6 +855,9 @@ enum XHSNativeDownloader {
         request.assumesHTTP3Capable = false
         request.setValue(requestUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        if let cookie, !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
         if shouldUseDirectly(request) {
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination)

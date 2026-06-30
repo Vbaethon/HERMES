@@ -76,6 +76,10 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .chooseCurrentFolder, object: nil)
     }
 
+    @objc private func clearXHSCookie(_ sender: Any?) {
+        CookieManager.clearXHSCookie()
+    }
+
     private func makeMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
@@ -149,6 +153,10 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         let chooseFolderItem = NSMenuItem(title: "选择当前文件夹...", action: #selector(chooseCurrentFolder(_:)), keyEquivalent: "")
         chooseFolderItem.target = self
         actionMenu.addItem(chooseFolderItem)
+        actionMenu.addItem(.separator())
+        let clearCookieItem = NSMenuItem(title: "清除小红书 Cookie", action: #selector(clearXHSCookie(_:)), keyEquivalent: "")
+        clearCookieItem.target = self
+        actionMenu.addItem(clearCookieItem)
 
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)

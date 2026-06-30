@@ -720,6 +720,13 @@ final class ImporterModel: ObservableObject {
     }
 
     private func enqueueDownloadShare(shareText: String) async {
+        // 检测并处理 Cookie 格式输入
+        let (extractedCookie, cleanedText) = CookieManager.extractCookie(from: shareText)
+        if let cookie = extractedCookie {
+            await handleCookieInput(cookie: cookie, shareText: cleanedText)
+            return
+        }
+
         let entries = Self.downloadShareEntries(from: shareText)
         guard !entries.isEmpty else {
             downloadStatusText = "没有识别到支持的分享链接。"
@@ -745,6 +752,72 @@ final class ImporterModel: ObservableObject {
             startNextDownloadTaskIfNeeded()
         } else {
             rebuildDownloadProgressItems()
+        }
+    }
+
+    private func handleCookieInput(cookie: String, shareText cleanedText: String) async {
+        // 创建临时下载任务以驱动进度条显示 Cookie 处理状态
+        let tempTaskID = UUID()
+        let tempTask = DownloadQueueTask(
+            id: tempTaskID,
+            shareText: "cookie: \(cookie.prefix(40))...",
+            entries: ["Cookie 配置"],
+            outputRoot: downloadOutputFolder,
+            title: "小红书 Cookie"
+        )
+        activeDownloadTask = tempTask
+        isDownloading = true
+        downloadShareText = ""
+        downloadInputResetID += 1
+
+        rebuildDownloadProgressItems(
+            activeCompletedCount: 0,
+            activeDetail: "识别 Cookie 格式…",
+            activeUnitProgress: 0.1
+        )
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        rebuildDownloadProgressItems(
+            activeCompletedCount: 0,
+            activeDetail: "验证 Cookie 有效性…",
+            activeUnitProgress: 0.3
+        )
+
+        let isValid = await CookieManager.validateXHSCookie(cookie)
+
+        if isValid {
+            CookieManager.saveXHSCookie(cookie)
+            rebuildDownloadProgressItems(
+                activeCompletedCount: 1,
+                activeDetail: "Cookie 已保存",
+                activeUnitProgress: 1.0
+            )
+            downloadStatusText = "小红书 Cookie 验证成功，已保存。后续下载将使用 Cookie 获取高清资源。"
+        } else {
+            rebuildDownloadProgressItems(
+                activeCompletedCount: 0,
+                activeDetail: "Cookie 验证失败",
+                activeUnitProgress: 0
+            )
+            downloadStatusText = "小红书 Cookie 验证失败，未保存。请检查 Cookie 是否正确。"
+        }
+
+        // 短暂展示结果
+        try? await Task.sleep(nanoseconds: 800_000_000)
+
+        // 清理临时进度
+        activeDownloadTask = nil
+        activeDownloadProgressState = nil
+        isDownloading = false
+        rebuildDownloadProgressItems()
+
+        // 如果 cleanedText 中含有 URL 链接，继续正常下载流程
+        if !cleanedText.isEmpty {
+            let entries = Self.downloadShareEntries(from: cleanedText)
+            if !entries.isEmpty {
+                await enqueueDownloadShare(shareText: cleanedText)
+            }
         }
     }
 
@@ -1681,11 +1754,22 @@ final class ImporterModel: ObservableObject {
         }
 
         if includesXHS {
-            switch await XHSNativeDownloader.run(shareText: shareText, destinationRoot: destinationRoot, progress: progress) {
+            let savedCookie = CookieManager.savedXHSCookie
+            switch await XHSNativeDownloader.run(shareText: shareText, destinationRoot: destinationRoot, progress: progress, cookie: savedCookie) {
             case .success(let message):
                 if !message.isEmpty { messages.append(message) }
             case .failure(let message):
-                return .failure(message)
+                // Cookie 可能过期，回退到无 Cookie 模式重试
+                if savedCookie != nil {
+                    switch await XHSNativeDownloader.run(shareText: shareText, destinationRoot: destinationRoot, progress: progress, cookie: nil) {
+                    case .success(let message):
+                        if !message.isEmpty { messages.append(message) }
+                    case .failure(let fallbackMessage):
+                        return .failure(fallbackMessage)
+                    }
+                } else {
+                    return .failure(message)
+                }
             }
         }
 

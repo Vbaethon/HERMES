@@ -45,6 +45,7 @@
 		111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111050 /* DownloaderNetworkPolicy.swift */; };
 		111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */; };
 		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
+		111111111111111111111145 /* CookieManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111144 /* CookieManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -112,6 +113,7 @@
 		111111111111111111111050 /* DownloaderNetworkPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderNetworkPolicy.swift; sourceTree = "<group>"; };
 		111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuPlaybackLogVideoExtractor.swift; sourceTree = "<group>"; };
 		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
+		111111111111111111111144 /* CookieManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookieManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -137,6 +139,7 @@
 			children = (
 				111111111111111111111029 /* HermesApp.swift */,
 				111111111111111111111002 /* dwdl.swift */,
+				111111111111111111111144 /* CookieManager.swift */,
 				111111111111111111111003 /* rndl.swift */,
 				111111111111111111111017 /* dydl.swift */,
 				111111111111111111111022 /* DownloaderHTTPCompatibility.swift */,
@@ -340,6 +343,7 @@
 				111111111111111111111128 /* HermesApp.swift in Sources */,
 				111111111111111111111102 /* dwdl.swift in Sources */,
 				111111111111111111111103 /* rndl.swift in Sources */,
+				111111111111111111111145 /* CookieManager.swift in Sources */,
 				111111111111111111111117 /* dydl.swift in Sources */,
 				111111111111111111111121 /* DownloaderHTTPCompatibility.swift in Sources */,
 				111111111111111111111126 /* UIModels.swift in Sources */,
