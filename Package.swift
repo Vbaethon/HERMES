@@ -17,6 +17,7 @@ let package = Package(
             path: "Sources",
             sources: [
                 "DownloaderHTTPCompatibility.swift",
+                "Utilities/DewuPlaybackLogVideoExtractor.swift",
                 "Utilities/DownloaderNetworkPolicy.swift"
             ],
             swiftSettings: [

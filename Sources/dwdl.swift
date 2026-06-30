@@ -76,20 +76,30 @@ enum DewuNativeDownloader {
             }
 
             if mediaPairs.isEmpty || videoURLs.isEmpty {
-                if didFetchAPIDetail, !pageInfo.isVideoPost, !imageSources.isEmpty, shareVideoURLs.isEmpty {
+                let shouldSearchPlaybackLogs = DewuPlaybackLogVideoExtractor.shouldSearchPlaybackLogs(
+                    didFetchAPIDetail: didFetchAPIDetail,
+                    hasAPIMediaPairs: !mediaPairs.isEmpty,
+                    hasVideoURLs: !videoURLs.isEmpty,
+                    isVideoPost: pageInfo.isVideoPost,
+                    hasImageSources: !imageSources.isEmpty,
+                    hasShareVideoURLs: !shareVideoURLs.isEmpty
+                )
+                if didFetchAPIDetail, !shouldSearchPlaybackLogs, !pageInfo.isVideoPost, !imageSources.isEmpty, shareVideoURLs.isEmpty {
                     didConfirmNoAPIVideo = true
                     lines.append("App 接口已确认当前帖子没有 Live Photo 视频。")
                 } else if roots.isEmpty {
                     lines.append("未找到得物 App 容器，使用分享页公开媒体兜底。")
                 } else {
-                    lines.append("本机没有当前帖子的详情接口记录，正在后台打开得物 App 生成签名请求...")
+                    lines.append(didFetchAPIDetail ? "App 接口未返回 Live Photo 视频，继续读取播放日志..." : "本机没有当前帖子的详情接口记录，正在后台打开得物 App 生成签名请求...")
                     Task.detached { openDewuApp(shareURL) }
-                    mediaPairs = await waitForAPIMediaPairs(contentID: pageInfo.contentID, roots: roots, databaseLimit: recentDatabaseLimit, timeout: waitSeconds)
-                    if mediaPairs.isEmpty {
-                        mediaPairs = await fetchAPIMediaPairs(contentID: pageInfo.contentID, databases: DewuLogStore.logDatabases(roots: roots))
+                    if !didFetchAPIDetail {
+                        mediaPairs = await waitForAPIMediaPairs(contentID: pageInfo.contentID, roots: roots, databaseLimit: recentDatabaseLimit, timeout: waitSeconds)
+                        if mediaPairs.isEmpty {
+                            mediaPairs = await fetchAPIMediaPairs(contentID: pageInfo.contentID, databases: DewuLogStore.logDatabases(roots: roots))
+                        }
+                        videoURLs = bestVideoVariants(mediaPairs.map(\.videoURL))
+                        videoSource = "App 接口 JSON"
                     }
-                    videoURLs = bestVideoVariants(mediaPairs.map(\.videoURL))
-                    videoSource = "App 接口 JSON"
 
                     if videoURLs.isEmpty {
                         let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
@@ -458,13 +468,9 @@ enum DewuNativeDownloader {
         """
         var urls: [URL] = []
         var seen = Set<String>()
-        let pattern = #"https?://video-cdn-auth(?:-[a-z]+)?\.dewu\.com/[^\s"'<>]+?\.mp4\?auth_key=[^\s"'<>]+"#
         for db in databases {
             for row in DewuLogStore.query(db: db, sql: sql, bindings: ["%\(contentID)%", "%\(contentID)%"]) {
-                let text = MediaFileUtilities.htmlDecode((row.first ?? "").replacingOccurrences(of: "\\/", with: "/"))
-                for match in RegexUtilities.allMatches(pattern, in: text) {
-                    let cleaned = String(match.trimmingCharacters(in: CharacterSet(charactersIn: ",);]}")))
-                    guard let url = normalizedURL(cleaned) else { continue }
+                for url in DewuPlaybackLogVideoExtractor.videoURLs(in: row.first ?? "") {
                     let key = url.path
                     if seen.insert(key).inserted {
                         urls.append(url)
