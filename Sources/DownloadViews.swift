@@ -50,6 +50,20 @@ private enum DownloadInputMetrics {
         max(text.split(separator: "\n", omittingEmptySubsequences: false).count, 1)
     }
 
+    static func laidOutLineCount(for text: String, width: CGFloat) -> Int {
+        guard width > 0 else { return rawLineCount(for: text) }
+        let storage = NSTextStorage(string: text.isEmpty ? " " : text,
+                                    attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: max(1, width - 12), height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        let height = manager.usedRect(for: container).height + (text.hasSuffix("\n") ? lineHeight : 0)
+        return max(1, Int(ceil(height / lineHeight)))
+    }
+
     static func inputLineCount(for rawLineCount: Int) -> Int {
         min(max(rawLineCount, minimumVisibleLineCount), maxVisibleLineCount)
     }
@@ -75,6 +89,11 @@ private enum DownloadInputMetrics {
 
 final class DownloadShareTextContainerView: NSView {
     let scrollView = NSScrollView()
+    var onLayout: (() -> Void)?
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
 
     init() {
         super.init(frame: .zero)
@@ -194,6 +213,9 @@ enum DownloadShareTextInput {
         scrollView.documentView = textView
         coordinator.scrollView = scrollView
         coordinator.textView = textView
+        containerView.onLayout = { [weak coordinator, weak scrollView] in
+            if let scrollView { coordinator?.updateTextViewLayout(in: scrollView) }
+        }
         update(
             containerView,
             coordinator: coordinator,
@@ -222,7 +244,7 @@ enum DownloadShareTextInput {
         let allowsTextScrolling = lineCount >= DownloadInputMetrics.maxVisibleLineCount
         coordinator.allowsTextScrolling = allowsTextScrolling
         scrollView.hasVerticalScroller = allowsTextScrolling
-        textView.isVerticallyResizable = allowsTextScrolling
+        textView.isVerticallyResizable = true
         textView.textContainer?.heightTracksTextView = false
         if coordinator.lastResetRequestID != resetRequestID {
             coordinator.lastResetRequestID = resetRequestID
@@ -230,7 +252,7 @@ enum DownloadShareTextInput {
             textView.string = ""
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             coordinator.isApplyingExternalText = false
-        } else if textView.string != model.downloadShareText {
+        } else if !textView.hasMarkedText(), textView.string != model.downloadShareText {
             coordinator.isApplyingExternalText = true
             textView.string = model.downloadShareText
             coordinator.isApplyingExternalText = false
@@ -265,13 +287,17 @@ enum DownloadShareTextInput {
         func updateTextViewLayout(in scrollView: NSScrollView) {
             guard let textView = scrollView.documentView as? NSTextView else { return }
             let contentSize = scrollView.contentSize
-            textView.textContainer?.containerSize = NSSize(
-                width: contentSize.width,
-                height: CGFloat.greatestFiniteMagnitude
-            )
+            guard contentSize.width > 0 else { return }
             textView.frame.size.width = contentSize.width
-            if !allowsTextScrolling {
-                textView.frame.size.height = contentSize.height
+            if let manager = textView.layoutManager, let container = textView.textContainer {
+                container.widthTracksTextView = false
+                container.containerSize = NSSize(
+                    width: max(1, contentSize.width - textView.textContainerInset.width * 2),
+                    height: CGFloat.greatestFiniteMagnitude
+                )
+                manager.ensureLayout(forCharacterRange: NSRange(location: 0, length: (textView.string as NSString).length))
+                let neededHeight = manager.usedRect(for: container).height + manager.extraLineFragmentRect.height + textView.textContainerInset.height * 2
+                textView.setFrameSize(NSSize(width: contentSize.width, height: max(contentSize.height, neededHeight)))
             }
         }
     }
@@ -463,9 +489,30 @@ final class DownloadBarView: NSView {
         ])
     }
 
+    var laidOutLineCount: Int {
+        let inputWidth = max(1, bounds.width - DownloadInputMetrics.leadingPadding - DownloadInputMetrics.trailingPadding
+            - 4 - DownloadInputMetrics.buttonSide - DownloadInputMetrics.horizontalSpacing)
+        let text = textCoordinator?.textView
+        let content = text?.hasMarkedText() == true ? (text?.string ?? model.downloadShareText) : model.downloadShareText
+        return DownloadInputMetrics.laidOutLineCount(for: content, width: inputWidth)
+    }
+
+    var onHeightChanged: (() -> Void)?
+    private var lastLayoutWidth: CGFloat = 0
+    override func layout() {
+        super.layout()
+        if abs(lastLayoutWidth - bounds.width) > 0.5 {
+            lastLayoutWidth = bounds.width
+            reload()
+        }
+    }
+
     func reload() {
-        let rawLineCount = DownloadInputMetrics.rawLineCount(for: model.downloadShareText)
-        heightConstraint?.constant = DownloadInputMetrics.barHeight(for: rawLineCount)
+        let rawLineCount = bounds.width > 0 ? laidOutLineCount : DownloadInputMetrics.rawLineCount(for: model.downloadShareText)
+        let newHeight = DownloadInputMetrics.barHeight(for: rawLineCount)
+        let heightChanged = heightConstraint?.constant != newHeight
+        heightConstraint?.constant = newHeight
+        if heightChanged { DispatchQueue.main.async { [weak self] in self?.onHeightChanged?() } }
         if let textContainer, let textCoordinator {
             DownloadShareTextInput.update(
                 textContainer,
@@ -1062,6 +1109,7 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
     private let emptyView: EmptyStateView
     private let downloadBar: DownloadBarView
     private let progressStack = DownloadProgressStackView()
+    private let queueButton = NSButton(title: "查看全部任务", target: nil, action: nil)
     private var scrollView: NSScrollView?
     private var coordinator: DownloadCollectionView.Coordinator?
     private var cancellables = Set<AnyCancellable>()
@@ -1133,6 +1181,16 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
             progressStack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DownloadInputMetrics.horizontalPagePadding),
             progressStack.heightAnchor.constraint(equalToConstant: DownloadInputMetrics.progressStackHeight)
         ])
+        downloadBar.onHeightChanged = { [weak self] in self?.reload() }
+        queueButton.target = self
+        queueButton.action = #selector(showQueue)
+        queueButton.bezelStyle = .inline
+        queueButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(queueButton)
+        NSLayoutConstraint.activate([
+            queueButton.centerXAnchor.constraint(equalTo: downloadBar.centerXAnchor),
+            queueButton.topAnchor.constraint(equalTo: downloadBar.bottomAnchor, constant: 8)
+        ])
         progressStack.update(with: model.downloadProgressItems, animated: false)
 
         scrollView?.isHidden = model.visibleDownloadItems.isEmpty
@@ -1163,10 +1221,35 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         view.isHidden = !visible
     }
 
+    @objc private func showQueue() {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "下载任务（\(model.downloadQueueCount)）"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 240))
+        let text = NSTextView(frame: scroll.bounds)
+        text.isEditable = false
+        text.isSelectable = true
+        text.font = .systemFont(ofSize: NSFont.systemFontSize)
+        text.string = model.downloadQueueSummary
+        text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "返回")
+        alert.beginSheetModal(for: window)
+    }
+
     func reload() {
+        queueButton.isHidden = model.downloadQueueCount == 0
+        queueButton.title = "查看全部任务（\(model.downloadQueueCount)）"
         downloadBar.reload()
-        emptyView.message = model.downloadStatusText
-        let rawLineCount = DownloadInputMetrics.rawLineCount(for: model.downloadShareText)
+        let hasItems = !model.downloadPairs.isEmpty || !model.downloadPhotos.isEmpty || !model.downloadVideos.isEmpty
+        emptyView.showAllAction = hasItems ? { [weak self] in self?.model.downloadFilter = .all } : nil
+        emptyView.title = hasItems ? "当前筛选下没有项目" : "还没有下载内容"
+        emptyView.message = hasItems ? "请在工具栏选择“全部项目”。" : model.downloadStatusText
+        let rawLineCount = downloadBar.laidOutLineCount
         let bottomInset = DownloadInputMetrics.downloadCollectionBottomInset(
             for: rawLineCount
         )

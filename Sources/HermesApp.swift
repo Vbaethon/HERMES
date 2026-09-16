@@ -28,6 +28,18 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard mainWindowController?.model.hasActiveWork == true else { return .terminateNow }
+        mainWindowController?.showActiveWorkNotice()
+        return .terminateCancel
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        mainWindowController?.showWindow(nil)
+        mainWindowController?.window?.makeKeyAndOrderFront(nil)
+        return true
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -92,7 +104,8 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        let controller = settingsWindowController ?? SettingsWindowController()
+        guard let model = mainWindowController?.model else { return }
+        let controller = settingsWindowController ?? SettingsWindowController(model: model)
         settingsWindowController = controller
         controller.showWindow(sender)
         controller.window?.makeKeyAndOrderFront(sender)
@@ -100,6 +113,23 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
 
     @objc private func openImportPanel(_ sender: Any?) {
         NotificationCenter.default.post(name: .openImportPanel, object: nil)
+    }
+
+    @objc private func startDownload(_ sender: Any?) {
+        NotificationCenter.default.post(name: .startDownload, object: nil)
+    }
+
+    @objc private func importToPhotos(_ sender: Any?) {
+        guard let model = mainWindowController?.model else { return }
+        Task {
+            if model.selection == .completed { await model.importCompletedToPhotos() }
+            else if model.selection == .downloads { await model.importSelectedDownloadMediaToPhotos(addToAlbum: model.addToAlbum) }
+        }
+    }
+
+    @objc private func showMainWindow(_ sender: Any?) {
+        mainWindowController?.showWindow(sender)
+        mainWindowController?.window?.makeKeyAndOrderFront(sender)
     }
 
     @objc private func startImport(_ sender: Any?) {
@@ -140,6 +170,22 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
     }
 
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let model = mainWindowController?.model
+        if menuItem.action == #selector(refreshCurrentPage(_:)) {
+            return model?.selection != .queue && model?.selection != nil
+        }
+        if menuItem.action == #selector(startDownload(_:)) {
+            return model?.selection == .downloads && !(model?.downloadShareText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+        if menuItem.action == #selector(importToPhotos(_:)) {
+            return model?.selection == .completed ? (model?.canImportCompleted ?? false)
+                : model?.selection == .downloads && (model?.canImportSelectedDownloadMedia ?? false)
+        }
+        if menuItem.action == #selector(chooseCurrentFolder(_:)) {
+            let downloads = model?.selection == .downloads
+            menuItem.title = downloads ? "更改下载文件夹…" : "移动导出文件夹…"
+            return downloads || (model?.canMoveOutputFolder ?? false)
+        }
         if menuItem.action == #selector(startImport(_:)) {
             return mainWindowController?.canComposeCurrentPage ?? false
         }
@@ -186,6 +232,13 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
         let composeItem = NSMenuItem(title: "合成 Live Photo", action: #selector(startImport(_:)), keyEquivalent: "\r")
         composeItem.target = self
         fileMenu.addItem(composeItem)
+        let downloadItem = NSMenuItem(title: "开始下载", action: #selector(startDownload(_:)), keyEquivalent: "")
+        downloadItem.target = self
+        fileMenu.addItem(downloadItem)
+        let importItem = NSMenuItem(title: "导入“照片”", action: #selector(importToPhotos(_:)), keyEquivalent: "")
+        importItem.target = self
+        fileMenu.addItem(importItem)
+        fileMenu.addItem(NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
         fileMenu.addItem(.separator())
         let openFolderItem = NSMenuItem(title: "打开当前文件夹", action: #selector(openCurrentFolder(_:)), keyEquivalent: "o")
         openFolderItem.keyEquivalentModifierMask = [.command, .shift]
@@ -240,6 +293,9 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
         windowMenuItem.submenu = windowMenu
         windowMenu.addItem(NSMenuItem(title: "最小化", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m"))
         windowMenu.addItem(NSMenuItem(title: "缩放", action: #selector(NSWindow.zoom(_:)), keyEquivalent: ""))
+        let mainWindowItem = NSMenuItem(title: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "")
+        mainWindowItem.target = self
+        windowMenu.addItem(mainWindowItem)
         NSApp.windowsMenu = windowMenu
 
         return mainMenu

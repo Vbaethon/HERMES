@@ -81,14 +81,6 @@ enum CompletedCollectionView {
             menu.autoenablesItems = false
 
             menu.addItem(ThumbnailCollectionContextMenu.item(
-                title: ThumbnailContextMenuItem.composeTitle(count: model.pairs.count),
-                symbolName: AppSymbol.composeLivePhoto.normal,
-                target: self,
-                action: #selector(composeFromContextMenu(_:)),
-                isEnabled: false
-            ))
-            menu.addItem(.separator())
-            menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.openLocationTitle(count: selectedCount),
                 symbolName: AppSymbol.openFolder.normal,
                 target: self,
@@ -101,14 +93,14 @@ enum CompletedCollectionView {
                 symbolName: AppSymbol.importCompleted.normal,
                 target: self,
                 action: #selector(importFromContextMenu(_:)),
-                isEnabled: selectedCount > 0 && !model.isImportingCompleted
+                isEnabled: model.canImportCompleted
             ))
             menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.importToAlbumTitle(count: selectedCount),
                 symbolName: AppSymbol.addToAlbum.normal,
                 target: self,
                 action: #selector(importToAlbumFromContextMenu(_:)),
-                isEnabled: selectedCount > 0 && !model.isImportingCompleted
+                isEnabled: model.canImportCompleted
             ))
             menu.addItem(.separator())
             menu.addItem(ThumbnailCollectionContextMenu.item(

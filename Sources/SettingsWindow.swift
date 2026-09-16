@@ -1,10 +1,11 @@
 import AppKit
+import Combine
 
 final class SettingsWindowController: NSWindowController {
-    init() {
-        let controller = SettingsViewController()
+    init(model: ImporterModel) {
+        let controller = SettingsViewController(model: model)
         let window = NSWindow(contentViewController: controller)
-        window.title = "设置"
+        window.title = "HERMES 设置"
         window.setContentSize(NSSize(width: 460, height: 260))
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
@@ -21,6 +22,17 @@ final class SettingsViewController: NSViewController {
     private let importToPhotosButton = NSButton(checkboxWithTitle: "合成后自动导入“照片”", target: nil, action: nil)
     private let addToAlbumButton = NSButton(checkboxWithTitle: "导入时加入 HERMES 相簿", target: nil, action: nil)
     private let completedAddToAlbumButton = NSButton(checkboxWithTitle: "从“已完成”导入时加入 HERMES 相簿", target: nil, action: nil)
+
+    private let model: ImporterModel
+    private var cancellables = Set<AnyCancellable>()
+
+    init(model: ImporterModel) {
+        self.model = model
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
         view = SystemWindowBackgroundController.makePageBackgroundView()
@@ -44,7 +56,11 @@ final class SettingsViewController: NSViewController {
             tabView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -18)
         ])
 
-        reloadFromDefaults()
+        reloadFromModel()
+        model.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reloadFromModel() }
+            .store(in: &cancellables)
     }
 
     private func makeGeneralPane() -> NSView {
@@ -72,30 +88,22 @@ final class SettingsViewController: NSViewController {
         return contentView
     }
 
-    private func reloadFromDefaults() {
-        let defaults = UserDefaults.standard
-        let importToPhotos = defaults.object(forKey: AppPreferenceKey.importToPhotos) as? Bool ?? true
-        importToPhotosButton.state = importToPhotos ? .on : .off
-        addToAlbumButton.state = (defaults.object(forKey: AppPreferenceKey.addToAlbum) as? Bool ?? false) ? .on : .off
-        addToAlbumButton.isEnabled = importToPhotos
-        completedAddToAlbumButton.state = (defaults.object(forKey: AppPreferenceKey.completedAddToAlbum) as? Bool ?? false) ? .on : .off
-        completedAddToAlbumButton.isEnabled = importToPhotos
+    private func reloadFromModel() {
+        importToPhotosButton.state = model.importToPhotos ? .on : .off
+        addToAlbumButton.state = model.addToAlbum ? .on : .off
+        addToAlbumButton.isEnabled = model.importToPhotos
+        completedAddToAlbumButton.state = model.completedAddToAlbum ? .on : .off
+        completedAddToAlbumButton.isEnabled = true
     }
 
     @objc private func toggleChanged(_ sender: NSButton) {
-        let defaults = UserDefaults.standard
         if sender === importToPhotosButton {
-            let enabled = sender.state == .on
-            defaults.set(enabled, forKey: AppPreferenceKey.importToPhotos)
-            if !enabled {
-                defaults.set(false, forKey: AppPreferenceKey.addToAlbum)
-                defaults.set(false, forKey: AppPreferenceKey.completedAddToAlbum)
-            }
+            model.importToPhotos = sender.state == .on
         } else if sender === addToAlbumButton {
-            defaults.set(sender.state == .on, forKey: AppPreferenceKey.addToAlbum)
+            model.addToAlbum = sender.state == .on
         } else if sender === completedAddToAlbumButton {
-            defaults.set(sender.state == .on, forKey: AppPreferenceKey.completedAddToAlbum)
+            model.completedAddToAlbum = sender.state == .on
         }
-        reloadFromDefaults()
+        reloadFromModel()
     }
 }

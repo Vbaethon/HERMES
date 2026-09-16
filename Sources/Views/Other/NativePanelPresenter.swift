@@ -18,7 +18,8 @@ enum NativePanelPresenter {
 
     static func chooseOutputParentFolder() -> URL? {
         let panel = NSOpenPanel()
-        panel.title = "选择新的导出位置"
+        panel.title = "移动导出文件夹…"
+        panel.message = "请选择新的父文件夹。确认后，将移动现有 HERMES 导出文件夹及其内容。"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false

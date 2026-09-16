@@ -110,6 +110,9 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
     }
 
         private func reloadVisibleItemState(in toolbar: NSToolbar) {
+            for item in toolbar.items where item.itemIdentifier == ID.chooseFolder {
+                item.isEnabled = model.selection == .downloads || model.canMoveOutputFolder
+            }
             for item in toolbar.items where item.itemIdentifier == ID.compose {
                 item.toolTip = composeHelp
             }
@@ -198,7 +201,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
                 clearEnabled: clearEnabled,
                 clearLabel: clearLabel,
                 clearHelp: clearHelp,
-                importCompletedEnabled: !model.selectedCompletedIDs.isEmpty && !model.isImportingCompleted,
+                importCompletedEnabled: model.canImportCompleted,
                 composeEnabled: composeEnabled,
                 completedFilter: model.completedFilter,
                 downloadFilter: model.downloadFilter
@@ -247,7 +250,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             case ID.openFolder:
                 return buttonItem(itemIdentifier, symbol: AppSymbol.openFolder, label: "打开文件夹", help: openFolderHelp, action: #selector(openFolder(_:)), isEnabled: true)
             case ID.chooseFolder:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.chooseFolder, label: chooseFolderHelp, help: chooseFolderHelp, action: #selector(chooseFolder(_:)), isEnabled: true)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.chooseFolder, label: chooseFolderHelp, help: chooseFolderHelp, action: #selector(chooseFolder(_:)), isEnabled: model.selection == .downloads || model.canMoveOutputFolder)
             case ID.importToPhotos:
                 return toggleItem(itemIdentifier, symbol: AppSymbol.importToPhotos, label: "合成后自动导入“照片”", help: "导入系统相册", state: model.importToPhotos, action: #selector(toggleImportToPhotos(_:)), isEnabled: true)
             case ID.addToAlbum:
@@ -257,7 +260,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             case ID.addFiles:
                 return buttonItem(itemIdentifier, symbol: AppSymbol.addFiles, label: "添加文件…", help: "选择要添加的照片、视频或文件夹", action: #selector(addFiles(_:)), isEnabled: true)
             case ID.importCompleted:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.importCompleted, label: "导入“照片”", help: "将选中的项目导入系统“照片”App", action: #selector(importCompleted(_:)), isEnabled: !model.selectedCompletedIDs.isEmpty && !model.isImportingCompleted)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.importCompleted, label: "导入“照片”", help: "将选中的项目导入系统“照片”App", action: #selector(importCompleted(_:)), isEnabled: model.canImportCompleted)
             case ID.compose:
                 return buttonItem(itemIdentifier, symbol: AppSymbol.composeLivePhoto, label: "合成 Live Photo", help: composeHelp, action: #selector(compose(_:)), isEnabled: composeEnabled)
             default:
@@ -372,8 +375,10 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
 
         private var addToAlbumEnabled: Bool {
             switch model.selection ?? .queue {
-            case .queue, .downloads, .completed:
+            case .queue, .downloads:
                 model.importToPhotos
+            case .completed:
+                true
             }
         }
 
@@ -430,7 +435,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         private var chooseFolderHelp: String {
-            model.selection == .downloads ? "更改下载文件夹…" : "更改导出位置…"
+            model.selection == .downloads ? "更改下载文件夹…" : "移动导出文件夹…"
         }
 
         @objc private func refresh(_ sender: Any?) {

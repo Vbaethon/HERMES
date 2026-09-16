@@ -48,3 +48,6 @@ HERMES.xcodeproj/project.xcworkspace/xcuserdata/
 /CHANGELOG.md
 /script/VERSIONING.md
 /Tests/DownloadRegression/README.md
+
+# Local audit reports, screenshots and validation evidence.
+/audit/

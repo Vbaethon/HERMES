@@ -1,12 +1,12 @@
 import AppKit
 import Combine
 
-final class MainWindowController: NSWindowController {
+final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let frameAutosaveName = "HERMESMainWindow"
     private static let preferredWindowSize = NSSize(width: 1440, height: 1080)
     private static let minimumWindowSize = NSSize(width: 920, height: 620)
 
-    private let model = ImporterModel()
+    let model = ImporterModel()
     var canComposeCurrentPage: Bool { model.canComposeCurrentPage }
     private let splitViewController = NSSplitViewController()
     private let sidebarController: FinderStyleSidebarController
@@ -79,6 +79,22 @@ final class MainWindowController: NSWindowController {
         updateWindowSizeLimits()
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard model.hasActiveWork else { return true }
+        showActiveWorkNotice()
+        return false
+    }
+
+    func showActiveWorkNotice() {
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        let alert = NSAlert()
+        alert.messageText = "HERMES 仍有任务正在进行"
+        alert.informativeText = "下载、合成、导入或刷新尚未结束，等待队列也会继续执行。请等待任务结束后再关闭或退出；现在可以最小化窗口。"
+        alert.addButton(withTitle: "继续运行")
+        if let window, window.attachedSheet == nil { alert.beginSheetModal(for: window) }
+    }
+
     private func configureSplitView() {
         splitViewController.splitView.isVertical = true
         splitViewController.splitView.dividerStyle = .thin
@@ -95,6 +111,8 @@ final class MainWindowController: NSWindowController {
 
     private func configureWindow() {
         guard let window else { return }
+        window.delegate = self
+        window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.title = pageTitle
         window.subtitle = pageSubtitle
@@ -329,16 +347,31 @@ final class MainWindowController: NSWindowController {
     }
 
     private func chooseCurrentFolder() {
+        guard model.selection == .downloads || model.canMoveOutputFolder else { return }
         switch model.selection ?? .queue {
         case .queue:
             guard let folder = NativePanelPresenter.chooseOutputParentFolder() else { return }
-            model.selectOutputParentFolder(folder)
+            confirmOutputFolderMove(to: folder)
         case .downloads:
             guard let folder = NativePanelPresenter.chooseDownloadOutputFolder() else { return }
             model.selectDownloadOutputFolder(folder)
         case .completed:
             guard let folder = NativePanelPresenter.chooseOutputParentFolder() else { return }
-            model.selectOutputParentFolder(folder)
+            confirmOutputFolderMove(to: folder)
+        }
+    }
+
+    private func confirmOutputFolderMove(to parent: URL) {
+        let destination = parent.resolvingSymlinksInPath().appendingPathComponent("HERMES", isDirectory: true)
+        guard destination.standardizedFileURL != model.outputFolder.standardizedFileURL else { return }
+        let alert = NSAlert()
+        alert.messageText = "移动导出文件夹？"
+        alert.informativeText = "将移动现有文件夹及其中的文件，并更新相关记录。\n\n原位置：\(model.outputFolder.path)\n新位置：\(destination.path)"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "移动")
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertSecondButtonReturn { self?.model.selectOutputParentFolder(parent) }
         }
     }
 

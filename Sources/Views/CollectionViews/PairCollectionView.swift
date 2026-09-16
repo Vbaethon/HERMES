@@ -92,21 +92,6 @@ enum PairCollectionView {
             ))
             menu.addItem(.separator())
             menu.addItem(ThumbnailCollectionContextMenu.item(
-                title: ThumbnailContextMenuItem.importTitle(count: selectedCount),
-                symbolName: AppSymbol.importCompleted.normal,
-                target: self,
-                action: #selector(disabledContextMenuItem(_:)),
-                isEnabled: false
-            ))
-            menu.addItem(ThumbnailCollectionContextMenu.item(
-                title: ThumbnailContextMenuItem.importToAlbumTitle(count: selectedCount),
-                symbolName: AppSymbol.addToAlbum.normal,
-                target: self,
-                action: #selector(disabledContextMenuItem(_:)),
-                isEnabled: false
-            ))
-            menu.addItem(.separator())
-            menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.removeTitle(count: selectedCount),
                 symbolName: AppSymbol.removeItems,
                 target: self,

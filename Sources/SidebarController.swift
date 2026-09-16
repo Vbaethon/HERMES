@@ -68,7 +68,7 @@ final class FinderStyleSidebarController: NSViewController {
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.allowsEmptySelection = false
         tableView.allowsMultipleSelection = false
-        tableView.focusRingType = .none
+        tableView.focusRingType = .default
         tableView.dataSource = coordinator
         tableView.delegate = coordinator
         tableView.target = coordinator
@@ -207,11 +207,7 @@ private final class NotificationObserver: @unchecked Sendable {
 }
 
 private final class FinderSidebarTableView: NSTableView {
-    override var acceptsFirstResponder: Bool { false }
 
-    override func becomeFirstResponder() -> Bool {
-        false
-    }
 }
 
 private final class FinderSidebarCellView: NSTableCellView {

@@ -66,7 +66,6 @@ final class ImporterModel: ObservableObject {
             UserDefaults.standard.set(importToPhotos, forKey: AppPreferenceKey.importToPhotos)
             if !importToPhotos {
                 addToAlbum = false
-                completedAddToAlbum = false
             }
         }
     }
@@ -117,6 +116,13 @@ final class ImporterModel: ObservableObject {
 
     @Published private(set) var operationNotices: [SidebarSection: String] = [:]
     private var lastDownloadFailure: String?
+
+    func appendOperationNotice(_ message: String, for page: SidebarSection) {
+        var messages = operationNotices[page]?.components(separatedBy: "\n\n") ?? []
+        guard !messages.contains(message) else { return }
+        messages.append(message)
+        operationNotices[page] = messages.suffix(8).joined(separator: "\n\n")
+    }
 
     func dismissOperationNotice(for page: SidebarSection) {
         operationNotices.removeValue(forKey: page)
@@ -176,6 +182,21 @@ final class ImporterModel: ObservableObject {
 
     var imageCount: Int { files.filter(FileSystemUtilities.isImage).count }
     var videoCount: Int { files.filter(FileSystemUtilities.isVideo).count }
+    var hasActiveWork: Bool {
+        fileOperationsBusy || isDownloading || activeDownloadTask != nil || !pendingDownloadTasks.isEmpty
+            || pendingImportScans > 0 || isRefreshingCompleted || isRefreshingDownloads
+    }
+    var canMoveOutputFolder: Bool { !hasActiveWork }
+    var downloadQueueCount: Int { pendingDownloadTasks.count + (activeDownloadTask == nil ? 0 : 1) }
+    var downloadQueueSummary: String {
+        var lines: [String] = []
+        if let task = activeDownloadTask { lines.append("正在执行：\(task.title)（\(task.entries.count) 条链接）") }
+        for (index, task) in pendingDownloadTasks.enumerated() {
+            lines.append("等待 \(index + 1)：\(task.title)（\(task.entries.count) 条链接）")
+        }
+        return lines.joined(separator: "\n")
+    }
+    var canImportCompleted: Bool { !fileOperationsBusy && !selectedCompletedItems.isEmpty }
     var canClearQueue: Bool { !fileOperationsBusy && (!files.isEmpty || !pairs.isEmpty) }
     var canProcessSelectedPairs: Bool { !fileOperationsBusy && !pairs.isEmpty }
     var canComposeCurrentPage: Bool {
@@ -793,7 +814,8 @@ final class ImporterModel: ObservableObject {
     private func enqueueDownloadShare(shareText: String) async {
         let entries = Self.downloadShareEntries(from: shareText)
         guard !entries.isEmpty else {
-            downloadStatusText = "没有识别到支持的分享链接。"
+            downloadStatusText = "没有识别到支持的分享链接。请粘贴抖音、小红书或得物的完整分享链接。"
+            appendOperationNotice(downloadStatusText, for: .downloads)
             return
         }
         guard let outputRoot = authorizedDownloadOutputFolderForUserAction() else { return }
@@ -1035,7 +1057,8 @@ final class ImporterModel: ObservableObject {
         let mediaURLs = selectedDownloadMediaURLs
         guard !isImportingDownloadMedia, !mediaURLs.isEmpty else { return }
         guard mediaURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
-            downloadStatusText = "未找到源文件。"
+            downloadStatusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
+            appendOperationNotice(downloadStatusText, for: .downloads)
             return
         }
 
@@ -1058,6 +1081,7 @@ final class ImporterModel: ObservableObject {
         case .failure(let message):
             downloadStatusText = "导入失败：\(message)"
         }
+        appendOperationNotice(downloadStatusText, for: .downloads)
     }
 
     func clearVisibleDownloads(deleteFiles: Bool) {
@@ -1105,7 +1129,8 @@ final class ImporterModel: ObservableObject {
         let selectedItems = selectedCompletedItems
         guard !fileOperationsBusy, !selectedItems.isEmpty else { return }
         guard selectedItems.allSatisfy(\.sourceExists) else {
-            statusText = "未找到源文件。"
+            statusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
+            appendOperationNotice(statusText, for: .completed)
             return
         }
         let pairs = selectedItems.compactMap { item -> (URL, URL)? in
@@ -1113,7 +1138,8 @@ final class ImporterModel: ObservableObject {
             return (item.imageURL, movieURL)
         }
         guard pairs.count == selectedItems.count else {
-            statusText = "未找到源文件。"
+            statusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
+            appendOperationNotice(statusText, for: .completed)
             return
         }
 
@@ -1143,6 +1169,7 @@ final class ImporterModel: ObservableObject {
         case .failure(let message):
             statusText = "导入失败：\(message)"
         }
+        appendOperationNotice(statusText, for: .completed)
     }
 
     func processPairs() async {

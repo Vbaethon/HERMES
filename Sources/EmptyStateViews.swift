@@ -4,6 +4,16 @@ class EmptyStateView: NSView {
     private let symbolView = NSImageView()
     private let titleField = NSTextField(labelWithString: "")
     private let messageField = NSTextField(labelWithString: "")
+    private let actionButton = NSButton(title: "显示全部项目", target: nil, action: nil)
+    var showAllAction: (() -> Void)? {
+        didSet { actionButton.isHidden = showAllAction == nil }
+    }
+    @objc private func showAll(_ sender: Any?) { showAllAction?() }
+
+    var title: String {
+        get { titleField.stringValue }
+        set { titleField.stringValue = newValue; symbolView.setAccessibilityLabel(newValue) }
+    }
 
     var message: String {
         get { messageField.stringValue }
@@ -36,7 +46,10 @@ class EmptyStateView: NSView {
     }
 
     private func setupLayout() {
-        let stackView = NSStackView(views: [symbolView, titleField, messageField])
+        actionButton.target = self
+        actionButton.action = #selector(showAll(_:))
+        actionButton.isHidden = true
+        let stackView = NSStackView(views: [symbolView, titleField, messageField, actionButton])
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
         stackView.alignment = .centerX

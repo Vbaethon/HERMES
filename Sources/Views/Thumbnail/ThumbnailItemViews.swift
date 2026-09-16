@@ -206,7 +206,9 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         view.setAccessibilityRole(.group)
         view.setAccessibilityLabel(representedURL.map { "\($0.lastPathComponent)，\(kind)" })
         view.setAccessibilityValue("\(status)，\(isSelected ? "已选择" : "未选择")")
-        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed
+        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .running ? "正在合成…" : "合成失败"
+        thumbnailView?.failureLabel?.textColor = .labelColor
+        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && thumbnailStatus != .running
         thumbnailView?.needsLayout = true
         if isSelected {
             thumbnailView?.setRingState(.selected)

@@ -15,6 +15,7 @@ final class DetailPagesController: NSViewController {
     private var activeSelection: SidebarSection?
     private let noticeButton = NSButton(title: "查看操作详情", target: nil, action: nil)
     private var noticeHeight: NSLayoutConstraint!
+    private var lastPresentedNotice: String?
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel, startDownload: @escaping () -> Void) {
@@ -77,8 +78,16 @@ final class DetailPagesController: NSViewController {
         let notice = model.operationNotices[selection]
         noticeButton.isHidden = notice == nil
         noticeHeight?.constant = notice == nil ? 0 : 32
-        noticeButton.title = notice.map { String(($0.components(separatedBy: "\n").first ?? "操作提示").prefix(48)) + " · 查看详情" } ?? "查看操作详情"
+        noticeButton.title = notice.map { String((($0.components(separatedBy: "\n\n").last ?? $0).components(separatedBy: "\n").first ?? "操作提示").prefix(48)) + " · 查看详情" } ?? "查看操作详情"
         noticeButton.setAccessibilityLabel(noticeButton.title)
+        noticeButton.setAccessibilityHelp(notice)
+        if notice != lastPresentedNotice {
+            lastPresentedNotice = notice
+            if let notice {
+                NSAccessibility.post(element: noticeButton, notification: .announcementRequested,
+                    userInfo: [.announcement: notice, .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+            }
+        }
         let selectionChanged = activeSelection != selection
         if selectionChanged {
             controller(for: activeSelection)?.setVisible(false)
@@ -298,6 +307,8 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
     }
 
     func reload() {
+        emptyView.showAllAction = model.completed.isEmpty ? nil : { [weak self] in self?.model.completedFilter = .all }
+        emptyView.title = model.completed.isEmpty ? "还没有完成项目" : "当前筛选下没有项目"
         let visibleCompleted = model.visibleCompleted
         if visibleCompleted.isEmpty {
             scrollView?.isHidden = true
