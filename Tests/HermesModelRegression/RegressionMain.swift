@@ -340,6 +340,187 @@ import Foundation
         }
         pass("rollback failure reports the retained file location")
 
+        // Audit 02e0daf: exercise production model paths with isolated files/defaults.
+        let progress = try model("audit-progress")
+        for (before, after) in [(1, 1), (1, 3), (3, 1)] {
+            _ = progress.updateDownloadProgress(taskID: UUID(), totalCount: before, completedCount: before, unitProgress: 0)
+            let nextID = UUID()
+            let initial = progress.updateDownloadProgress(taskID: nextID, totalCount: after, completedCount: 0, unitProgress: 0)
+            expect(initial.completedCount == 0 && initial.unitProgress == 0, "new task must start at zero")
+            _ = progress.updateDownloadProgress(taskID: nextID, totalCount: after, completedCount: 0, unitProgress: 0.6)
+            let late = progress.updateDownloadProgress(taskID: nextID, totalCount: after, completedCount: 0, unitProgress: 0.2)
+            expect(late.unitProgress == 0.6, "same-task progress must not regress")
+        }
+        pass("progress resets for 1→1, 1→many, many→1 while retaining same-task monotonicity")
+
+        let safeRefresh = try model("audit-hidden")
+        for name in ["hidden-file", "hidden-dir", "empty", "concurrent-write"] {
+            try fm.createDirectory(at: safeRefresh.downloadOutputFolder.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        let hiddenNote = safeRefresh.downloadOutputFolder.appendingPathComponent("hidden-file/.important-note")
+        try Data("keep".utf8).write(to: hiddenNote)
+        let hiddenGit = safeRefresh.downloadOutputFolder.appendingPathComponent("hidden-dir/.git")
+        try fm.createDirectory(at: hiddenGit, withIntermediateDirectories: true)
+        safeRefresh.downloadStatusText = "pending"
+        safeRefresh.refreshDownloads()
+        let duringScan = safeRefresh.downloadOutputFolder.appendingPathComponent("concurrent-write/new.txt")
+        try Data("keep".utf8).write(to: duringScan)
+        try await waitUntil { safeRefresh.downloadStatusText != "pending" }
+        for url in [hiddenNote, hiddenGit, duringScan, safeRefresh.downloadOutputFolder.appendingPathComponent("empty")] {
+            expect(fm.fileExists(atPath: url.path), "refresh must not remove directories or data")
+        }
+        pass("refresh preserves hidden files, hidden directories, empty directories and concurrent writes")
+
+        let history = try model("audit-history")
+        let auditExported = try pair(history.outputFolder, "imported")
+        var imported = record(auditExported)
+        imported.importedToPhotos = true
+        history.completed = [imported]
+        let savedHistory = try JSONEncoder().encode([imported])
+        UserDefaults.standard.set(savedHistory, forKey: "CompletedRecords.v1")
+        let offline = history.outputFolder.appendingPathExtension("offline")
+        try fm.moveItem(at: history.outputFolder, to: offline)
+        history.refreshCompleted()
+        try await waitUntil { history.operationNotices[.completed] != nil }
+        expect(history.completed == [imported], "offline refresh must retain all history")
+        expect(UserDefaults.standard.data(forKey: "CompletedRecords.v1") == savedHistory, "offline scan must not overwrite persistence")
+        let restarted = ImporterModel(refreshOnInit: false)
+        expect(restarted.completed.first?.importedToPhotos == true, "offline startup must retain imported flag")
+        try fm.moveItem(at: offline, to: history.outputFolder)
+        history.refreshCompleted()
+        try await waitUntil { history.operationNotices[.completed] == nil }
+        expect(history.completed.first?.importedToPhotos == true, "directory recovery retains imported flag")
+        pass("missing output and offline startup preserve history, persistence and import flags through recovery")
+        let historyAlias = root.appendingPathComponent("history-alias")
+        try fm.createSymbolicLink(at: historyAlias, withDestinationURL: history.outputFolder)
+        var aliasRecord = imported
+        aliasRecord.imagePath = historyAlias.appendingPathComponent("imported.jpg").path
+        aliasRecord.moviePath = historyAlias.appendingPathComponent("imported.mov").path
+        history.completed = [aliasRecord]
+        history.refreshCompleted()
+        try await waitUntil { history.completed.first?.imagePath == auditExported.imageURL.path }
+        expect(history.completed.first?.importedToPhotos == true, "symlink aliases must retain exact-revision import history")
+        pass("resolved directory alias retains import history for identical media revision")
+        let realScanner = history.completedScanner
+        history.completedScanner = { _ in throw CocoaError(.fileReadNoPermission) }
+        history.refreshCompleted()
+        try await waitUntil { history.operationNotices[.completed] != nil }
+        expect(history.completed.first?.importedToPhotos == true, "permission failure must preserve import status")
+        history.completedScanner = realScanner
+        try Data("replacement file with different revision".utf8).write(to: auditExported.videoURL)
+        history.refreshCompleted()
+        try await waitUntil { history.completed.first?.importedToPhotos == false }
+        expect(history.operationNotices[.completed] == nil, "recovery clears the error")
+        pass("replaced media does not inherit a previous imported flag")
+        try fm.removeItem(at: auditExported.imageURL)
+        try fm.removeItem(at: auditExported.videoURL)
+        history.refreshCompleted()
+        try await waitUntil { history.completed.isEmpty }
+        expect(history.operationNotices[.completed] == nil, "successful empty scan clears unavailable notice")
+        pass("permission failure is preserved while successful empty scan is distinguished")
+
+        // Suspend the real refresh state machine, not a copy of its control flow.
+        let switching = try model("audit-directory-switch")
+        let firstFolder = switching.downloadOutputFolder
+        let secondFolder = root.appendingPathComponent("audit-B")
+        let thirdFolder = root.appendingPathComponent("audit-C")
+        let bPair = try pair(secondFolder, "B")
+        let cPair = try pair(thirdFolder, "C")
+        let scanner = switching.downloadScanner
+        actor ScanGate {
+            var continuation: CheckedContinuation<DownloadScanResult, Never>?
+            var started = false
+            func suspend() async -> DownloadScanResult {
+                started = true
+                return await withCheckedContinuation { continuation = $0 }
+            }
+            func release() { continuation?.resume(returning: DownloadScanResult(pairs: [], photos: [], videos: [])); continuation = nil }
+        }
+        for finalFolder in [secondFolder, thirdFolder] {
+            let gate = ScanGate()
+            UserDefaults.standard.removeObject(forKey: "DownloadOutputFolderBookmark.v1")
+            switching.downloadOutputFolder = firstFolder
+            switching.downloadScanner = { folder, excluded in
+                if folder == firstFolder { return await gate.suspend() }
+                return await scanner(folder, excluded)
+            }
+            switching.refreshDownloads()
+            while !(await gate.started) { try await Task.sleep(for: .milliseconds(5)) }
+            switching.selectDownloadOutputFolder(secondFolder)
+            if finalFolder == thirdFolder { switching.selectDownloadOutputFolder(thirdFolder) }
+            await gate.release()
+            let expected = finalFolder == secondFolder ? bPair.id : cPair.id
+            try await waitUntil { switching.downloadPairs.first?.id == expected }
+        }
+        pass("A→B and A→B→C finish on latest folder without a second manual refresh")
+
+        for (name, imageNames, movieNames, count) in [
+            ("unique", ["sample.jpg"], ["sample.mov"], 1),
+            ("two-images", ["sample.jpg", "sample.heic"], ["sample.mov"], 0),
+            ("two-videos", ["sample.jpg"], ["sample.mov", "sample.mp4"], 0),
+            ("case", ["SAMPLE.jpg"], ["sample.mov"], 1),
+            ("different-folders", ["a/sample.jpg"], ["b/sample.mov"], 0)
+        ] {
+            let pairingModel = try model("audit-pair-" + name)
+            var inputs: [URL] = []
+            for filename in imageNames + movieNames {
+                let url = pairingModel.downloadOutputFolder.appendingPathComponent(filename)
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("fixture".utf8).write(to: url)
+                inputs.append(url)
+            }
+            await pairingModel.addFiles(inputs)
+            pairingModel.downloadStatusText = "pending"
+            pairingModel.refreshDownloads()
+            try await waitUntil { pairingModel.downloadStatusText != "pending" }
+            expect(pairingModel.pairs.count == count && pairingModel.downloadPairs.count == count, "both pages must use identical unique pairing")
+            expect(pairingModel.downloadPhotos.count + pairingModel.downloadVideos.count == inputs.count - count * 2, "ambiguous resources must remain visible")
+        }
+        pass("both pages agree on unique, ambiguous, case and cross-directory pairing")
+
+        let commands = try model("audit-commands")
+        let queueInput = try pair(root.appendingPathComponent("audit-queue"), "queue")
+        let downloadInput = try pair(commands.downloadOutputFolder, "download")
+        await commands.addFiles([queueInput.imageURL, queueInput.videoURL])
+        commands.downloadPairs = [downloadInput]
+        actor CommandCalls {
+            var ids: [String] = []
+            func add(_ id: String) { ids.append(id) }
+        }
+        let commandCalls = CommandCalls()
+        commands.compositionRunner = { input, _ in
+            await commandCalls.add(input.id)
+            return .failure("isolated command routing test")
+        }
+        commands.selection = .completed
+        expect(!commands.canComposeCurrentPage, "completed page cannot compose hidden queue")
+        await commands.composeCurrentPage()
+        commands.selection = .downloads
+        expect(commands.canComposeCurrentPage, "downloads enabled for available pair")
+        await commands.composeCurrentPage()
+        commands.selection = .queue
+        await commands.composeCurrentPage()
+        let routedIDs = await commandCalls.ids
+        expect(routedIDs == [downloadInput.id, queueInput.id], "shared command routes only to visible page")
+        pass("shared composition command routes downloads and queue; completed is disabled")
+
+        let deleteScope = try model("audit-delete-scope")
+        let deleteSource = try pair(deleteScope.downloadOutputFolder, "source")
+        let keptOutput = try pair(deleteScope.outputFolder, "output")
+        let keptRecord = record(keptOutput, source: deleteSource)
+        deleteScope.downloadPairs = [deleteSource]
+        deleteScope.downloadCompleted = [keptRecord]
+        deleteScope.completed = [keptRecord]
+        deleteScope.downloadStatusText = "pending"
+        deleteScope.refreshDownloads()
+        try await waitUntil { deleteScope.downloadStatusText != "pending" }
+        var trashedURLs: [URL] = []
+        deleteScope.trashFiles = { trashedURLs += $0; return nil }
+        deleteScope.clearVisibleDownloads(deleteFiles: true)
+        expect(Set(trashedURLs) == Set([deleteSource.imageURL, deleteSource.videoURL]), "delete action must target sources only")
+        expect(deleteScope.completed == [keptRecord] && fm.fileExists(atPath: keptOutput.imageURL.path) && fm.fileExists(atPath: keptOutput.videoURL.path), "export and completed record must remain")
+        pass("download deletion targets only sources and retains composed exports and completed history")
+
         print("PASS: \(checks) model safety scenarios; no real downloads or Photos writes")
     }
 }

@@ -132,6 +132,8 @@ final class ImporterModel: ObservableObject {
     var compositionRunner: @Sendable (PairItem, URL) async -> ToolRunResult = { await LivePhotoToolRunner.run(for: $0, outputFolder: $1) }
     var photoPairImporter: (CompletedItem, String?) async -> PhotoImportResult = { await PhotoLibraryImporter.importLivePhotoPair($0, albumName: $1) }
     var trashFiles: ([URL]) -> String? = { FileSystemUtilities.trashGroup($0) }
+    var completedScanner: @Sendable (URL) async throws -> [CompletedItem] = { try await ImporterModel.completedItems(in: $0) }
+    var downloadScanner: @Sendable (URL, URL) async -> DownloadScanResult = { await ImporterModel.downloadItems(in: $0, excluding: $1) }
     var moveFile: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }
     private var fileOperationsBusy: Bool { isProcessing || isProcessingDownloads || isImportingCompleted || isImportingDownloadMedia }
     private var completedMutationVersion = 0
@@ -146,6 +148,7 @@ final class ImporterModel: ObservableObject {
     private var pendingDownloadTasks: [DownloadQueueTask] = []
     private var activeDownloadTask: DownloadQueueTask?
     private var activeDownloadProgressState: DownloadProgressState?
+    private var activeDownloadProgressTaskID: UUID?
 
     private struct DownloadQueueTask {
         let id: UUID
@@ -165,7 +168,7 @@ final class ImporterModel: ObservableObject {
     }
     private static let completedDownloadProgressHoldNanoseconds: UInt64 = 460_000_000
 
-    private struct DownloadProgressState {
+    struct DownloadProgressState {
         var completedCount: Int
         var detail: String
         var unitProgress: CGFloat
@@ -175,6 +178,23 @@ final class ImporterModel: ObservableObject {
     var videoCount: Int { files.filter(FileSystemUtilities.isVideo).count }
     var canClearQueue: Bool { !fileOperationsBusy && (!files.isEmpty || !pairs.isEmpty) }
     var canProcessSelectedPairs: Bool { !fileOperationsBusy && !pairs.isEmpty }
+    var canComposeCurrentPage: Bool {
+        switch selection ?? .queue {
+        case .queue: canProcessSelectedPairs
+        case .downloads: canProcessDownloadPairs
+        case .completed: false
+        }
+    }
+
+    func composeCurrentPage() async {
+        guard canComposeCurrentPage else { return }
+        switch selection ?? .queue {
+        case .queue: await processPairs()
+        case .downloads: await processDownloadPairs()
+        case .completed: break
+        }
+    }
+
     var albumName: String { Self.appDisplayName }
     var visibleCompleted: [CompletedItem] {
         switch completedFilter {
@@ -551,11 +571,6 @@ final class ImporterModel: ObservableObject {
         return try await body()
     }
 
-    private nonisolated static func moveToTrash(_ url: URL) {
-        // Best-effort cleanup is only used for empty download folders, never user-selected files.
-        _ = FileSystemUtilities.trashGroup([url])
-    }
-
     private static func openFileLocations(for urls: [URL]) {
         var seenPaths = Set<String>()
         let existingURLs = urls.compactMap { url -> URL? in
@@ -885,6 +900,33 @@ final class ImporterModel: ObservableObject {
         try? await Task.sleep(nanoseconds: Self.completedDownloadProgressHoldNanoseconds)
     }
 
+    func updateDownloadProgress(taskID: UUID, totalCount: Int, completedCount: Int? = nil,
+                                detail: String? = nil, unitProgress: CGFloat? = nil) -> DownloadProgressState {
+        if activeDownloadProgressTaskID != taskID {
+            activeDownloadProgressState = nil
+            activeDownloadProgressTaskID = taskID
+        }
+        let previousState = activeDownloadProgressState
+        let candidateState = DownloadProgressState(
+            completedCount: completedCount ?? previousState?.completedCount ?? 0,
+            detail: detail ?? previousState?.detail ?? "等待下载",
+            unitProgress: unitProgress ?? previousState?.unitProgress ?? 0
+        )
+        let state: DownloadProgressState
+        if let previousState,
+           overallProgress(for: candidateState, totalCount: totalCount) < overallProgress(for: previousState, totalCount: totalCount) {
+            state = DownloadProgressState(
+                completedCount: previousState.completedCount,
+                detail: candidateState.detail,
+                unitProgress: previousState.unitProgress
+            )
+        } else {
+            state = candidateState
+        }
+        activeDownloadProgressState = state
+        return state
+    }
+
     private func rebuildDownloadProgressItems(
         activeCompletedCount: Int? = nil,
         activeDetail: String? = nil,
@@ -893,24 +935,9 @@ final class ImporterModel: ObservableObject {
         var items: [DownloadProgressItem] = []
         if let activeDownloadTask {
             let totalCount = max(activeDownloadTask.entries.count, 1)
-            let previousState = activeDownloadProgressState
-            let candidateState = DownloadProgressState(
-                completedCount: activeCompletedCount ?? previousState?.completedCount ?? 0,
-                detail: activeDetail ?? previousState?.detail ?? "等待下载",
-                unitProgress: activeUnitProgress ?? previousState?.unitProgress ?? 0
-            )
-            let state: DownloadProgressState
-            if let previousState,
-               overallProgress(for: candidateState, totalCount: totalCount) < overallProgress(for: previousState, totalCount: totalCount) {
-                state = DownloadProgressState(
-                    completedCount: previousState.completedCount,
-                    detail: candidateState.detail,
-                    unitProgress: previousState.unitProgress
-                )
-            } else {
-                state = candidateState
-            }
-            activeDownloadProgressState = state
+            let state = updateDownloadProgress(taskID: activeDownloadTask.id, totalCount: totalCount,
+                                               completedCount: activeCompletedCount, detail: activeDetail,
+                                               unitProgress: activeUnitProgress)
             items.append(DownloadProgressItem(
                 id: activeDownloadTask.id,
                 title: activeDownloadTask.title,
@@ -947,18 +974,18 @@ final class ImporterModel: ObservableObject {
             needsAnotherDownloadRefresh = true
             return
         }
-        guard let folder = authorizedDownloadOutputFolderForUserAction() else { return }
+        guard authorizedDownloadOutputFolderForUserAction() != nil else { return }
         isRefreshingDownloads = true
         Task {
             repeat {
                 self.needsAnotherDownloadRefresh = false
-                let scannedItems = await Self.downloadItems(in: folder, excluding: self.downloadComposedFolder)
+                guard let folder = self.authorizedDownloadOutputFolderForUserAction() else { break }
+                let scannedItems = await self.downloadScanner(folder, self.downloadComposedFolder)
                 guard self.downloadOutputFolder == folder else {
-                    self.isRefreshingDownloads = false
-                    return
+                    self.needsAnotherDownloadRefresh = true
+                    continue
                 }
                 self.applyDownloadedItems(scannedItems)
-                self.cleanupEmptyDownloadFolders()
             } while self.needsAnotherDownloadRefresh
             self.isRefreshingDownloads = false
         }
@@ -985,40 +1012,9 @@ final class ImporterModel: ObservableObject {
         let composedCount = completedDownloadPairIDs().count
         let itemCount = downloadPairs.count + downloadPhotos.count + downloadVideos.count
         let summary = itemCount == 0 ? "输入分享链接开始下载。" : "已识别 \(itemCount) 个素材，已合成 \(composedCount) 组。"
-        downloadStatusText = lastDownloadFailure.map { "下载存在失败：\($0)\n\(summary)" } ?? summary
-    }
-
-    private func cleanupEmptyDownloadFolders() {
-        let folder = downloadOutputFolder
-        let composedFolder = downloadComposedFolder
-
-        guard let enumerator = FileManager.default.enumerator(
-            at: folder,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-
-        var directories: [URL] = []
-        for case let url as URL in enumerator {
-            guard url.hasDirectoryPath else { continue }
-            let standardized = url.standardizedFileURL
-            let composedStandardized = composedFolder.standardizedFileURL
-            if standardized == composedStandardized || standardized.path.hasPrefix(composedStandardized.path + "/") {
-                enumerator.skipDescendants()
-                continue
-            }
-            directories.append(url)
-        }
-
-        // 按路径深度倒序（最深优先），确保子目录先处理
-        directories.sort { $0.path.components(separatedBy: "/").count > $1.path.components(separatedBy: "/").count }
-
-        for dir in directories {
-            if let contents = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles),
-               contents.isEmpty {
-                Self.moveToTrash(dir)
-            }
-        }
+        let unpairedNotice = (!downloadPhotos.isEmpty || !downloadVideos.isEmpty)
+            ? " 部分素材未配对：合成需要同一文件夹内同名照片和视频各一份；同名多份不会自动选择。" : ""
+        downloadStatusText = lastDownloadFailure.map { "下载存在失败：\($0)\n\(summary)" } ?? (summary + unpairedNotice)
     }
 
     func processDownloadPairs() async {
@@ -1324,7 +1320,7 @@ final class ImporterModel: ObservableObject {
     private static func validateLegacyRecord(_ record: CompletedItem) -> CompletedItem {
         var item = record
         guard let movieURL = item.movieURL, let current = MediaPairRevision(image: item.imageURL, movie: movieURL) else {
-            item.importedToPhotos = false
+            // Unavailable media is not evidence that an imported resource was replaced.
             return item
         }
         if let revision = item.revision {
@@ -1351,7 +1347,17 @@ final class ImporterModel: ObservableObject {
         isRefreshingCompleted = true
         let mutationVersion = completedMutationVersion
         Task {
-            let scannedItems = await Self.completedItems(in: folder)
+            let scannedItems: [CompletedItem]
+            do {
+                scannedItems = try await self.completedScanner(folder)
+            } catch {
+                self.isRefreshingCompleted = false
+                if self.outputFolder == folder {
+                    self.operationNotices[.completed] = "保存位置暂时不可访问，已保留历史记录及导入状态。\n" + error.localizedDescription
+                }
+                self.resumeCompletedRefreshIfNeeded()
+                return
+            }
             self.isRefreshingCompleted = false
             guard self.outputFolder == folder, self.completedMutationVersion == mutationVersion, !self.fileOperationsBusy else {
                 self.needsAnotherCompletedRefresh = true
@@ -1359,10 +1365,19 @@ final class ImporterModel: ObservableObject {
                 return
             }
 
-            let existingByID = Dictionary(uniqueKeysWithValues: self.completed.map { ($0.id, $0) })
+            if self.operationNotices[.completed]?.hasPrefix("保存位置暂时不可访问") == true {
+                self.operationNotices.removeValue(forKey: .completed)
+            }
+            // A directory bookmark or filesystem enumeration may resolve a symlink alias.
+            // Match the same physical path, then still require the exact media revision.
+            func historyKey(_ item: CompletedItem) -> String {
+                item.imageURL.resolvingSymlinksInPath().standardizedFileURL.path
+            }
+            let existingByID = Dictionary(self.completed.map { (historyKey($0), $0) },
+                                          uniquingKeysWith: { first, _ in first })
             let refreshedItems = Self.sortedCompletedItems(scannedItems.map { scannedItem in
                 var mergedItem = scannedItem
-                if let existingItem = existingByID[scannedItem.id], let revision = scannedItem.revision,
+                if let existingItem = existingByID[historyKey(scannedItem)], let revision = scannedItem.revision,
                    existingItem.revision == revision {
                     mergedItem.importedToPhotos = existingItem.importedToPhotos
                     mergedItem.sourceImagePath = existingItem.sourceImagePath
@@ -1448,25 +1463,21 @@ final class ImporterModel: ObservableObject {
         }
     }
 
-    private nonisolated static func completedItems(in folder: URL) async -> [CompletedItem] {
-        await Task.detached(priority: .utility) { () -> [CompletedItem] in
-            withSecurityScopedAccess(to: folder) {
+    private nonisolated static func completedItems(in folder: URL) async throws -> [CompletedItem] {
+        try await Task.detached(priority: .utility) { () throws -> [CompletedItem] in
+            try withSecurityScopedAccess(to: folder) {
                 let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
-                guard let urls = try? FileManager.default.contentsOfDirectory(
+                let urls = try FileManager.default.contentsOfDirectory(
                     at: folder,
                     includingPropertiesForKeys: resourceKeys,
                     options: [.skipsHiddenFiles]
-                ) else {
-                    return []
-                }
+                )
 
                 var imageByStem: [String: (url: URL, date: Date)] = [:]
                 var movieByStem: [String: URL] = [:]
                 for url in urls {
-                    guard let values = try? url.resourceValues(forKeys: Set(resourceKeys)),
-                          values.isRegularFile == true else {
-                        continue
-                    }
+                    let values = try url.resourceValues(forKeys: Set(resourceKeys))
+                    guard values.isRegularFile == true else { continue }
                     let stem = url.deletingPathExtension().lastPathComponent.lowercased()
                     if FileSystemUtilities.isImage(url) {
                         imageByStem[stem] = (url, values.contentModificationDate ?? .distantPast)
@@ -1475,13 +1486,16 @@ final class ImporterModel: ObservableObject {
                     }
                 }
 
-                return sortedCompletedItems(imageByStem
+                return try sortedCompletedItems(imageByStem
                     .map { stem, image in
-                        CompletedItem(
+                        let movie = movieByStem[stem]
+                        let revision = movie.flatMap { MediaPairRevision(image: image.url, movie: $0) }
+                        if movie != nil && revision == nil { throw CocoaError(.fileReadUnknown) }
+                        return CompletedItem(
                             imagePath: image.url.path,
                             moviePath: movieByStem[stem]?.path,
                             modifiedTime: image.date.timeIntervalSince1970,
-                            revision: movieByStem[stem].flatMap { MediaPairRevision(image: image.url, movie: $0) }
+                            revision: revision
                         )
                     }
                 )
@@ -1553,18 +1567,24 @@ final class ImporterModel: ObservableObject {
         return context.makeImage()
     }
 
-    private func rebuildPairs() {
-        let old = Dictionary(pairs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    private nonisolated static func uniqueMediaPairs(images: [URL], videos: [URL]) -> [PairItem] {
         func key(_ url: URL) -> String {
             url.deletingLastPathComponent().standardizedFileURL.path + "/" + url.deletingPathExtension().lastPathComponent.lowercased()
         }
-        let images = Dictionary(grouping: files.filter(FileSystemUtilities.isImage), by: key)
-        let videos = Dictionary(grouping: files.filter(FileSystemUtilities.isVideo), by: key)
-        pairs = images.keys.sorted().compactMap { name in
-            guard let stills = images[name], stills.count == 1, let movies = videos[name], movies.count == 1 else { return nil }
-            let pair = PairItem(imageURL: stills[0], videoURL: movies[0])
-            return old[pair.id] ?? pair
+        let stills = Dictionary(grouping: images, by: key)
+        let movies = Dictionary(grouping: videos, by: key)
+        return stills.keys.sorted().compactMap { name in
+            guard let images = stills[name], images.count == 1,
+                  let videos = movies[name], videos.count == 1 else { return nil }
+            return PairItem(imageURL: images[0], videoURL: videos[0])
         }
+    }
+
+    private func rebuildPairs() {
+        let old = Dictionary(pairs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        pairs = Self.uniqueMediaPairs(images: files.filter(FileSystemUtilities.isImage),
+                                      videos: files.filter(FileSystemUtilities.isVideo))
+            .map { old[$0.id] ?? $0 }
         retainSelectedPairIDs()
         let unmatched = files.count - pairs.count * 2
         if operationNotices[.queue] == statusText { operationNotices.removeValue(forKey: .queue) }
@@ -1818,21 +1838,9 @@ final class ImporterModel: ObservableObject {
             let sortedVideos = videos.sorted {
                 $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
             }
-            var usedVideos = Set<URL>()
-            var usedImages = Set<URL>()
-            var pairs: [PairItem] = []
-            let videosByFolderAndStem = Dictionary(grouping: sortedVideos) {
-                $0.deletingLastPathComponent().path + "/" + $0.deletingPathExtension().lastPathComponent.lowercased()
-            }
-
-            for image in sortedImages {
-                let key = image.deletingLastPathComponent().path + "/" + image.deletingPathExtension().lastPathComponent.lowercased()
-                if let video = videosByFolderAndStem[key]?.first(where: { !usedVideos.contains($0) }) {
-                    usedImages.insert(image)
-                    usedVideos.insert(video)
-                    pairs.append(PairItem(imageURL: image, videoURL: video))
-                }
-            }
+            let pairs = uniqueMediaPairs(images: sortedImages, videos: sortedVideos)
+            let usedVideos = Set(pairs.map(\.videoURL))
+            let usedImages = Set(pairs.map(\.imageURL))
 
             let photos = sortedImages.filter { !usedImages.contains($0) }
             let unpairedVideos = sortedVideos.filter { !usedVideos.contains($0) }

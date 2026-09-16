@@ -13,7 +13,7 @@ enum HermesApp {
 }
 
 @MainActor
-final class HermesAppDelegate: NSObject, NSApplicationDelegate {
+final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
 
@@ -118,6 +118,9 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(startImport(_:)) {
+            return mainWindowController?.canComposeCurrentPage ?? false
+        }
         if menuItem.action == #selector(toggleToolbarLabels(_:)) {
             guard let toolbar = mainWindowController?.window?.toolbar else { return false }
             menuItem.state = toolbar.displayMode == .iconOnly ? .off : .on

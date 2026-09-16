@@ -389,14 +389,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         private var composeEnabled: Bool {
-            switch model.selection ?? .queue {
-            case .queue:
-                model.canProcessSelectedPairs
-            case .downloads:
-                model.canProcessDownloadPairs
-            case .completed:
-                false
-            }
+            model.canComposeCurrentPage
         }
 
         private var clearLabel: String {
@@ -480,14 +473,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         }
 
         @objc private func compose(_ sender: Any?) {
-            switch model.selection ?? .queue {
-            case .queue:
-                Task { await model.processPairs() }
-            case .downloads:
-                Task { await model.processDownloadPairs() }
-            case .completed:
-                break
-            }
+            Task { await model.composeCurrentPage() }
         }
 
         @objc private func importCompleted(_ sender: Any?) {

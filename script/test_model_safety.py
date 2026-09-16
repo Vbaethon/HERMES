@@ -5,7 +5,11 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-with tempfile.TemporaryDirectory(prefix="hermes-model-safety-") as directory:
+# Avoid macOS /var ↔ /private/var aliases in source-identity fixtures.
+# Explicit symlink coverage is included in the model regression itself.
+cache = Path.home() / "Library/Caches/HERMESRegression"
+cache.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(prefix="hermes-model-safety-", dir=cache) as directory:
     temp = Path(directory)
     app = temp / "HermesApp.swift"
     # Keep all App declarations; only replace its entry point with the test main.

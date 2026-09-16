@@ -7,6 +7,7 @@ final class MainWindowController: NSWindowController {
     private static let minimumWindowSize = NSSize(width: 920, height: 620)
 
     private let model = ImporterModel()
+    var canComposeCurrentPage: Bool { model.canComposeCurrentPage }
     private let splitViewController = NSSplitViewController()
     private let sidebarController: FinderStyleSidebarController
     private let detailController: DetailPagesController
@@ -234,7 +235,7 @@ final class MainWindowController: NSWindowController {
         })
         observers.append(center.addObserver(forName: .startImport, object: nil, queue: .main) { [weak self] _ in
             guard let model = self?.model else { return }
-            Task { await model.processPairs() }
+            Task { await model.composeCurrentPage() }
         })
         observers.append(center.addObserver(forName: .startDownload, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.startDownload() }
@@ -388,8 +389,8 @@ final class MainWindowController: NSWindowController {
             in: window,
             title: downloadClearTargetsSelection ? "移除选中的记录？" : "清空当前筛选中的记录？",
             message: downloadClearTargetsSelection
-                ? "“仅移除记录”会保留本地文件；“同时移到废纸篓”还会移走所选项目对应的本地下载及合成文件。"
-                : "“仅清空记录”会移除当前筛选中的全部记录并保留本地文件；“同时移到废纸篓”还会移走这些记录对应的本地下载及合成文件。",
+                ? "“仅移除记录”会保留本地文件；“同时移到废纸篓”还会移走所选项目对应的下载源文件；已合成导出文件会保留，请在“已完成”页管理。"
+                : "“仅清空记录”会移除当前筛选中的全部记录并保留本地文件；“同时移到废纸篓”还会移走这些记录对应的下载源文件；已合成导出文件会保留，请在“已完成”页管理。",
             primaryButtonTitle: downloadClearTargetsSelection ? "仅移除记录" : "仅清空记录"
         ) { [weak self] choice in
             guard let self else { return }
