@@ -168,6 +168,7 @@ enum DownloaderInfra {
         to destination: URL,
         fallbackURLs: [URL] = [],
         retries: Int = 3,
+        validate: (@Sendable (URL) async throws -> Void)? = nil,
         userAgent: String,
         session: URLSession,
         shouldUseDirectly: @escaping (URLRequest) -> Bool,
@@ -186,6 +187,7 @@ enum DownloaderInfra {
                 do {
                     let temporaryURL = destination.appendingPathExtension("part")
                     try await downloadOnceAsync(candidate, to: temporaryURL, userAgent: userAgent, session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders, progress: progress)
+                    try await validate?(temporaryURL)
                     if FileManager.default.fileExists(atPath: destination.path) {
                         try FileManager.default.removeItem(at: destination)
                     }

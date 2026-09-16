@@ -5,6 +5,7 @@ CONFIGURATION="Release"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/script/project_config.sh"
+source "$ROOT_DIR/script/versioning.sh"
 BUILD_DIR="$ROOT_DIR/Build"
 prepare_build_paths
 PROJECT_FILE="$ROOT_DIR/$PROJECT_NAME/project.pbxproj"
@@ -16,6 +17,8 @@ TEMP_APP="$INSTALL_DIR/.$APP_NAME.installing.$$.app"
 MAC_ARCH="$(uname -m)"
 XCODE_DESTINATION="platform=macOS,arch=$MAC_ARCH"
 SHOULD_BUMP_VERSION=true
+VERSION_SCOPE="patch"
+EXPLICIT_VERSION=""
 SHOULD_OPEN=true
 PROJECT_FILE_BACKUP=""
 
@@ -23,13 +26,21 @@ XCODE_DEVELOPER_DIR="$(resolve_developer_dir)"
 XCODEBUILD="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
 
 usage() {
-  echo "usage: $0 [--no-version-bump] [--no-open]" >&2
+  echo "usage: $0 [--bump patch|minor|major | --version X.Y.ZZ | --no-version-bump] [--no-open]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-version-bump)
       SHOULD_BUMP_VERSION=false
+      ;;
+    --bump)
+      VERSION_SCOPE="${2:?missing update size}"
+      shift
+      ;;
+    --version)
+      EXPLICIT_VERSION="${2:?missing version}"
+      shift
       ;;
     --no-open)
       SHOULD_OPEN=false
@@ -47,11 +58,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 bump_build_number() {
-  local current_build build_width next_build next_build_padded
+  local current_build build_width next_build next_build_padded current_version next_version
   if [[ ! -f "$PROJECT_FILE" ]]; then
     echo "missing Xcode project file: $PROJECT_FILE" >&2
     exit 1
   fi
+  current_version="$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);/\1/p' "$PROJECT_FILE" | head -n 1)"
+  if [[ -n "$EXPLICIT_VERSION" ]]; then
+    if [[ ! "$EXPLICIT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]{2,}$ ]]; then
+      echo "Version must use X.Y.ZZ format" >&2
+      exit 1
+    fi
+    next_version="$EXPLICIT_VERSION"
+  else
+    next_version="$(next_marketing_version "$current_version" "$VERSION_SCOPE")"
+  fi
+  perl -0pi -e "s/MARKETING_VERSION = [0-9.]+;/MARKETING_VERSION = $next_version;/g" "$PROJECT_FILE"
   current_build="$(sed -n 's/^[[:space:]]*CURRENT_PROJECT_VERSION = \([0-9][0-9]*\);/\1/p' "$PROJECT_FILE" | head -n 1)"
   if [[ ! "$current_build" =~ ^[0-9]+$ ]]; then
     current_build="0"

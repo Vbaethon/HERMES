@@ -16,6 +16,7 @@ enum HermesApp {
 final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
+    private var aboutWindowController: NSWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Remove the obsolete manual login value without reading or transmitting it.
@@ -40,33 +41,54 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
     }
 
     @objc private func showAbout(_ sender: Any?) {
-        let bundle = Bundle.main
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.paragraphSpacing = 8
-        let credits = NSMutableAttributedString(
-            string: "Live Photo 合成与媒体下载\n",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph
-            ]
-        )
-        credits.append(NSAttributedString(
-            string: "照片与视频配对 · Live Photo 合成\n抖音、小红书、得物媒体下载\n导入“照片”图库与相簿\n\n作者：九尾大人\n适用于 macOS 27 · Apple Silicon\n媒体文件保存在你选择的本地目录。",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 12),
-                .foregroundColor: NSColor.secondaryLabelColor,
-                .paragraphStyle: paragraph
-            ]
-        ))
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "HERMES",
-            .applicationIcon: NSApp.applicationIconImage as Any,
-            .applicationVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—",
-            .version: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—",
-            .credits: credits
+        if let controller = aboutWindowController {
+            controller.showWindow(sender)
+            controller.window?.makeKeyAndOrderFront(sender)
+            return
+        }
+        let content = NSView()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let icon = NSImageView(image: NSApp.applicationIconImage)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 72),
+            icon.heightAnchor.constraint(equalToConstant: 72)
         ])
+        stack.addArrangedSubview(icon)
+        func addLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, secondary: Bool = false) {
+            let label = NSTextField(labelWithString: text)
+            label.font = .systemFont(ofSize: size, weight: weight)
+            label.textColor = secondary ? .secondaryLabelColor : .labelColor
+            label.alignment = .center
+            stack.addArrangedSubview(label)
+        }
+        addLabel("H E R M E S", size: 22, weight: .semibold)
+        addLabel(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—", size: 12, secondary: true)
+        addLabel("一个有趣的工具。", size: 14, weight: .semibold)
+        addLabel("带着一点好奇，去发现它。", size: 13)
+        addLabel("✦", size: 16, secondary: true)
+        addLabel("不急着定义，先开始探索。", size: 12, secondary: true)
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -24)
+        ])
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 370),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "关于 HERMES"
+        window.contentView = content
+        window.isReleasedWhenClosed = false
+        window.center()
+        let controller = NSWindowController(window: window)
+        aboutWindowController = controller
+        controller.showWindow(sender)
+        window.makeKeyAndOrderFront(sender)
     }
 
     @objc private func showSettings(_ sender: Any?) {

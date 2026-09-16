@@ -391,17 +391,6 @@ enum XHSNativeDownloader {
         var keyHint: String
     }
 
-    private static func bestVideoURL(from note: [String: Any]) -> URL? {
-        if let best = bestVideoCandidate(from: note),
-           let url = streamURL(best.item) {
-            return url
-        }
-        if let originKey = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
-            return URL(string: "https://sns-video-bd.xhscdn.com/\(MediaFileUtilities.formatURL(originKey))")
-        }
-        return nil
-    }
-
     private static func bestVideoCandidate(from note: [String: Any]) -> StreamCandidate? {
         var candidates: [StreamCandidate] = []
         let inheritedVideoMeta = deepGet(note, keys: ["video", "media", "video"]) as? [String: Any] ?? [:]
@@ -812,6 +801,7 @@ enum XHSNativeDownloader {
                 for sourceURL in task.urls {
                     do {
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, progress: progress)
+                        try await MediaFileUtilities.validateMedia(temporaryURL, expectedSuffix: task.destination.pathExtension)
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
@@ -832,9 +822,10 @@ enum XHSNativeDownloader {
             } catch {
                 lastError = error
                 try? FileManager.default.removeItem(at: task.destination.appendingPathExtension("part"))
-                if attempt < retries {
-                    try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
-                }
+            }
+            try Task.checkCancellation()
+            if attempt < retries {
+                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
             }
         }
         throw lastError ?? NSError(domain: "XHSDownloader", code: 7, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])

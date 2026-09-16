@@ -224,9 +224,10 @@ enum DownloaderHTTPCompatibility {
         if let host = url.host, DownloaderNetworkPolicy.hostNeedsDNSOverride(host) {
             let realIPs = await resolveHostViaDoH(host)
             let ports = Set([url.port ?? (url.scheme == "https" ? 443 : 80), 80, 443])
-            for ip in realIPs.prefix(4) {
+            let addresses = realIPs.prefix(4).joined(separator: ",")
+            if !addresses.isEmpty {
                 for port in ports.sorted() {
-                    arguments.append(contentsOf: ["--resolve", "\(host):\(port):\(ip)"])
+                    arguments.append(contentsOf: ["--resolve", "\(host):\(port):\(addresses)"])
                 }
             }
         }

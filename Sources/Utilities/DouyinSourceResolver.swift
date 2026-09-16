@@ -20,14 +20,19 @@ enum DouyinSourceResolver {
         return url.url
     }
 
-    static func resolve(videoID: String, userAgent: String) async throws -> Video? {
+    static func resolve(videoID: String, userAgent: String, session: URLSession? = nil) async throws -> Video? {
         guard let source = sourceURL(videoID: videoID) else { return nil }
-        let session = DownloaderHTTPCompatibility.makeDownloadSession(timeoutRequest: 12, timeoutResource: 30)
-        defer { session.invalidateAndCancel() }
+        return try await probe(url: source, userAgent: userAgent, session: session)
+    }
+
+    static func probe(url source: URL, userAgent: String, session existingSession: URLSession? = nil) async throws -> Video? {
+        let session = existingSession ?? DownloaderHTTPCompatibility.makeDownloadSession(timeoutRequest: 12, timeoutResource: 30)
+        defer { if existingSession == nil { session.invalidateAndCancel() } }
         var current = source
         var offset = 0
         // Skip media payload by its declared atom size, including >4 GB files.
         for _ in 0..<12 {
+            try Task.checkCancellation()
             let (header, finalURL) = try await range(current, offset: offset, count: 16, session: session, userAgent: userAgent)
             current = finalURL
             guard let atom = atomHeader(header, at: 0), atom.size >= atom.headerSize,
@@ -51,6 +56,7 @@ enum DouyinSourceResolver {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.douyin.com/", forHTTPHeaderField: "Referer")
         let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse, http.statusCode == 206,
               http.value(forHTTPHeaderField: "Content-Range")?.hasPrefix("bytes \(offset)-") == true else {
             throw URLError(.badServerResponse)

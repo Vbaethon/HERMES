@@ -42,3 +42,37 @@ final class DouyinSourceResolverTests: XCTestCase {
         XCTAssertEqual(DouyinSourceResolver.atomHeader(data, at: 0)?.size, 4_550_104_431)
     }
 }
+
+private final class SourceRangeProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let url = request.url!
+        let status = url.lastPathComponent == "ignored-range" ? 200 : 206
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Range": "bytes 99-114/1000"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(repeating: 0, count: 16))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+extension DouyinSourceResolverTests {
+    func testProbeRejectsIgnoredRangeAndWrongOffsetWithoutInvalidatingCallerSession() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SourceRangeProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        for path in ["ignored-range", "wrong-offset"] {
+            let url = URL(string: "https://example.com/\(path)")!
+            do {
+                _ = try await DouyinSourceResolver.probe(url: url, userAgent: "test", session: session)
+                XCTFail("An invalid range must not be interpreted as video metadata")
+            } catch { XCTAssertEqual((error as? URLError)?.code, .badServerResponse) }
+        }
+        do {
+            let (_, response) = try await session.data(from: URL(string: "https://example.com/ignored-range")!)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        } catch { XCTFail("The caller's shared session must remain usable: \(error)") }
+    }
+}

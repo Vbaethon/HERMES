@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 enum DouyinNativeDownloader {
     private static let debugEnabled: Bool = {
@@ -25,6 +26,7 @@ enum DouyinNativeDownloader {
         var awemeID = ""
         var desc = ""
         var sourceVideoID: String?
+        var didProbeSource = false
         var author = "unknown"
         var authorID = ""
         var images: [MediaItem] = []
@@ -59,9 +61,11 @@ enum DouyinNativeDownloader {
         var width: Int
         var height: Int
         var fallbackVideoURL: URL? = nil
+        var alternateURLs: [URL] = []
     }
 
     struct VideoSelection {
+        var alternateURLs: [URL] = []
         var url: URL
         var width: Int
         var height: Int
@@ -69,10 +73,17 @@ enum DouyinNativeDownloader {
         var streamMarkedHDR: Bool
     }
 
-    private struct DownloadTask {
+    struct DownloadTask {
         var url: URL
         var destination: URL
         var fallbackURL: URL? = nil
+        var alternateURLs: [URL] = []
+    }
+
+    struct DownloadOutcome: Sendable {
+        var fileURL: URL
+        var sourceHost: String
+        var usedFallback = false
     }
 
     /// Seed info extracted from the Douyin share page HTML (_ROUTER_DATA / RENDER_DATA / __NEXT_DATA__).
@@ -398,7 +409,12 @@ enum DouyinNativeDownloader {
                 } else {
                     scanProgress = nil
                 }
-                let info = try await fetchAweme(awemeID: awemeID, referer: resolvedURL, seedInfo: seedInfo, progress: scanProgress)
+                var info = try await fetchAweme(awemeID: awemeID, referer: resolvedURL, seedInfo: seedInfo, progress: scanProgress)
+                if info.images.isEmpty, info.videos.count == 1, !info.didProbeSource {
+                    if info.sourceVideoID == nil, let seedID = seedInfo.videoID,
+                       DouyinSourceResolver.sourceURL(videoID: seedID) != nil { info.sourceVideoID = seedID }
+                    if let resolved = await resolveSourceVideo(info) { info = resolved }
+                }
                 if debugEnabled { print("[DouyinDebug] run: fetched info - images=\(info.images.count) videos=\(info.videos.count)") }
                 guard !info.images.isEmpty || !info.videos.isEmpty else {
                     throw NSError(domain: "DouyinDownloader", code: 4, userInfo: [NSLocalizedDescriptionKey: "没有可下载的抖音媒体。"])
@@ -436,7 +452,8 @@ enum DouyinNativeDownloader {
                     tasks.append(DownloadTask(
                         url: item.videoURL,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames),
-                        fallbackURL: item.fallbackVideoURL
+                        fallbackURL: item.fallbackVideoURL,
+                        alternateURLs: item.alternateURLs
                     ))
                 }
 
@@ -448,7 +465,7 @@ enum DouyinNativeDownloader {
                 } else {
                     downloadProgress = nil
                 }
-                try await download(tasks, progress: downloadProgress)
+                let outcomes = try await download(tasks, progress: downloadProgress)
                 let liveCount = info.images.filter { $0.videoURL != nil }.count
                 var summary = [
                     "awemeId: \(info.awemeID)",
@@ -458,10 +475,21 @@ enum DouyinNativeDownloader {
                     "下载 Live Photo 视频: \(liveCount) 个",
                     "输出目录: \(outputFolder.path)"
                 ]
+                if !info.images.isEmpty, liveCount < info.images.count {
+                    summary.append("部分图片未取得动态视频；本次结果不代表已确认这些图片均为普通照片。")
+                }
+                for outcome in outcomes where ["mp4", "mov", "m4v"].contains(outcome.fileURL.pathExtension.lowercased()) {
+                    let asset = AVURLAsset(url: outcome.fileURL)
+                    if let track = try? await asset.loadTracks(withMediaType: .video).first,
+                       let size = try? await track.load(.naturalSize),
+                       let fps = try? await track.load(.nominalFrameRate) {
+                        summary.append("实际视频: \(Int(size.width))×\(Int(size.height)), \(String(format: "%.2f", fps)) fps；\(outcome.usedFallback ? "已使用备用流" : "首选候选")；来源: \(outcome.sourceHost)")
+                    }
+                }
                 if info.hasSourceMarkedHDRVideo {
                     summary.append(info.hasStreamMarkedHDRVideo
                         ? "HDR: 已优先选择带 HDR 标识的视频流"
-                        : "HDR: 源视频标记为 HDR，但公开接口未返回带 HDR 标识的视频流，已保留最高规格可下载流")
+                        : "HDR: 源视频标记为 HDR，但公开接口未返回带 HDR 标识的视频流，已保留本次可下载候选流，未验证 HDR")
                 }
                 lines.append(summary.joined(separator: "\n"))
             }
@@ -736,15 +764,37 @@ enum DouyinNativeDownloader {
             publicInfo = info
         }
         if let progress { await progress(0.08) }
-        // Video source resolution does not require any desktop playback/cache.
-        if referer.path.lowercased().contains("/video/") {
-            if publicInfo == nil {
-                let mobileURL = URL(string: "https://api5-normal-c-lf.amemv.com/aweme/v1/feed/?aweme_id=\(awemeID)&version_code=170400&version_name=17.4.0&count=1")!
-                publicInfo = try? await parseMobileFeedResponse(from: mobileURL, targetAwemeID: awemeID)
+        // Preserve the fast source path before the expensive desktop cache scan.
+        if publicInfo == nil, referer.path.lowercased().contains("/video/") || seedInfo.videoID != nil {
+            let mobileURL = URL(string: "https://api5-normal-c-lf.amemv.com/aweme/v1/feed/?aweme_id=\(awemeID)&version_code=170400&version_name=17.4.0&count=1")!
+            publicInfo = try? await parseMobileFeedResponse(from: mobileURL, targetAwemeID: awemeID)
+        }
+        if var info = publicInfo, info.images.isEmpty, info.videos.count == 1 {
+            if info.sourceVideoID == nil { info.sourceVideoID = seedInfo.videoID }
+            if let resolved = await resolveSourceVideo(info) {
+                if resolved.videos[0].videoURL != info.videos[0].videoURL {
+                    await progress?(1)
+                    return resolved
+                }
+                publicInfo = resolved
+            } else {
+                info.didProbeSource = true
+                publicInfo = info
             }
-            if let info = publicInfo, let upgraded = await resolveSourceVideo(info) {
-                if let progress { await progress(1.0) }
-                return upgraded
+        }
+        // The web app identity preserves per-image motion video fields. Without aid,
+        // this endpoint can return the same work with every image.video omitted.
+        // Resolve authoritative pairs before consulting the optional desktop cache.
+        if publicInfo == nil || publicInfo?.images.isEmpty == false {
+            let slidesURL = URL(string: "https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/?aweme_ids=%5B\(awemeID)%5D&request_source=200&aid=6383")!
+            if let info = try? await parseAwemeResponse(from: slidesURL, referer: referer, quickTimeout: true),
+               info.awemeID == awemeID, !info.images.isEmpty {
+                if debugEnabled { print("[DouyinDebug] fetchAweme: got image pairs from slides API (web app)") }
+                if hasCompleteLivePhotoData(info), !hasSuspiciousLivePhotoVideo(info) {
+                    await progress?(1)
+                    return info
+                }
+                publicInfo = await preferredInfo(info, over: publicInfo)
             }
         }
         // Desktop cache is expensive, but it is the source that can expose Live
@@ -782,7 +832,7 @@ enum DouyinNativeDownloader {
                 directCacheInfo = directInfo
                 if isResolvedVideoPage {
                     if let progress { await progress(1.0) }
-                    return directInfo
+                    return await preferredInfo(directInfo, over: publicInfo)
                 }
             }
             if let publicInfo, !publicInfo.images.isEmpty,
@@ -853,37 +903,6 @@ enum DouyinNativeDownloader {
             print("[DouyinDebug] fetchAweme: skipping desktop cache (public data is complete)")
         }
 
-        // Slides API is only useful for image/slides posts. Skip for video-only posts.
-        if !isVideoOnly {
-            if debugEnabled { print("[DouyinDebug] fetchAweme: trying slides API") }
-            let slidesURL = URL(string: "https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/?aweme_ids=%5B\(awemeID)%5D&request_source=200")!
-            if let info = try? await parseAwemeResponse(from: slidesURL, referer: referer, quickTimeout: true), !info.images.isEmpty || !info.videos.isEmpty {
-                if debugEnabled { print("[DouyinDebug] fetchAweme: got data from slides info API") }
-                if hasCompleteLivePhotoData(info), !hasSuspiciousLivePhotoVideo(info) {
-                    return info
-                }
-                publicInfo = preferredInfo(info, over: publicInfo)
-                needsLivePhotoVideo = isMissingLivePhotoVideo(publicInfo)
-                if needsLivePhotoVideo,
-                   let currentPublicInfo = publicInfo,
-                   let timelineInfo = await cachedTimelineLivePhotoVideos(
-                        awemeID: awemeID,
-                        publicInfo: currentPublicInfo,
-                        progress: { fraction in
-                            if let progress { await progress(0.95 + min(fraction, 1) * 0.05) }
-                        }
-                   ) {
-                    publicInfo = timelineInfo
-                    needsLivePhotoVideo = isMissingLivePhotoVideo(timelineInfo)
-                    if hasCompleteLivePhotoData(timelineInfo), !hasSuspiciousLivePhotoVideo(timelineInfo) {
-                        if debugEnabled { print("[DouyinDebug] fetchAweme: merged Live Photo videos from Douyin timeline cache after slides API") }
-                        return timelineInfo
-                    }
-                }
-            }
-        } else if debugEnabled {
-            print("[DouyinDebug] fetchAweme: skipping slides API (video-only post)")
-        }
         // Mobile feed API — sometimes returns data when the web API is blocked.
         // Uses the same endpoint the mobile app uses, which may have different CDN routing.
         if publicInfo == nil || needsLivePhotoVideo || isVideoOnly {
@@ -895,7 +914,7 @@ enum DouyinNativeDownloader {
                 if hasCompleteLivePhotoData(info) {
                     return info
                 }
-                publicInfo = preferredInfo(info, over: publicInfo)
+                publicInfo = await preferredInfo(info, over: publicInfo)
                 needsLivePhotoVideo = isMissingLivePhotoVideo(publicInfo)
             }
         }
@@ -921,10 +940,19 @@ enum DouyinNativeDownloader {
     private static func resolveSourceVideo(_ info: AwemeInfo) async -> AwemeInfo? {
         guard info.images.isEmpty, info.videos.count == 1, let videoID = info.sourceVideoID else { return nil }
         do {
-            guard let source = try await DouyinSourceResolver.resolve(videoID: videoID, userAgent: userAgent) else { return nil }
+            guard let source = try await DouyinSourceResolver.resolve(videoID: videoID, userAgent: userAgent, session: networkSession) else { return nil }
             let old = info.videos[0]
-            guard Int64(source.width) * Int64(source.height) > Int64(old.width) * Int64(old.height) else { return nil }
+            guard source.url != old.videoURL else { return nil }
             var upgraded = info
+            upgraded.didProbeSource = true
+            let oldDimensions = try? await DouyinSourceResolver.probe(url: old.videoURL, userAgent: userAgent, session: networkSession)
+            let oldPixels = oldDimensions.map { Int64($0.width) * Int64($0.height) }
+            let sourcePixels = Int64(source.width) * Int64(source.height)
+            guard let oldPixels, sourcePixels > oldPixels, !old.streamMarkedHDR else {
+                // Equal, unknown, or HDR-incomparable streams remain usable candidates.
+                upgraded.videos[0].alternateURLs.append(source.url)
+                return upgraded
+            }
             upgraded.videos[0].fallbackVideoURL = old.videoURL
             upgraded.videos[0].videoURL = source.url
             upgraded.videos[0].width = source.width
@@ -977,24 +1005,49 @@ enum DouyinNativeDownloader {
         return true
     }
 
-    private static func preferredInfo(_ candidate: AwemeInfo, over current: AwemeInfo?) -> AwemeInfo {
+    private static func preferredInfo(_ candidate: AwemeInfo, over current: AwemeInfo?) async -> AwemeInfo {
         guard let current else { return candidate }
+        guard !current.awemeID.isEmpty, current.awemeID == candidate.awemeID else { return current }
+        if current.images.isEmpty, candidate.images.isEmpty,
+           current.videos.count == 1, candidate.videos.count == 1 {
+            let old = current.videos[0], new = candidate.videos[0]
+            guard new.videoURL != old.videoURL else { return current }
+            let oldSize = try? await DouyinSourceResolver.probe(url: old.videoURL, userAgent: userAgent, session: networkSession)
+            let newSize = try? await DouyinSourceResolver.probe(url: new.videoURL, userAgent: userAgent, session: networkSession)
+            var selected = current
+            // Compare measured values only. Keep ambiguous/HDR-incomparable candidates as fallbacks.
+            if let oldSize, let newSize, (!old.streamMarkedHDR || new.streamMarkedHDR),
+               Int64(newSize.width) * Int64(newSize.height) > Int64(oldSize.width) * Int64(oldSize.height) {
+                selected = candidate
+                selected.videos[0].width = newSize.width
+                selected.videos[0].height = newSize.height
+                selected.videos[0].fallbackVideoURL = old.videoURL
+                selected.videos[0].alternateURLs = orderedVideoURLs(new.alternateURLs + old.alternateURLs)
+            } else {
+                selected.videos[0].alternateURLs = orderedVideoURLs(old.alternateURLs + [new.videoURL] + new.alternateURLs)
+            }
+            selected.didProbeSource = current.didProbeSource || candidate.didProbeSource
+            return selected
+        }
         let candidateScore = candidate.images.count * 10 + candidate.videos.count
         let currentScore = current.images.count * 10 + current.videos.count
         return candidateScore > currentScore ? candidate : current
     }
 
-    private static func mergeLivePhotoVideos(from cached: AwemeInfo, into publicInfo: AwemeInfo) -> AwemeInfo {
+    static func mergeLivePhotoVideos(from cached: AwemeInfo, into publicInfo: AwemeInfo) -> AwemeInfo {
+        // Only image entries retain an image ordinal. A flat video list has no safe pairing identity.
+        guard !publicInfo.awemeID.isEmpty, cached.awemeID == publicInfo.awemeID else { return publicInfo }
         var merged = publicInfo
-        let cachedVideos = cached.images.compactMap(\.videoURL) + cached.videos.map(\.videoURL)
-        guard !cachedVideos.isEmpty else { return merged }
-        var videoIndex = 0
         for index in merged.images.indices {
             let current = merged.images[index].videoURL
-            let shouldReplace = current == nil || hasSuspiciousLivePhotoURL(current!)
-            guard shouldReplace else { continue }
-            merged.images[index].videoURL = cachedVideos[min(videoIndex, cachedVideos.count - 1)]
-            videoIndex += 1
+            guard current == nil || hasSuspiciousLivePhotoURL(current!) else { continue }
+            let matches = cached.images.filter { $0.index == merged.images[index].index }
+            guard matches.count == 1, let video = matches[0].videoURL,
+                  isUsableVideoURL(video), !hasSuspiciousLivePhotoURL(video) else { continue }
+            merged.images[index].videoURL = video
+            merged.images[index].videoWidth = matches[0].videoWidth
+            merged.images[index].videoHeight = matches[0].videoHeight
+            merged.images[index].streamMarkedHDR = matches[0].streamMarkedHDR
         }
         return merged
     }
@@ -1409,7 +1462,7 @@ enum DouyinNativeDownloader {
             }
             return true
         } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else {
+            guard (error as NSError).code == 405 || DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else {
                 if debugEnabled { print("[DouyinDebug] direct media HEAD failed: \(error.localizedDescription)") }
                 return false
             }
@@ -1671,14 +1724,6 @@ enum DouyinNativeDownloader {
 
     private static func writeDouyinCacheStop(priority: Int, to url: URL) {
         try? String(priority).write(to: url, atomically: true, encoding: .utf8)
-    }
-
-    private static func cachedDesktopAweme(in cacheFiles: [URL], electronURL: URL, script: String, awemeID: String, videoIDs: [String]) -> AwemeInfo? {
-        guard let data = cachedDesktopAwemeData(in: cacheFiles, electronURL: electronURL, script: script, awemeID: awemeID, videoIDs: videoIDs),
-              let aweme = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        return parseAweme(aweme)
     }
 
     private static func cachedDesktopAwemeData(in cacheFiles: [URL], electronURL: URL, script: String, awemeID: String, videoIDs: [String], cancellationURL: URL? = nil, priority: Int = 0) -> Data? {
@@ -2157,14 +2202,17 @@ enum DouyinNativeDownloader {
         if images.isEmpty,
            let video = aweme["video"] as? [String: Any],
            let bestVideo = bestVideoURL(from: video) {
-            info.sourceVideoID = (video["play_addr"] as? [String: Any])?["uri"] as? String
+            info.sourceVideoID = ["play_addr", "play_addr_h264", "play_addr_265", "download_addr"]
+                .compactMap { (video[$0] as? [String: Any])?["uri"] as? String }
+                .first { DouyinSourceResolver.sourceURL(videoID: $0) != nil }
             info.videos.append(VideoItem(
                 index: 1,
                 videoURL: bestVideo.url,
                 sourceMarkedHDR: bestVideo.sourceMarkedHDR,
                 streamMarkedHDR: bestVideo.streamMarkedHDR,
                 width: bestVideo.width,
-                height: bestVideo.height
+                height: bestVideo.height,
+                alternateURLs: bestVideo.alternateURLs
             ))
         }
         return info
@@ -2290,40 +2338,13 @@ enum DouyinNativeDownloader {
     }
 
     private static func livePhotoVideosInAweme(_ aweme: [String: Any], imageCount: Int) -> [VideoSelection] {
-        guard imageCount > 0 else { return [] }
-        let metaWidth = JSONValueUtilities.intValue(aweme["width"])
-        let metaHeight = JSONValueUtilities.intValue(aweme["height"])
-        var selections: [VideoSelection] = []
-        var seen = Set<String>()
-
-        let nestedSelections = nestedVideoCandidates(in: aweme, meta: aweme, inheritedMeta: nil)
-            .map(\.selection)
-            .filter { isLikelyDouyinVideoPlaybackURL($0.url) }
-        for selection in nestedSelections {
-            guard seen.insert(selection.url.absoluteString).inserted else { continue }
-            selections.append(selection)
-        }
-
-        let looseURLs = anyVideoURLsInStrings(aweme)
-        for url in looseURLs {
-            let preferredURL = preferredDouyinPlaybackURL(url, width: metaWidth, height: metaHeight)
-            guard isLikelyDouyinVideoPlaybackURL(preferredURL), seen.insert(preferredURL.absoluteString).inserted else { continue }
-            selections.append(VideoSelection(
-                url: preferredURL,
-                width: metaWidth,
-                height: metaHeight,
-                sourceMarkedHDR: false,
-                streamMarkedHDR: false
-            ))
-        }
-
-        let ranked = selections.sorted { lhs, rhs in
-            livePhotoVideoScore(lhs.url) > livePhotoVideoScore(rhs.url)
-        }
-        if debugEnabled, !ranked.isEmpty {
-            print("[DouyinDebug] aweme-level Live Photo video fallback candidates: \(ranked.map { $0.url.absoluteString })")
-        }
-        return ranked
+        // Only a single-image work has an unambiguous top-level video pairing.
+        // Flattening nested videos shifts indices when a mixed album omits a motion.
+        guard imageCount == 1,
+              let video = aweme["video"] as? [String: Any],
+              let selection = bestVideoURL(from: video),
+              isLikelyDouyinVideoPlaybackURL(selection.url) else { return [] }
+        return [selection]
     }
 
     private static func livePhotoVideoScore(_ url: URL) -> Int {
@@ -2621,6 +2642,11 @@ enum DouyinNativeDownloader {
             ?? filtered.first
     }
 
+    private static func orderedVideoURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<URL>()
+        return urls.filter { seen.insert($0).inserted }
+    }
+
     private static func videoCandidates(from playAddr: [String: Any], meta: [String: Any], inheritedMeta: [String: Any]?) -> [(score: Int64, selection: VideoSelection)] {
         let urls = playAddr["url_list"] as? [String] ?? []
         let width = JSONValueUtilities.intValue(playAddr["width"]) != 0
@@ -2710,6 +2736,7 @@ enum DouyinNativeDownloader {
             finalScore += 6_000_000_000
         }
         return [(finalScore, VideoSelection(
+            alternateURLs: orderedVideoURLs(parsedURLs + urls.compactMap { URL(string: MediaFileUtilities.formatURL($0)) }).filter { $0 != preferred },
             url: preferred,
             width: width,
             height: height,
@@ -2718,50 +2745,22 @@ enum DouyinNativeDownloader {
         ))]
     }
 
-	    private static func preferredDouyinPlaybackURL(_ url: URL, width: Int, height: Int) -> URL {
-	        if debugEnabled {
-	            print("[DouyinDebug] preferredDouyinPlaybackURL input: \(url.absoluteString)")
-	            print("[DouyinDebug] preferredDouyinPlaybackURL path=\(url.path) absoluteString contains playwm: \(url.absoluteString.contains("/aweme/v1/playwm/"))")
-	            print("[DouyinDebug] preferredDouyinPlaybackURL width=\(width) height=\(height)")
-	        }
-	        // Foundation URL.path may strip trailing slash, so check absoluteString instead.
-	        let isPlayURL = url.absoluteString.contains("/aweme/v1/play/")
-	            || url.path.contains("/aweme/v1/play")
-	        let isPlaywmURL = url.absoluteString.contains("/aweme/v1/playwm/")
-	            || url.path.contains("/aweme/v1/playwm")
-	        let isRelevantURL = isPlayURL || isPlaywmURL
-	        guard isRelevantURL else {
-	            if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL: not a play/playwm URL, returning as-is") }
-	            return url
-	        }
-	        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-	        // Replace playwm with play in the path (handle both with and without trailing slash)
-	        if isPlaywmURL {
-	            let newPath = url.path
-	                .replacingOccurrences(of: "/aweme/v1/playwm/", with: "/aweme/v1/play/")
-	                .replacingOccurrences(of: "/aweme/v1/playwm", with: "/aweme/v1/play")
-	            components?.path = newPath
-	        }
-	        let desiredRatio = max(width, height) >= 2160 ? "4k" : max(width, height) >= 1080 ? "1080p" : "720p"
-	        let queryItems = components?.queryItems ?? []
-	        let currentRatio = queryItems.first(where: { $0.name == "ratio" })?.value ?? ""
-	        // Fix ratio if it doesn't match the desired value (e.g. 720p for a 4K video)
-	        if !isPlaywmURL && currentRatio == desiredRatio {
-	            // Already correct ratio for a non-playwm URL — no change needed
-	            if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL: play URL with correct ratio \(desiredRatio), returning as-is") }
-	            return url
-	        }
-        components?.queryItems = queryItems.map { item in
-            item.name == "ratio" ? URLQueryItem(name: item.name, value: desiredRatio) : item
-        }
-        // Strip watermark=1 from play URLs — HERMES always downloads non-watermarked media.
-        if let filtered = components?.queryItems?.filter({ $0.name != "watermark" }) {
-            components?.queryItems = filtered
-        }
-        let result = components?.url ?? url
-	        if debugEnabled { print("[DouyinDebug] preferredDouyinPlaybackURL output: \(result.absoluteString) (desired ratio: \(desiredRatio), was: \(currentRatio))") }
-	        return result
-	    }
+    static func preferredDouyinPlaybackURL(_ url: URL, width: Int, height: Int) -> URL {
+        guard url.path.contains("/aweme/v1/play"),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = parts.queryItems ?? []
+        if items.contains(where: { ["signature", "x-signature", "a_bogus", "msToken"].contains($0.name) }) { return url }
+        if items.contains(where: { ($0.name == "ratio" && $0.value == "default") || $0.name == "improve_bitrate" }) { return url }
+        parts.path = parts.path.replacingOccurrences(of: "/playwm", with: "/play")
+        // Resolution tiers use the short side for portrait as well as landscape.
+        let shortSide = min(width, height)
+        let ratio = shortSide >= 2160 ? "4k" : shortSide >= 1080 ? "1080p" : "720p"
+        items.removeAll { $0.name == "ratio" || $0.name == "watermark" }
+        items.append(URLQueryItem(name: "ratio", value: ratio))
+        items.append(URLQueryItem(name: "watermark", value: "0"))
+        parts.queryItems = items
+        return parts.url ?? url
+    }
 
     private static func isHDRText(_ text: String) -> Bool {
         text.contains("hdr")
@@ -2808,67 +2807,86 @@ enum DouyinNativeDownloader {
         )
     }
 
-    private static func download(
+    static func download(
         _ tasks: [DownloadTask],
         maxConcurrentDownloads requestedMaxConcurrentDownloads: Int? = nil,
         progress: DownloaderInfra.ProgressHandler? = nil
-    ) async throws {
-        guard !tasks.isEmpty else { return }
+    ) async throws -> [DownloadOutcome] {
+        guard !tasks.isEmpty else { return [] }
         let limit = max(1, requestedMaxConcurrentDownloads ?? maxConcurrentDownloads)
         let progressAggregator = DownloaderInfra.DownloadProgressAggregator(totalCount: tasks.count, handler: progress)
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        return try await withThrowingTaskGroup(of: DownloadOutcome.self) { group in
+            var outcomes: [DownloadOutcome] = []
             var iter = Array(tasks.enumerated()).makeIterator()
             for _ in 0..<min(limit, tasks.count) {
                 guard let t = iter.next() else { break }
                 group.addTask {
-                    try await download(t.element) { fraction in
+                    let outcome = try await download(t.element) { fraction in
                         await progressAggregator.update(index: t.offset, fraction: fraction)
                     }
                     await progressAggregator.complete(index: t.offset)
+                    return outcome
                 }
             }
-            for try await _ in group {
+            for try await outcome in group {
+                outcomes.append(outcome)
                 guard let t = iter.next() else { continue }
                 group.addTask {
-                    try await download(t.element) { fraction in
+                    let outcome = try await download(t.element) { fraction in
                         await progressAggregator.update(index: t.offset, fraction: fraction)
                     }
                     await progressAggregator.complete(index: t.offset)
+                    return outcome
                 }
             }
+            return outcomes.sorted { $0.fileURL.lastPathComponent < $1.fileURL.lastPathComponent }
         }
     }
 
-    private static func download(
+    static func download(
         _ task: DownloadTask,
         retries: Int = 3,
         progress: DownloaderInfra.ProgressHandler? = nil
-    ) async throws {
+    ) async throws -> DownloadOutcome {
+        try Task.checkCancellation()
         var lastError: Error?
         for attempt in 0...retries {
             do {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let temporaryURL = task.destination.appendingPathExtension("part")
                 try await downloadOnceAsync(task.url, to: temporaryURL, progress: progress)
-                try validateDownloadedFile(temporaryURL, source: task.url)
+                try await MediaFileUtilities.validateMedia(temporaryURL, expectedSuffix: task.destination.pathExtension)
                 let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                 let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                 try? FileManager.default.removeItem(at: finalURL)
                 try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: finalURL.path)
-                return
+                print("[HERMES] 媒体校验通过: \(finalURL.lastPathComponent), 来源主机: \(task.url.host ?? "unknown")")
+                return DownloadOutcome(fileURL: finalURL, sourceHost: task.url.host ?? "unknown")
             } catch {
+                try Task.checkCancellation()
                 lastError = error
                 try? FileManager.default.removeItem(at: task.destination.appendingPathExtension("part"))
                 if attempt < retries {
-                    try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
+                    try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
                 }
             }
         }
+        for alternate in task.alternateURLs where alternate != task.url {
+            do {
+                var outcome = try await download(DownloadTask(url: alternate, destination: task.destination), retries: 0, progress: progress)
+                outcome.usedFallback = true
+                return outcome
+            } catch {
+                try Task.checkCancellation()
+                lastError = error
+            }
+        }
         if let fallback = task.fallbackURL {
-            if debugEnabled { print("[DouyinDebug] source download failed; retrying the original rendition") }
-            try await download(DownloadTask(url: fallback, destination: task.destination), retries: 1, progress: progress)
-            return
+            print("[HERMES] 当前候选失败，回退到保留的视频流。")
+            var outcome = try await download(DownloadTask(url: fallback, destination: task.destination), retries: 1, progress: progress)
+            outcome.usedFallback = true
+            return outcome
         }
         throw lastError ?? NSError(domain: "DouyinDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])
     }
@@ -2879,18 +2897,6 @@ enum DouyinNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
         try await DownloaderInfra.downloadOnceAsync(url, to: destination, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, extraHeaders: ["Referer": "https://www.douyin.com/"], progress: progress)
-        try validateDownloadedFile(destination, source: url)
-    }
-
-    private static func validateDownloadedFile(_ url: URL, source: URL) throws {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        guard let fileSize = values.fileSize, fileSize > 0 else {
-            throw NSError(
-                domain: "DouyinDownloader",
-                code: 10,
-                userInfo: [NSLocalizedDescriptionKey: "下载结果为空：\(source.absoluteString)"]
-            )
-        }
     }
 
     private static func shouldUseDirectly(_ req: URLRequest) -> Bool {

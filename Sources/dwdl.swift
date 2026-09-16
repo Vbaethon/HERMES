@@ -186,8 +186,11 @@ enum DewuNativeDownloader {
             } else {
                 lines.append(pageInfo.isVideoPost ? "下载视频: \(videoURLs.count) 个（来源：\(videoSource)）" : "下载 Live Photo/动态图视频: \(videoURLs.count) 个（来源：\(videoSource)）")
                 var tasks: [DownloadTask] = []
-                for (index, url) in videoURLs.enumerated() {
-                    let stillURL = pageInfo.isVideoPost ? nil : (index < mediaPairs.count ? mediaPairs[index].imageURL : (index < imageSources.count ? imageSources[index].url : nil))
+                for url in videoURLs {
+                    let stillURL = pageInfo.isVideoPost ? nil : pairedImageURL(for: url, in: mediaPairs)
+                    if !pageInfo.isVideoPost, stillURL == nil {
+                        lines.append("一段视频缺少可靠的图片关联，保留为独立视频。")
+                    }
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: videoName(stillURL: stillURL, videoURL: url), usedNames: &usedNames)
                     tasks.append(DownloadTask(url: url, destination: destination))
                 }
@@ -226,7 +229,7 @@ enum DewuNativeDownloader {
         var fallbackURLs: [URL] = []
     }
 
-    private struct APIMediaPair {
+    struct APIMediaPair {
         var imageURL: URL?
         var videoURL: URL
     }
@@ -396,20 +399,6 @@ enum DewuNativeDownloader {
         }
         let pairs = extractAPIMediaPairs(json)
         return APIMediaResult(pairs: pairs, didFetchDetail: true)
-    }
-
-    private static func waitForAPIMediaPairs(contentID: String, databases: [URL], timeout: TimeInterval, progress: DownloaderInfra.ProgressHandler? = nil) async -> [APIMediaPair] {
-        let deadline = Date().addingTimeInterval(timeout)
-        while true {
-            let pairs = await fetchAPIMediaPairs(contentID: contentID, databases: databases)
-            if !pairs.isEmpty || Date() >= deadline {
-                if let progress { await progress(1) }
-                return pairs
-            }
-            let elapsed = timeout > 0 ? min(deadline.timeIntervalSinceNow / timeout, 1) : 0
-            if let progress { await progress(elapsed) }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-        }
     }
 
     private static func waitForAPIMediaPairs(contentID: String, roots: [URL], databaseLimit: Int, timeout: TimeInterval, progress: DownloaderInfra.ProgressHandler? = nil) async -> [APIMediaPair] {
@@ -634,7 +623,7 @@ enum DewuNativeDownloader {
         _ task: DownloadTask,
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
-        try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress)
+        try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, validate: { url in try await MediaFileUtilities.validateMedia(url, expectedSuffix: task.destination.pathExtension) }, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress)
     }
 
     private static func openDewuApp(_ url: URL) {
@@ -743,6 +732,12 @@ enum DewuNativeDownloader {
     private static func fileName(from url: URL) -> String {
         let name = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
         return name.isEmpty ? "media" : name
+    }
+
+    static func pairedImageURL(for videoURL: URL, in pairs: [APIMediaPair]) -> URL? {
+        let key = videoVariantKey(videoURL)
+        let matches = Set(pairs.filter { videoVariantKey($0.videoURL) == key }.compactMap(\.imageURL))
+        return matches.count == 1 ? matches.first : nil
     }
 
     private static func videoName(stillURL: URL?, videoURL: URL) -> String {

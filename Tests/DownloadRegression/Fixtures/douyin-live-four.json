@@ -1,0 +1,77 @@
+{
+  "aweme_id": "7676426466318167972",
+  "images": [
+    {
+      "clip_type": 5,
+      "width": 2160,
+      "height": 3840,
+      "url_list": [
+        "https://example.com/image-1.jpg"
+      ],
+      "video": {
+        "width": 720,
+        "height": 1280,
+        "duration": 3900,
+        "play_addr": {
+          "url_list": [
+            "https://example.com/live-1.mp4"
+          ]
+        }
+      }
+    },
+    {
+      "clip_type": 5,
+      "width": 1080,
+      "height": 1920,
+      "url_list": [
+        "https://example.com/image-2.jpg"
+      ],
+      "video": {
+        "width": 720,
+        "height": 1280,
+        "duration": 3668,
+        "play_addr": {
+          "url_list": [
+            "https://example.com/live-2.mp4"
+          ]
+        }
+      }
+    },
+    {
+      "clip_type": 5,
+      "width": 1080,
+      "height": 1920,
+      "url_list": [
+        "https://example.com/image-3.jpg"
+      ],
+      "video": {
+        "width": 720,
+        "height": 1280,
+        "duration": 3900,
+        "play_addr": {
+          "url_list": [
+            "https://example.com/live-3.mp4"
+          ]
+        }
+      }
+    },
+    {
+      "clip_type": 5,
+      "width": 2160,
+      "height": 3840,
+      "url_list": [
+        "https://example.com/image-4.jpg"
+      ],
+      "video": {
+        "width": 720,
+        "height": 1280,
+        "duration": 3180,
+        "play_addr": {
+          "url_list": [
+            "https://example.com/live-4.mp4"
+          ]
+        }
+      }
+    }
+  ]
+}
