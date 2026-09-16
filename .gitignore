@@ -43,3 +43,8 @@ HERMES.xcodeproj/project.xcworkspace/xcuserdata/
 *.mobileprovision
 *.provisionprofile
 /下载渠道修复与验收.md
+
+# Local release and verification notes.
+/CHANGELOG.md
+/script/VERSIONING.md
+/Tests/DownloadRegression/README.md
