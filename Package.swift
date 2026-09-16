@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "HERMES",
     platforms: [
-        .macOS("26.0")
+        .macOS("27.0")
     ],
     products: [
         .executable(name: "tool", targets: ["HermesTool"]),
@@ -17,6 +17,8 @@ let package = Package(
             path: "Sources",
             sources: [
                 "DownloaderHTTPCompatibility.swift",
+                "Utilities/SubprocessRunner.swift",
+                "Utilities/DouyinSourceResolver.swift",
                 "Utilities/DewuDownloadRecoveryPolicy.swift",
                 "Utilities/DewuPlaybackLogVideoExtractor.swift",
                 "Utilities/DownloaderNetworkPolicy.swift"
@@ -38,6 +40,24 @@ let package = Package(
                 .linkedFramework("ImageIO"),
                 .linkedFramework("UniformTypeIdentifiers")
             ]
+        ),
+        .target(
+            name: "HermesThumbnailUI",
+            path: "Sources",
+            sources: [
+                "UIModels.swift", "Utilities/FileSystemUtilities.swift",
+                "Views/CollectionViews/ThumbnailGridController.swift",
+                "Views/Thumbnail/ThumbnailService.swift",
+                "Views/Thumbnail/ThumbnailItemViews.swift",
+                "Views/Thumbnail/SystemThumbnailProvider.swift"
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "HermesLayoutTests",
+            dependencies: ["HermesThumbnailUI"],
+            path: "Tests/HermesLayoutTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "HermesNetworkingTests",

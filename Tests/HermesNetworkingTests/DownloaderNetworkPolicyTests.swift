@@ -48,4 +48,15 @@ final class DownloaderNetworkPolicyTests: XCTestCase {
     func testCurlCompatibilityArgumentsDisableProxyConfiguration() {
         XCTAssertEqual(DownloaderNetworkPolicy.directCurlArguments, ["--disable", "--noproxy", "*", "--ipv4"])
     }
+    func testBothXHSShortLinkDomainsUseCompatibleResolution() throws {
+        for host in ["xhslink.com", "xhslink.cn", "XHSLINK.CN"] {
+            XCTAssertTrue(DownloaderNetworkPolicy.isXHSShortLinkHost(host))
+            let request = URLRequest(url: try XCTUnwrap(URL(string: "https://\(host)/o/example")))
+            let error = NSError(domain: "XHSDownloader", code: 404)
+            XCTAssertTrue(DownloaderHTTPCompatibility.shouldFallback(after: error, for: request))
+        }
+        XCTAssertFalse(DownloaderNetworkPolicy.isXHSShortLinkHost("xhslink.cn.example.com"))
+        XCTAssertFalse(DownloaderNetworkPolicy.isXHSShortLinkHost(nil))
+    }
+
 }

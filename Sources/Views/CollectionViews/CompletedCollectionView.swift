@@ -116,14 +116,14 @@ enum CompletedCollectionView {
                 symbolName: AppSymbol.removeItems,
                 target: self,
                 action: #selector(removeFromContextMenu(_:)),
-                isEnabled: selectedCount > 0
+                isEnabled: selectedCount > 0 && model.canClearVisibleCompleted
             ))
             menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.deleteSourceTitle(count: selectedCount),
                 symbolName: AppSymbol.deleteSourceFiles,
                 target: self,
                 action: #selector(deleteSourceFilesFromContextMenu(_:)),
-                isEnabled: selectedCount > 0
+                isEnabled: selectedCount > 0 && model.canClearVisibleCompleted
             ))
 
             return menu

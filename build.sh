@@ -5,13 +5,11 @@ CONFIGURATION="${HERMES_BUILD_CONFIGURATION:-Debug}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT_DIR/script/project_config.sh"
-DERIVED_DATA_DIR="$HOME/Library/Developer/Xcode/DerivedData/HERMES-Codex"
-PRODUCTS_DIR="$DERIVED_DATA_DIR/Build/Products/$CONFIGURATION"
-APP_PATH="$PRODUCTS_DIR/$APP_NAME.app"
 MAC_ARCH="$(uname -m)"
 XCODE_DESTINATION="platform=macOS,arch=$MAC_ARCH"
 
 SHOULD_RUN=true
+SHOULD_CLEAN=false
 
 XCODE_DEVELOPER_DIR="$(resolve_developer_dir)"
 XCODEBUILD="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
@@ -32,7 +30,7 @@ while [[ $# -gt 0 ]]; do
       SHOULD_RUN=false
       ;;
     --clean)
-      rm -rf "$DERIVED_DATA_DIR"
+      SHOULD_CLEAN=true
       ;;
     --help|help)
       usage
@@ -46,12 +44,19 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "$SHOULD_CLEAN" == true ]]; then
+  if app_is_running; then
+    echo "HERMES is running; clean was skipped to protect current tasks. Quit the app before cleaning." >&2
+    exit 1
+  fi
+  rm -rf "${HERMES_DERIVED_DATA_DIR:-$HOME/Library/Developer/Xcode/DerivedData/HERMES-Codex}"
+fi
+prepare_build_paths
+
 echo "Building $SCHEME ($CONFIGURATION)..."
 
 mkdir -p "$DERIVED_DATA_DIR" "$PRODUCTS_DIR"
 
-# Kill existing instance before build
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$XCODEBUILD" \
   -project "$ROOT_DIR/$PROJECT_NAME" \
@@ -70,6 +75,10 @@ fi
 echo "Build complete: $APP_PATH"
 
 if [[ "$SHOULD_RUN" == true ]]; then
-  echo "Launching $APP_NAME..."
-  /usr/bin/open -n "$APP_PATH"
+  if app_is_running; then
+    echo "Existing HERMES left running. Open this build after current tasks finish: $APP_PATH"
+  else
+    echo "Launching $APP_NAME..."
+    /usr/bin/open "$APP_PATH"
+  fi
 fi

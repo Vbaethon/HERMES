@@ -6,8 +6,7 @@ CONFIGURATION="Release"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/script/project_config.sh"
 BUILD_DIR="$ROOT_DIR/Build"
-DERIVED_DATA_DIR="$HOME/Library/Developer/Xcode/DerivedData/HERMES-Codex"
-PRODUCTS_DIR="$DERIVED_DATA_DIR/Build/Products/$CONFIGURATION"
+prepare_build_paths
 PROJECT_FILE="$ROOT_DIR/$PROJECT_NAME/project.pbxproj"
 BUILT_APP="$PRODUCTS_DIR/$APP_NAME.app"
 STAGED_APP="$BUILD_DIR/$APP_NAME.app"
@@ -74,7 +73,6 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$BUILD_DIR" "$DERIVED_DATA_DIR" "$PRODUCTS_DIR" "$INSTALL_DIR"
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 if [[ "$SHOULD_BUMP_VERSION" == true ]]; then
   PROJECT_FILE_BACKUP="$BUILD_DIR/project.pbxproj.prebuild.$$"
@@ -96,6 +94,12 @@ if [[ ! -d "$BUILT_APP" ]]; then
   exit 1
 fi
 
+if app_is_running; then
+  echo "Build complete: $BUILT_APP" >&2
+  echo "HERMES is running; installation skipped to protect current downloads. Quit the app and rerun packaging." >&2
+  exit 1
+fi
+
 rm -rf "$STAGED_APP" "$TEMP_APP"
 ditto "$BUILT_APP" "$STAGED_APP"
 /usr/bin/find "$STAGED_APP" -name .DS_Store -delete
@@ -106,7 +110,7 @@ rm -rf "$FINAL_APP"
 mv "$TEMP_APP" "$FINAL_APP"
 
 if [[ "$SHOULD_OPEN" == true ]]; then
-  /usr/bin/open -n "$FINAL_APP"
+  /usr/bin/open "$FINAL_APP"
 fi
 
 printf '%s\n' "$FINAL_APP"

@@ -59,7 +59,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                   let gridItem = (collectionView as? GridCollectionView)?.gridController?.itemByID[itemID] else {
                 return item
             }
-            thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind)
+            thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion)
             thumbnailItem.setSelectedAppearance(
                 (collectionView as? GridCollectionView)?.gridController?.selectedIDs.contains(itemID) == true
             )
@@ -72,12 +72,18 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true) {
+        guard newItems != items else { return }
+        let previousItems = itemByID
+        let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
         itemByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         items = newItems
 
         var snapshot = NSDiffableDataSourceSnapshot<String, String>()
         snapshot.appendSections([Section.main])
         snapshot.appendItems(newItems.map(\.id), toSection: Section.main)
+        snapshot.reloadItems(newItems.compactMap { item in
+            existingIDs.contains(item.id) && previousItems[item.id] != item ? item.id : nil
+        })
 
         let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         dataSource.apply(snapshot, animatingDifferences: shouldAnimate)

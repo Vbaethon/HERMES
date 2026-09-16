@@ -18,6 +18,8 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Remove the obsolete manual login value without reading or transmitting it.
+        UserDefaults.standard.removeObject(forKey: "XHSWebSessionCookie.v1")
         NSApp.mainMenu = makeMainMenu()
         let controller = MainWindowController()
         mainWindowController = controller
@@ -35,6 +37,36 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, shouldRestoreApplicationState coder: NSCoder) -> Bool {
         false
+    }
+
+    @objc private func showAbout(_ sender: Any?) {
+        let bundle = Bundle.main
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacing = 8
+        let credits = NSMutableAttributedString(
+            string: "Live Photo 合成与媒体下载\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ]
+        )
+        credits.append(NSAttributedString(
+            string: "照片与视频配对 · Live Photo 合成\n抖音、小红书、得物媒体下载\n导入“照片”图库与相簿\n\n作者：九尾大人\n适用于 macOS 27 · Apple Silicon\n媒体文件保存在你选择的本地目录。",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraph
+            ]
+        ))
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "HERMES",
+            .applicationIcon: NSApp.applicationIconImage as Any,
+            .applicationVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—",
+            .version: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—",
+            .credits: credits
+        ])
     }
 
     @objc private func showSettings(_ sender: Any?) {
@@ -76,8 +108,25 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .chooseCurrentFolder, object: nil)
     }
 
-    @objc private func clearXHSCookie(_ sender: Any?) {
-        CookieManager.clearXHSCookie()
+    @objc private func toggleToolbarLabels(_ sender: NSMenuItem) {
+        guard let toolbar = mainWindowController?.window?.toolbar else { return }
+        toolbar.displayMode = toolbar.displayMode == .iconOnly ? .iconAndLabel : .iconOnly
+    }
+
+    @objc private func customizeToolbar(_ sender: NSMenuItem) {
+        mainWindowController?.window?.toolbar?.runCustomizationPalette(sender)
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleToolbarLabels(_:)) {
+            guard let toolbar = mainWindowController?.window?.toolbar else { return false }
+            menuItem.state = toolbar.displayMode == .iconOnly ? .off : .on
+            return true
+        }
+        if menuItem.action == #selector(customizeToolbar(_:)) {
+            return mainWindowController?.window?.toolbar != nil
+        }
+        return true
     }
 
     private func makeMainMenu() -> NSMenu {
@@ -87,7 +136,9 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
-        appMenu.addItem(NSMenuItem(title: "关于 HERMES", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        let aboutItem = NSMenuItem(title: "关于 HERMES", action: #selector(showAbout(_:)), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
         appMenu.addItem(.separator())
         let settingsItem = NSMenuItem(title: "设置...", action: #selector(showSettings(_:)), keyEquivalent: ",")
         settingsItem.target = self
@@ -115,7 +166,7 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         openFolderItem.keyEquivalentModifierMask = [.command, .shift]
         openFolderItem.target = self
         fileMenu.addItem(openFolderItem)
-        let chooseFolderItem = NSMenuItem(title: "选择当前文件夹...", action: #selector(chooseCurrentFolder(_:)), keyEquivalent: "")
+        let chooseFolderItem = NSMenuItem(title: "更改当前保存位置…", action: #selector(chooseCurrentFolder(_:)), keyEquivalent: "")
         chooseFolderItem.target = self
         fileMenu.addItem(chooseFolderItem)
 
@@ -150,14 +201,13 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate {
         let refreshItem = NSMenuItem(title: "刷新当前页面", action: #selector(refreshCurrentPage(_:)), keyEquivalent: "r")
         refreshItem.target = self
         viewMenu.addItem(refreshItem)
-
-        let toolsMenuItem = NSMenuItem()
-        mainMenu.addItem(toolsMenuItem)
-        let toolsMenu = NSMenu(title: "工具")
-        toolsMenuItem.submenu = toolsMenu
-        let clearCookieItem = NSMenuItem(title: "清除小红书 Cookie", action: #selector(clearXHSCookie(_:)), keyEquivalent: "")
-        clearCookieItem.target = self
-        toolsMenu.addItem(clearCookieItem)
+        viewMenu.addItem(.separator())
+        let labelsItem = NSMenuItem(title: "显示工具栏按钮名称", action: #selector(toggleToolbarLabels(_:)), keyEquivalent: "")
+        labelsItem.target = self
+        viewMenu.addItem(labelsItem)
+        let customizeItem = NSMenuItem(title: "自定义工具栏…", action: #selector(customizeToolbar(_:)), keyEquivalent: "")
+        customizeItem.target = self
+        viewMenu.addItem(customizeItem)
 
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)

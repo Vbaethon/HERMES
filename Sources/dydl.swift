@@ -13,7 +13,7 @@ enum DouyinNativeDownloader {
         }
         return min(max(ProcessInfo.processInfo.activeProcessorCount - 2, 2), 6)
     }()
-    private static let networkSession: URLSession = DownloaderHTTPCompatibility.makeDownloadSession()
+    private static let networkSession: URLSession = DownloaderHTTPCompatibility.makeDownloadSession(timeoutResource: 14_400)
     private static let douyinCacheRootPaths = [
         NSHomeDirectory() + "/Library/Application Support/抖音/Cache/Cache_Data",
         NSHomeDirectory() + "/Library/Containers/com.bytedance.douyin.desktop/Data/Library/Application Support/抖音/Cache/Cache_Data",
@@ -24,6 +24,7 @@ enum DouyinNativeDownloader {
     struct AwemeInfo {
         var awemeID = ""
         var desc = ""
+        var sourceVideoID: String?
         var author = "unknown"
         var authorID = ""
         var images: [MediaItem] = []
@@ -57,6 +58,7 @@ enum DouyinNativeDownloader {
         var streamMarkedHDR: Bool
         var width: Int
         var height: Int
+        var fallbackVideoURL: URL? = nil
     }
 
     struct VideoSelection {
@@ -70,6 +72,7 @@ enum DouyinNativeDownloader {
     private struct DownloadTask {
         var url: URL
         var destination: URL
+        var fallbackURL: URL? = nil
     }
 
     /// Seed info extracted from the Douyin share page HTML (_ROUTER_DATA / RENDER_DATA / __NEXT_DATA__).
@@ -432,7 +435,8 @@ enum DouyinNativeDownloader {
                         : info.awemeID
                     tasks.append(DownloadTask(
                         url: item.videoURL,
-                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames)
+                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames),
+                        fallbackURL: item.fallbackVideoURL
                     ))
                 }
 
@@ -732,6 +736,17 @@ enum DouyinNativeDownloader {
             publicInfo = info
         }
         if let progress { await progress(0.08) }
+        // Video source resolution does not require any desktop playback/cache.
+        if referer.path.lowercased().contains("/video/") {
+            if publicInfo == nil {
+                let mobileURL = URL(string: "https://api5-normal-c-lf.amemv.com/aweme/v1/feed/?aweme_id=\(awemeID)&version_code=170400&version_name=17.4.0&count=1")!
+                publicInfo = try? await parseMobileFeedResponse(from: mobileURL, targetAwemeID: awemeID)
+            }
+            if let info = publicInfo, let upgraded = await resolveSourceVideo(info) {
+                if let progress { await progress(1.0) }
+                return upgraded
+            }
+        }
         // Desktop cache is expensive, but it is the source that can expose Live
         // Photo videos and the multi-quality bit_rate list when public APIs are
         // empty or incomplete.
@@ -901,6 +916,27 @@ enum DouyinNativeDownloader {
         if debugEnabled { print("[DouyinDebug] fetchAweme: ALL sources failed, throwing error") }
 
         throw NSError(domain: "DouyinDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "未能从公开接口提取抖音媒体。"])
+    }
+
+    private static func resolveSourceVideo(_ info: AwemeInfo) async -> AwemeInfo? {
+        guard info.images.isEmpty, info.videos.count == 1, let videoID = info.sourceVideoID else { return nil }
+        do {
+            guard let source = try await DouyinSourceResolver.resolve(videoID: videoID, userAgent: userAgent) else { return nil }
+            let old = info.videos[0]
+            guard Int64(source.width) * Int64(source.height) > Int64(old.width) * Int64(old.height) else { return nil }
+            var upgraded = info
+            upgraded.videos[0].fallbackVideoURL = old.videoURL
+            upgraded.videos[0].videoURL = source.url
+            upgraded.videos[0].width = source.width
+            upgraded.videos[0].height = source.height
+            // The source probe verifies dimensions, not HDR transfer characteristics.
+            upgraded.videos[0].streamMarkedHDR = false
+            if debugEnabled { print("[DouyinDebug] verified source video: \(source.width)x\(source.height), no desktop cache required") }
+            return upgraded
+        } catch {
+            if debugEnabled { print("[DouyinDebug] source probe failed; preserving existing download fallbacks: \(error.localizedDescription)") }
+            return nil
+        }
     }
 
     private static func isMissingLivePhotoVideo(_ info: AwemeInfo?) -> Bool {
@@ -1368,9 +1404,12 @@ enum DouyinNativeDownloader {
         do {
             let (_, response) = try await networkSession.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return false }
-            return (200..<400).contains(httpResponse.statusCode)
+            guard (200..<400).contains(httpResponse.statusCode) else {
+                throw NSError(domain: "DouyinDownloader", code: httpResponse.statusCode)
+            }
+            return true
         } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error) else {
+            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else {
                 if debugEnabled { print("[DouyinDebug] direct media HEAD failed: \(error.localizedDescription)") }
                 return false
             }
@@ -1658,9 +1697,6 @@ enum DouyinNativeDownloader {
             try? FileManager.default.removeItem(at: outputURL)
         }
 
-        let process = Process()
-        process.executableURL = electronURL
-        process.arguments = [scriptURL.path, awemeID] + videoIDs + cacheFiles.map(\.path)
         var environment = ProcessInfo.processInfo.environment
         environment["ELECTRON_RUN_AS_NODE"] = "1"
         environment["HERMES_DOUYIN_CACHE_OUTPUT"] = outputURL.path
@@ -1668,21 +1704,20 @@ enum DouyinNativeDownloader {
             environment["HERMES_DOUYIN_CACHE_STOP"] = cancellationURL.path
             environment["HERMES_DOUYIN_CACHE_PRIORITY"] = String(priority)
         }
-        process.environment = environment
-        let output = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = output
-        process.standardError = errorPipe
         do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
+            let captured = try SubprocessRunner.run(
+                executable: electronURL,
+                arguments: [scriptURL.path, awemeID] + videoIDs + cacheFiles.map(\.path),
+                environment: environment,
+                timeout: 45
+            )
+            let data = captured.stdout
+            let errorData = captured.stderr
+            guard captured.status == 0 else {
                 let stderr = String(data: errorData, encoding: .utf8) ?? ""
                 let stderrPreview = stderr.prefix(1000)
                 if debugEnabled {
-                    print("[DouyinDebug] desktop cache script exit=\(process.terminationStatus) files=\(cacheFiles.count) stdout=\(data.count) stderr=\(stderrPreview)")
+                    print("[DouyinDebug] desktop cache script exit=\(captured.status) files=\(cacheFiles.count) stdout=\(data.count) stderr=\(stderrPreview)")
                 }
                 return nil
             }
@@ -1752,17 +1787,17 @@ enum DouyinNativeDownloader {
 	        });
 	        """
 
-	            let process = Process()
-	            process.executableURL = electronURL
-	            process.arguments = ["-e", script, awemeID]
-	            process.environment = ["ELECTRON_RUN_AS_NODE": "1"]
-	            let pipe = Pipe()
-	            process.standardOutput = pipe
-	            process.standardError = Pipe()
 	            do {
-	                try process.run()
-	                process.waitUntilExit()
-	                let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let captured = try await Task.detached(priority: .userInitiated) {
+                        try SubprocessRunner.run(
+                            executable: electronURL,
+                            arguments: ["-e", script, awemeID],
+                            environment: ["ELECTRON_RUN_AS_NODE": "1"],
+                            timeout: 20
+                        )
+                    }.value
+                    guard captured.status == 0 else { continue }
+                    let output = String(data: captured.stdout, encoding: .utf8) ?? ""
 	                if debugEnabled { print("[DouyinDebug] liveDesktopAweme[\(config.label)]: Electron output (\(output.count) chars): \(output.prefix(200))") }
 	                if output.hasPrefix("PARSE_ERROR") {
 	                    let bodyText = String(output.dropFirst("PARSE_ERROR:".count))
@@ -2122,6 +2157,7 @@ enum DouyinNativeDownloader {
         if images.isEmpty,
            let video = aweme["video"] as? [String: Any],
            let bestVideo = bestVideoURL(from: video) {
+            info.sourceVideoID = (video["play_addr"] as? [String: Any])?["uri"] as? String
             info.videos.append(VideoItem(
                 index: 1,
                 videoURL: bestVideo.url,
@@ -2767,16 +2803,9 @@ enum DouyinNativeDownloader {
         if DownloaderHTTPCompatibility.shouldUseDirectly(for: request) {
             return try await DownloaderHTTPCompatibility.dataAsync(for: request, readsBody: readsBody)
         }
-        do {
-            let (data, response) = try await networkSession.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, !(200..<400).contains(httpResponse.statusCode) {
-                throw NSError(domain: "DouyinDownloader", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode): \(url.absoluteString)"])
-            }
-            return (readsBody ? data : Data(), response.url)
-        } catch {
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error) else { throw error }
-            return try await DownloaderHTTPCompatibility.dataAsync(for: request, readsBody: readsBody)
-        }
+        return try await DownloaderHTTPCompatibility.requestData(
+            for: request, session: networkSession, readsBody: readsBody
+        )
     }
 
     private static func download(
@@ -2835,6 +2864,11 @@ enum DouyinNativeDownloader {
                     try? await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
                 }
             }
+        }
+        if let fallback = task.fallbackURL {
+            if debugEnabled { print("[DouyinDebug] source download failed; retrying the original rendition") }
+            try await download(DownloadTask(url: fallback, destination: task.destination), retries: 1, progress: progress)
+            return
         }
         throw lastError ?? NSError(domain: "DouyinDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])
     }

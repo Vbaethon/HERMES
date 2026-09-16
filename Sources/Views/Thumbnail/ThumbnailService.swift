@@ -17,7 +17,6 @@ enum ThumbnailCollectionStyle {
     static let imageCornerRadius: CGFloat = 6
     static let stateRingGap: CGFloat = 1
     static let stateRingLineWidth: CGFloat = 3
-    static let thumbnailMaxPixelSize = 512
 
     static func sectionInset(additionalBottomInset: CGFloat) -> NSEdgeInsets {
         var inset = sectionInset
@@ -28,6 +27,7 @@ enum ThumbnailCollectionStyle {
     @MainActor
     static func makeLayout(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset) -> NSCollectionViewFlowLayout {
         let layout = NSCollectionViewFlowLayout()
+        layout.scrollDirection = .vertical
         layout.itemSize = itemSize
         layout.minimumInteritemSpacing = itemSpacing
         layout.minimumLineSpacing = itemSpacing
@@ -53,6 +53,8 @@ enum ThumbnailCollectionStyle {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        documentView.frame = scrollView.contentView.bounds
+        documentView.autoresizingMask = [.width]
         scrollView.documentView = documentView
     }
 

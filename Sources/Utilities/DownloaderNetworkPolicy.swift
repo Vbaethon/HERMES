@@ -4,6 +4,7 @@ import Foundation
 enum DownloaderNetworkPolicy {
     static let protectedDomainSuffixes: [String] = [
         "xhslink.com",
+        "xhslink.cn",
         "xiaohongshu.com",
         "xhscdn.com",
         "douyin.com",
@@ -23,6 +24,11 @@ enum DownloaderNetworkPolicy {
             kCFNetworkProxiesProxyAutoConfigEnable as String: 0,
             kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 0
         ]
+    }
+
+    static func isXHSShortLinkHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "xhslink.com" || host == "xhslink.cn"
     }
 
     static func hostNeedsDNSOverride(_ host: String?) -> Bool {

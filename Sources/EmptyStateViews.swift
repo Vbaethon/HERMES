@@ -26,6 +26,7 @@ class EmptyStateView: NSView {
         messageField.textColor = .secondaryLabelColor
         messageField.alignment = .center
         messageField.lineBreakMode = .byTruncatingTail
+        messageField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         setupLayout()
     }
 
@@ -67,7 +68,7 @@ final class DropZoneView: EmptyStateView {
 
     init(model: ImporterModel) {
         self.model = model
-        super.init(title: "拖入文件或者手动添加", symbolName: AppSymbol.dropZone, message: "")
+        super.init(title: "拖入照片和视频，或点击“添加文件”", symbolName: AppSymbol.dropZone, message: "")
         registerForDraggedTypes([.fileURL])
     }
 
@@ -124,7 +125,7 @@ final class DropZoneView: EmptyStateView {
         guard let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty else {
             return false
         }
-        model?.addFiles(urls)
+        Task { [weak model] in await model?.addFiles(urls) }
         return true
     }
 

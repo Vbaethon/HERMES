@@ -166,7 +166,9 @@ enum DownloadShareTextInput {
         let textView = DownloadShareNSTextView()
         textView.delegate = coordinator
         textView.string = model.downloadShareText
-        textView.placeholder = "多个链接需要换行"
+        textView.placeholder = "粘贴分享文本或链接，多个链接请分行输入"
+        textView.setAccessibilityLabel("下载链接")
+        textView.setAccessibilityHelp("粘贴分享文本或链接，多个链接请分行输入。")
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = false
@@ -276,10 +278,24 @@ enum DownloadShareTextInput {
 
 }
 
+// MARK: - Native glass configuration
+
+@MainActor
+private enum NativeGlassSurface {
+    static func make(tintAlpha: CGFloat, cornerRadius: CGFloat = 0) -> NSGlassEffectView {
+        let view = NSGlassEffectView(frame: .zero)
+        view.style = .regular
+        view.tintColor = NSColor.controlBackgroundColor.withAlphaComponent(tintAlpha)
+        view.cornerRadius = cornerRadius
+        view.effectIsInteractive = true
+        return view
+    }
+}
+
 // MARK: - Circular Glass Icon Button
 
 final class CircularGlassIconButton: NSView {
-    private let glassSurface: NSView
+    private let glassSurface: NSGlassEffectView
     private let button = NSButton()
 
     weak var target: AnyObject? {
@@ -310,7 +326,7 @@ final class CircularGlassIconButton: NSView {
 
     @MainActor
     init(symbolName: String, accessibilityDescription: String) {
-        self.glassSurface = Self.makeGlassSurface()
+        self.glassSurface = NativeGlassSurface.make(tintAlpha: 0.08)
         super.init(frame: .zero)
         setup(symbolName: symbolName, accessibilityDescription: accessibilityDescription)
     }
@@ -359,32 +375,10 @@ final class CircularGlassIconButton: NSView {
         ])
     }
 
-    private static func makeGlassSurface() -> NSView {
-        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
-            let view = glassClass.init(frame: .zero)
-            view.setValue(0, forKey: "style")
-            view.setValue(NSColor.controlBackgroundColor.withAlphaComponent(0.08), forKey: "tintColor")
-            if view.responds(to: Selector(("setEffectIsInteractive:"))) {
-                view.setValue(true, forKey: "effectIsInteractive")
-            }
-            return view
-        }
-
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .hudWindow
-        visualEffectView.blendingMode = .withinWindow
-        visualEffectView.state = .active
-        visualEffectView.wantsLayer = true
-        visualEffectView.layer?.masksToBounds = true
-        return visualEffectView
-    }
-
     private func updateCircularGlassRadius() {
         let radius = min(bounds.width, bounds.height) / 2
         guard radius.isFinite, radius > 0 else { return }
-        if glassSurface.responds(to: Selector(("setCornerRadius:"))) {
-            glassSurface.setValue(radius, forKey: "cornerRadius")
-        }
+        glassSurface.cornerRadius = radius
         glassSurface.layer?.cornerRadius = radius
         glassSurface.layer?.masksToBounds = true
     }
@@ -396,7 +390,7 @@ final class CircularGlassIconButton: NSView {
 final class DownloadBarView: NSView {
     private let model: ImporterModel
     private let startDownload: () -> Void
-    private let glassSurface: NSView
+    private let glassSurface: NSGlassEffectView
     private let contentHost = NSView()
     private var textContainer: DownloadShareTextContainerView?
     private var textCoordinator: DownloadShareTextInput.Coordinator?
@@ -408,7 +402,7 @@ final class DownloadBarView: NSView {
     init(model: ImporterModel, startDownload: @escaping () -> Void) {
         self.model = model
         self.startDownload = startDownload
-        self.glassSurface = Self.makeGlassSurface()
+        self.glassSurface = NativeGlassSurface.make(tintAlpha: 0.10, cornerRadius: 18)
         super.init(frame: .zero)
         setupGlassSurface()
         setupViews()
@@ -419,42 +413,11 @@ final class DownloadBarView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private static func makeGlassSurface() -> NSView {
-        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
-            let view = glassClass.init(frame: .zero)
-            view.setValue(18, forKey: "cornerRadius")
-            view.setValue(NSColor.controlBackgroundColor.withAlphaComponent(0.10), forKey: "tintColor")
-            view.setValue(0, forKey: "style")
-            if view.responds(to: Selector(("setEffectIsInteractive:"))) {
-                view.setValue(true, forKey: "effectIsInteractive")
-            }
-            return view
-        }
-
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .hudWindow
-        visualEffectView.blendingMode = .withinWindow
-        visualEffectView.state = .active
-        visualEffectView.wantsLayer = true
-        visualEffectView.layer?.cornerRadius = 18
-        return visualEffectView
-    }
-
     private func setupGlassSurface() {
         glassSurface.translatesAutoresizingMaskIntoConstraints = false
         contentHost.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glassSurface)
-        if glassSurface.responds(to: Selector(("setContentView:"))) {
-            glassSurface.setValue(contentHost, forKey: "contentView")
-        } else {
-            glassSurface.addSubview(contentHost)
-            NSLayoutConstraint.activate([
-                contentHost.leadingAnchor.constraint(equalTo: glassSurface.leadingAnchor),
-                contentHost.trailingAnchor.constraint(equalTo: glassSurface.trailingAnchor),
-                contentHost.topAnchor.constraint(equalTo: glassSurface.topAnchor),
-                contentHost.bottomAnchor.constraint(equalTo: glassSurface.bottomAnchor)
-            ])
-        }
+        glassSurface.contentView = contentHost
         NSLayoutConstraint.activate([
             glassSurface.leadingAnchor.constraint(equalTo: leadingAnchor),
             glassSurface.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -578,6 +541,12 @@ final class DownloadTaskProgressBarView: NSView {
 
     func update(with item: DownloadProgressItem, stackIndex: Int, defersPrimaryText: Bool = false) {
         self.stackIndex = stackIndex
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("\(item.title)，\(item.detail)")
+        setAccessibilityValue(Double(min(max(item.progress, 0), 1)) * 100)
+        setAccessibilityMinValue(0)
+        setAccessibilityMaxValue(100)
         isRemovingFromStack = false
         let isPrimary = stackIndex == 0
         let isSameItem = representedID == item.id
@@ -594,7 +563,7 @@ final class DownloadTaskProgressBarView: NSView {
 
         // Animate all visual properties together with frame animation
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.25
+            ctx.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.25
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             ctx.allowsImplicitAnimation = true
             if !self.isAnimating || !self.primaryTextVisible {
@@ -621,6 +590,7 @@ final class DownloadTaskProgressBarView: NSView {
     }
 
     func revealPrimaryText(animated: Bool) {
+        let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         guard stackIndex == 0, !isRemovingFromStack else { return }
         primaryTextDeferred = false
         primaryTextVisible = true
@@ -643,6 +613,7 @@ final class DownloadTaskProgressBarView: NSView {
     // MARK: - Text animation
 
     private func setText(_ text: String, animated: Bool) {
+        let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if isAnimating, animated {
             queuedText = text
             return
@@ -717,6 +688,7 @@ final class DownloadTaskProgressBarView: NSView {
     // MARK: - Setup
 
     private func setup() {
+        textLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         wantsLayer = true
         layer?.masksToBounds = false
         glassSurface.translatesAutoresizingMaskIntoConstraints = false
@@ -806,16 +778,9 @@ final class DownloadTaskProgressBarView: NSView {
     }
 
     private static func makeGlassSurface() -> NSView {
-        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
-            let view = glassClass.init(frame: .zero)
-            view.setValue(14, forKey: "cornerRadius")
-            view.setValue(NSColor.controlBackgroundColor.withAlphaComponent(0.045), forKey: "tintColor")
-            view.setValue(0, forKey: "style")
-            return view
-        }
-
+        // Progress is status content, so reserve Liquid Glass for interactive controls.
         let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .hudWindow
+        visualEffectView.material = .contentBackground
         visualEffectView.blendingMode = .withinWindow
         visualEffectView.state = .active
         visualEffectView.wantsLayer = true
@@ -836,6 +801,7 @@ final class DownloadTaskProgressBarView: NSView {
     }
 
     private func animateProgress(to progress: CGFloat, animated: Bool) {
+        let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let clampedProgress = min(max(progress, 0), 1)
         currentProgress = clampedProgress
         let width = max(bounds.width * clampedProgress, clampedProgress > 0 ? 10 : 0)
@@ -869,6 +835,7 @@ final class DownloadProgressStackView: NSView {
     private let slotAlphas: [CGFloat] = [1.0, 0.66, 0.42]
 
     func update(with items: [DownloadProgressItem], animated: Bool = true) {
+        let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let visibleItems = Array(items.prefix(maximumVisibleBars))
         let visibleIDs = Set(visibleItems.map(\.id))
         var insertedIDs = Set<UUID>()

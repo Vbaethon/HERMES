@@ -142,6 +142,7 @@ final class MainWindowController: NSWindowController {
             }
         )
         toolbarController.reloadToolbarIfNeeded()
+        detailController.reload()
     }
 
     private func updateWindowSizeLimits() {
@@ -305,7 +306,7 @@ final class MainWindowController: NSWindowController {
 
     private func presentImportPanel() {
         guard let urls = NativePanelPresenter.chooseImportURLs() else { return }
-        model.addFiles(urls)
+        Task { await model.addFiles(urls) }
     }
 
     private func startDownload() {
@@ -349,18 +350,18 @@ final class MainWindowController: NSWindowController {
     }
 
     private var completedClearAlertTitle: String {
-        completedClearTargetsSelection ? "确定要删除选中的照片吗？" : "确定要清空吗？"
+        completedClearTargetsSelection ? "移除选中的记录？" : "清空当前筛选中的记录？"
     }
 
     private var completedClearPrimaryButtonTitle: String {
-        completedClearTargetsSelection ? "删除" : "清空"
+        completedClearTargetsSelection ? "仅移除记录" : "仅清空记录"
     }
 
     private var completedClearAlertMessage: String {
         if completedClearTargetsSelection {
-            return "删除会移除选中照片的完成记录；同时删除源文件会一并将本地导出的照片和视频文件移到废纸篓。"
+            return "“仅移除记录”会保留本地文件；“同时移到废纸篓”还会移走所选项目对应的本地导出照片和视频。"
         }
-        return "清空会移除当前筛选中的全部完成记录；同时删除源文件会一并将本地导出的照片和视频文件移到废纸篓。"
+        return "“仅清空记录”会移除当前筛选中的全部记录并保留本地文件；“同时移到废纸篓”还会移走这些记录对应的本地导出照片和视频。"
     }
 
     private func presentCompletedClearConfirmation() {
@@ -385,11 +386,11 @@ final class MainWindowController: NSWindowController {
     private func presentDownloadClearConfirmation() {
         NativePanelPresenter.presentDestructiveConfirmation(
             in: window,
-            title: downloadClearTargetsSelection ? "确定要删除选中的照片吗？" : "确定要清空吗？",
+            title: downloadClearTargetsSelection ? "移除选中的记录？" : "清空当前筛选中的记录？",
             message: downloadClearTargetsSelection
-                ? "删除会移除选中照片的记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。"
-                : "清空会移除当前筛选中的全部记录；同时删除源文件会一并将本地下载和合成的照片、视频文件移到废纸篓。",
-            primaryButtonTitle: downloadClearTargetsSelection ? "删除" : "清空"
+                ? "“仅移除记录”会保留本地文件；“同时移到废纸篓”还会移走所选项目对应的本地下载及合成文件。"
+                : "“仅清空记录”会移除当前筛选中的全部记录并保留本地文件；“同时移到废纸篓”还会移走这些记录对应的本地下载及合成文件。",
+            primaryButtonTitle: downloadClearTargetsSelection ? "仅移除记录" : "仅清空记录"
         ) { [weak self] choice in
             guard let self else { return }
             switch choice {

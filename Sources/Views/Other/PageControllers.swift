@@ -13,6 +13,8 @@ final class DetailPagesController: NSViewController {
     private let downloadController: DownloadPageController
     private let completedController: CompletedPageController
     private var activeSelection: SidebarSection?
+    private let noticeButton = NSButton(title: "查看操作详情", target: nil, action: nil)
+    private var noticeHeight: NSLayoutConstraint!
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel, startDownload: @escaping () -> Void) {
@@ -34,9 +36,30 @@ final class DetailPagesController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        noticeButton.target = self
+        noticeButton.action = #selector(showOperationNotice)
+        noticeButton.bezelStyle = .inline
+        noticeButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        noticeButton.cell?.lineBreakMode = .byTruncatingTail
+        noticeButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(noticeButton)
+        noticeHeight = noticeButton.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            noticeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            noticeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            noticeButton.topAnchor.constraint(equalTo: view.topAnchor), noticeHeight
+        ])
         for controller in [queueController, downloadController, completedController] {
             addChild(controller)
-            view.addPinnedSubview(controller.view)
+            let page = controller.view
+            page.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(page)
+            NSLayoutConstraint.activate([
+                page.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                page.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                page.topAnchor.constraint(equalTo: noticeButton.bottomAnchor),
+                page.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            ])
         }
         for controller in thumbnailPageControllers {
             controller.setVisible(false)
@@ -51,6 +74,11 @@ final class DetailPagesController: NSViewController {
 
     func reload() {
         let selection = model.selection ?? .queue
+        let notice = model.operationNotices[selection]
+        noticeButton.isHidden = notice == nil
+        noticeHeight?.constant = notice == nil ? 0 : 32
+        noticeButton.title = notice.map { String(($0.components(separatedBy: "\n").first ?? "操作提示").prefix(48)) + " · 查看详情" } ?? "查看操作详情"
+        noticeButton.setAccessibilityLabel(noticeButton.title)
         let selectionChanged = activeSelection != selection
         if selectionChanged {
             controller(for: activeSelection)?.setVisible(false)
@@ -66,6 +94,30 @@ final class DetailPagesController: NSViewController {
         }
         if selectionChanged {
             controller(for: selection)?.setVisible(true)
+        }
+    }
+
+    @objc private func showOperationNotice() {
+        let page = model.selection ?? .queue
+        guard let message = model.operationNotices[page], let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "操作详情"
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 220))
+        let text = NSTextView(frame: scroll.bounds)
+        text.isEditable = false
+        text.isSelectable = true
+        text.string = message
+        text.font = .systemFont(ofSize: NSFont.systemFontSize)
+        text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "保留提示")
+        alert.addButton(withTitle: "关闭提示")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertSecondButtonReturn { self?.model.dismissOperationNotice(for: page) }
         }
     }
 

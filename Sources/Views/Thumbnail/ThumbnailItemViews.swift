@@ -3,6 +3,7 @@ import AppKit
 final class ThumbnailCollectionItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("ThumbnailCollectionItem")
     private var representedURL: URL?
+    private var representedContentVersion: TimeInterval?
     private var thumbnailStatus: PairItem.Status = .finished
     private var mediaKind: ThumbnailMediaKind = .photo
     private var thumbnailTask: Task<Void, Never>?
@@ -51,6 +52,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeLabel.isHidden = true
         rootView.addSubview(badgeLabel)
         rootView.badgeLabel = badgeLabel
+        let failureLabel = NSTextField(labelWithString: "失败")
+        failureLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        failureLabel.textColor = .labelColor
+        failureLabel.backgroundColor = .windowBackgroundColor
+        failureLabel.drawsBackground = true
+        failureLabel.isHidden = true
+        rootView.addSubview(failureLabel)
+        rootView.failureLabel = failureLabel
         rootView.onEffectiveAppearanceChanged = { [weak self] in
             self?.updateBorderAppearance(isSelected: self?.isSelected ?? false)
         }
@@ -64,6 +73,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailTask = nil
         badgeTask = nil
         representedURL = nil
+        representedContentVersion = nil
+        view.setAccessibilityLabel(nil)
+        view.setAccessibilityValue(nil)
+        thumbnailView?.failureLabel?.isHidden = true
         imageView?.image = nil
         imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
@@ -80,8 +93,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: selected)
     }
 
-    func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo) {
-        if representedURL == url {
+    func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0) {
+        if representedURL == url, representedContentVersion == contentVersion {
             thumbnailStatus = status
             self.mediaKind = mediaKind
             loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
@@ -99,6 +112,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask = nil
         thumbnailView?.setBadge(nil)
         representedURL = url
+        representedContentVersion = contentVersion
+        thumbnailDurationCache.cache.removeObject(forKey: url.standardizedFileURL as NSURL)
         thumbnailStatus = status
         self.mediaKind = mediaKind
         imageView?.alphaValue = 0
@@ -113,12 +128,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     private func startThumbnailLoad(for url: URL) {
         thumbnailTask?.cancel()
+        let displayScale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         thumbnailTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
             let image = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,
-                maxPixelSize: ThumbnailCollectionStyle.thumbnailMaxPixelSize
+                pointSize: ThumbnailCollectionStyle.cellSide,
+                scale: displayScale
             )
             guard !Task.isCancelled else { return }
             await MainActor.run {
@@ -172,6 +189,25 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     }
 
     private func updateBorderAppearance(isSelected: Bool) {
+        let kind: String
+        switch mediaKind {
+        case .photo: kind = "照片"
+        case .livePhoto: kind = "Live Photo"
+        case .video: kind = "视频"
+        }
+        let status: String
+        switch thumbnailStatus {
+        case .waiting: status = "待合成"
+        case .running: status = "正在合成"
+        case .finished: status = mediaKind == .livePhoto ? "已合成" : "媒体文件"
+        case .failed: status = "合成失败"
+        }
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.group)
+        view.setAccessibilityLabel(representedURL.map { "\($0.lastPathComponent)，\(kind)" })
+        view.setAccessibilityValue("\(status)，\(isSelected ? "已选择" : "未选择")")
+        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed
+        thumbnailView?.needsLayout = true
         if isSelected {
             thumbnailView?.setRingState(.selected)
         } else if thumbnailStatus == .failed {
@@ -280,6 +316,7 @@ final class ThumbnailBadgeLabel: NSTextField {
 final class ThumbnailItemView: NSView {
     weak var imageView: NSImageView?
     weak var badgeLabel: NSTextField?
+    weak var failureLabel: NSTextField?
     weak var ringView: ThumbnailStateRingView?
     private var interactiveFrame: NSRect = .zero
     var onEffectiveAppearanceChanged: (() -> Void)?
@@ -340,6 +377,11 @@ final class ThumbnailItemView: NSView {
 
     private func updateBadgeFrames() {
         let baseFrame = interactiveFrame.isEmpty ? bounds.insetBy(dx: 8, dy: 8) : interactiveFrame
+        if let failureLabel, !failureLabel.isHidden {
+            let size = failureLabel.fittingSize
+            failureLabel.frame = NSRect(x: baseFrame.minX + 4, y: baseFrame.maxY - size.height - 4,
+                                       width: size.width + 8, height: size.height)
+        }
         if let badgeLabel, !badgeLabel.isHidden {
             let labelSize = ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
             let origin = NSPoint(

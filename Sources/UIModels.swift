@@ -45,11 +45,11 @@ enum AppSymbol {
 
 enum ThumbnailContextMenuItem {
     static func composeTitle(count: Int) -> String { "合成 Live Photo" }
-    static func openLocationTitle(count: Int) -> String { "打开 \(count) 个所在位置" }
-    static func importTitle(count: Int) -> String { "导入 \(count) 张照片" }
-    static func importToAlbumTitle(count: Int) -> String { "添加 \(count) 张照片到相簿" }
-    static func removeTitle(count: Int) -> String { "移除 \(count) 张照片" }
-    static func deleteSourceTitle(count: Int) -> String { "删除 \(count) 张照片" }
+    static func openLocationTitle(count: Int) -> String { "在访达中显示 \(count) 个项目" }
+    static func importTitle(count: Int) -> String { "将 \(count) 个项目导入“照片”" }
+    static func importToAlbumTitle(count: Int) -> String { "将 \(count) 个项目导入 HERMES 相簿" }
+    static func removeTitle(count: Int) -> String { "从列表移除 \(count) 个项目" }
+    static func deleteSourceTitle(count: Int) -> String { "将 \(count) 个项目的文件移到废纸篓" }
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
@@ -101,6 +101,22 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var moviePath: String?
     var importedToPhotos = false
     var modifiedTime: TimeInterval = 0
+    var revision: MediaPairRevision?
+    var sourceImagePath: String?
+    var sourceVideoPath: String?
+    var sourceRevision: MediaPairRevision?
+
+    var outputIsCurrent: Bool {
+        guard let movieURL, let revision else { return false }
+        return revision == MediaPairRevision(image: imageURL, movie: movieURL)
+    }
+
+    func represents(_ pair: PairItem) -> Bool {
+        guard sourceImagePath == pair.imageURL.standardizedFileURL.path,
+              sourceVideoPath == pair.videoURL.standardizedFileURL.path,
+              let sourceRevision, outputIsCurrent else { return false }
+        return sourceRevision == MediaPairRevision(image: pair.imageURL, movie: pair.videoURL)
+    }
 
     var id: String { imagePath }
     var imageURL: URL { URL(fileURLWithPath: imagePath) }
@@ -139,7 +155,7 @@ enum CompletedFilter: String, CaseIterable, Identifiable {
         switch self {
         case .notAdded: "未导入"
         case .added: "已导入"
-        case .all: "所有照片"
+        case .all: "全部项目"
         }
     }
 }
@@ -155,7 +171,7 @@ enum DownloadFilter: String, CaseIterable, Identifiable {
         switch self {
         case .notComposed: "未合成"
         case .composed: "已合成"
-        case .all: "所有照片"
+        case .all: "全部项目"
         }
     }
 }
@@ -202,4 +218,34 @@ enum PhotoImportResult {
 enum PreparedPhotoImportPairsResult {
     case success(pairs: [(URL, URL)], folder: URL)
     case failure(String)
+}
+
+
+/// A path is not a content version. Include both resources and their filesystem revisions.
+struct MediaFileRevision: Codable, Hashable, Sendable {
+    let size: UInt64
+    let modified: TimeInterval
+    let created: TimeInterval
+    let fileNumber: UInt64
+
+    init?(_ url: URL) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        self.size = size.uint64Value
+        self.modified = modified.timeIntervalSince1970
+        self.created = (attributes[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        self.fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+    }
+}
+
+struct MediaPairRevision: Codable, Hashable, Sendable {
+    let image: MediaFileRevision
+    let movie: MediaFileRevision
+    init?(image: URL, movie: URL) {
+        guard let still = MediaFileRevision(image), let video = MediaFileRevision(movie) else { return nil }
+        self.image = still
+        self.movie = video
+    }
 }

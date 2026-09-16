@@ -60,8 +60,10 @@ enum LivePhotoToolRunner {
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try process.run()
+            // Drain while the child is running; waiting first can fill the pipe and deadlock.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let output = (String(data: data, encoding: .utf8) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard process.terminationStatus == 0 else {
                 return .failure(output)

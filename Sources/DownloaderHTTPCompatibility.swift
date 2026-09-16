@@ -154,6 +154,28 @@ enum DownloaderHTTPCompatibility {
 	            ].contains(nsError.code)
     }
 
+    /// Keep HTTP status validation and fallback routing together at every page request entry.
+    static func requestData(
+        for request: URLRequest,
+        session: URLSession,
+        readsBody: Bool = true,
+        fallback: @Sendable (URLRequest, Bool) async throws -> (Data, URL?) = { request, readsBody in
+            try await dataAsync(for: request, readsBody: readsBody)
+        }
+    ) async throws -> (Data, URL?) {
+        do {
+            let (data, response) = try await session.data(for: request)
+            if let response = response as? HTTPURLResponse, !(200..<400).contains(response.statusCode) {
+                throw NSError(domain: "DownloaderHTTPStatus", code: response.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(response.statusCode): \(request.url?.absoluteString ?? "")"])
+            }
+            return (readsBody ? data : Data(), response.url)
+        } catch {
+            guard shouldFallback(after: error, for: request) else { throw error }
+            return try await fallback(request, readsBody)
+        }
+    }
+
     // MARK: - Async API
 
     static func dataAsync(for request: URLRequest, readsBody: Bool = true) async throws -> (Data, URL?) {
@@ -184,18 +206,19 @@ enum DownloaderHTTPCompatibility {
             throw URLError(.badURL)
         }
 
-        var arguments = [
+        // Metadata stays short-lived; full high-bitrate videos can be several GB.
+        let transferLimit = reportsEffectiveURL ? 60 : 14_400
+        var arguments = DownloaderNetworkPolicy.directCurlArguments + [
             "--silent",
             "--show-error",
             "--location",
             "--fail-with-body",
             "--connect-timeout", "5",
-            "--max-time", "60",
+            "--max-time", String(transferLimit),
             "--retry", "2",
             "--retry-all-errors",
             "--output", outputURL.path
         ]
-        arguments.append(contentsOf: DownloaderNetworkPolicy.directCurlArguments)
 
         // --resolve to bypass DNS poisoning for XHS domains
         if let host = url.host, DownloaderNetworkPolicy.hostNeedsDNSOverride(host) {
@@ -216,44 +239,26 @@ enum DownloaderHTTPCompatibility {
         }
         arguments.append(url.absoluteString)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        process.arguments = arguments
-
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-
-        try process.run()
-
-        return try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { _ in
-                let output = String(
-                    data: standardOutput.fileHandleForReading.readDataToEndOfFile(),
-                    encoding: .utf8
-                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let errorOutput = String(
-                    data: standardError.fileHandleForReading.readDataToEndOfFile(),
-                    encoding: .utf8
-                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-                guard process.terminationStatus == 0 else {
-                    continuation.resume(throwing: NSError(
-                        domain: "DownloaderHTTPCompatibility",
-                        code: Int(process.terminationStatus),
-                        userInfo: [
-                            NSLocalizedDescriptionKey: errorOutput.isEmpty
-                                ? "兼容网络请求失败：\(url.absoluteString)"
-                                : errorOutput
-                        ]
-                    ))
-                    return
-                }
-
-                continuation.resume(returning: reportsEffectiveURL ? URL(string: output) : nil)
-            }
+        let curlArguments = arguments
+        let captured = try await Task.detached(priority: .utility) {
+            try SubprocessRunner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/curl"),
+                arguments: curlArguments,
+                timeout: TimeInterval(transferLimit * 3 + 20)
+            )
+        }.value
+        let output = String(data: captured.stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let errorOutput = String(data: captured.stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard captured.status == 0 else {
+            throw NSError(
+                domain: "DownloaderHTTPCompatibility",
+                code: Int(captured.status),
+                userInfo: [NSLocalizedDescriptionKey: errorOutput.isEmpty
+                    ? "兼容网络请求失败：\(url.absoluteString)" : errorOutput]
+            )
         }
+        return reportsEffectiveURL ? URL(string: output) : nil
     }
-
 }

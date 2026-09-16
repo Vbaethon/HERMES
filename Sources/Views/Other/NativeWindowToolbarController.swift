@@ -28,7 +28,6 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
 
     private weak var toolbar: NSToolbar?
     private var installedWindow: NSWindow?
-    private var lastIdentifiers: [NSToolbarItem.Identifier] = []
     private var lastToolbarState: ToolbarState?
 
     private struct ToolbarState: Equatable {
@@ -65,60 +64,55 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         super.init()
     }
 
+    private var pageToolbarIdentifier: NSToolbar.Identifier {
+        let page: String
+        switch model.selection ?? .queue {
+        case .queue: page = "Queue"
+        case .downloads: page = "Downloads"
+        case .completed: page = "Completed"
+        }
+        return NSToolbar.Identifier("\(ID.toolbar).\(page)")
+    }
+
     func installToolbar(in window: NSWindow?) {
-            guard let window else { return }
-            installedWindow = window
-            configureWindowChrome(window)
-
-            if let existingToolbar = window.toolbar {
-                if toolbar !== existingToolbar {
-                    lastIdentifiers = []
-                    lastToolbarState = nil
-                }
-                existingToolbar.delegate = self
-                existingToolbar.displayMode = .iconOnly
-                existingToolbar.allowsUserCustomization = false
-                existingToolbar.autosavesConfiguration = false
-                existingToolbar.centeredItemIdentifier = ID.filter
-                toolbar = existingToolbar
-            } else {
-                let toolbar = NSToolbar(identifier: ID.toolbar)
-                toolbar.delegate = self
-                toolbar.displayMode = .iconOnly
-                toolbar.allowsUserCustomization = false
-                toolbar.autosavesConfiguration = false
-                toolbar.centeredItemIdentifier = ID.filter
-                window.toolbar = toolbar
-                self.toolbar = toolbar
-                lastIdentifiers = []
-                lastToolbarState = nil
-            }
+        guard let window else { return }
+        installedWindow = window
+        configureWindowChrome(window)
+        if let existing = window.toolbar, existing.identifier == pageToolbarIdentifier {
+            toolbar = existing
+            existing.delegate = self
+        } else {
+            let next = NSToolbar(identifier: pageToolbarIdentifier)
+            next.delegate = self
+            next.displayMode = .iconOnly
+            next.allowsUserCustomization = true
+            next.autosavesConfiguration = true
+            next.centeredItemIdentifier = defaultIdentifiers.contains(ID.filter) ? ID.filter : nil
+            window.toolbar = next
+            toolbar = next
         }
+        lastToolbarState = nil
+        if let toolbar { reloadVisibleItemState(in: toolbar) }
+    }
 
-        private func configureWindowChrome(_ window: NSWindow) {
-            window.isRestorable = false
-            SystemWindowBackgroundController.configureMainWindow(window)
-        }
+    private func configureWindowChrome(_ window: NSWindow) {
+        window.isRestorable = false
+        SystemWindowBackgroundController.configureMainWindow(window)
+    }
 
-        func reloadToolbarIfNeeded() {
-            guard let toolbar else { return }
-            let identifiers = defaultIdentifiers
-            toolbar.centeredItemIdentifier = identifiers.contains(ID.filter) ? ID.filter : nil
-            if identifiers == lastIdentifiers {
-                reloadVisibleItemState(in: toolbar)
-                return
-            }
-            for _ in toolbar.items {
-                toolbar.removeItem(at: 0)
-            }
-            for (index, identifier) in identifiers.enumerated() {
-                toolbar.insertItem(withItemIdentifier: identifier, at: index)
-            }
-            lastIdentifiers = identifiers
-            lastToolbarState = currentToolbarState
+    func reloadToolbarIfNeeded() {
+        guard let window = installedWindow else { return }
+        guard let toolbar, toolbar.identifier == pageToolbarIdentifier else {
+            installToolbar(in: window)
+            return
         }
+        reloadVisibleItemState(in: toolbar)
+    }
 
         private func reloadVisibleItemState(in toolbar: NSToolbar) {
+            for item in toolbar.items where item.itemIdentifier == ID.compose {
+                item.toolTip = composeHelp
+            }
             let state = currentToolbarState
             guard let previousState = lastToolbarState else {
                 updateAllVisibleItemState(in: toolbar, state: state)
@@ -130,11 +124,11 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
                 switch item.itemIdentifier {
                 case ID.importToPhotos:
                     if state.importToPhotos != previousState.importToPhotos {
-                        updateToggleItem(item, symbol: AppSymbol.importToPhotos, label: "导入照片", state: state.importToPhotos, isEnabled: true)
+                        updateToggleItem(item, symbol: AppSymbol.importToPhotos, label: "合成后自动导入“照片”", state: state.importToPhotos, isEnabled: true)
                     }
                 case ID.addToAlbum:
                     if state.addToAlbum != previousState.addToAlbum || state.addToAlbumEnabled != previousState.addToAlbumEnabled {
-                        updateToggleItem(item, symbol: AppSymbol.addToAlbum, label: "添加到相簿", state: state.addToAlbum, isEnabled: state.addToAlbumEnabled)
+                        updateToggleItem(item, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", state: state.addToAlbum, isEnabled: state.addToAlbumEnabled)
                     }
                 case ID.clear:
                     if state.clearEnabled != previousState.clearEnabled {
@@ -151,7 +145,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
                 case ID.importCompleted:
                     if state.importCompletedEnabled != previousState.importCompletedEnabled {
                         item.isEnabled = state.importCompletedEnabled
-                        item.image = buttonSymbolImage(AppSymbol.importCompleted, isEnabled: state.importCompletedEnabled, label: "导入")
+                        item.image = buttonSymbolImage(AppSymbol.importCompleted, isEnabled: state.importCompletedEnabled, label: "导入“照片”")
                     }
                 case ID.compose:
                     if state.composeEnabled != previousState.composeEnabled {
@@ -173,9 +167,9 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             for item in toolbar.items {
                 switch item.itemIdentifier {
                 case ID.importToPhotos:
-                    updateToggleItem(item, symbol: AppSymbol.importToPhotos, label: "导入照片", state: state.importToPhotos, isEnabled: true)
+                    updateToggleItem(item, symbol: AppSymbol.importToPhotos, label: "合成后自动导入“照片”", state: state.importToPhotos, isEnabled: true)
                 case ID.addToAlbum:
-                    updateToggleItem(item, symbol: AppSymbol.addToAlbum, label: "添加到相簿", state: state.addToAlbum, isEnabled: state.addToAlbumEnabled)
+                    updateToggleItem(item, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", state: state.addToAlbum, isEnabled: state.addToAlbumEnabled)
                 case ID.clear:
                     item.isEnabled = state.clearEnabled
                     item.image = buttonSymbolImage(AppSymbol.clear, isEnabled: state.clearEnabled, label: state.clearLabel)
@@ -184,7 +178,7 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
                     item.toolTip = state.clearHelp
                 case ID.importCompleted:
                     item.isEnabled = state.importCompletedEnabled
-                    item.image = buttonSymbolImage(AppSymbol.importCompleted, isEnabled: state.importCompletedEnabled, label: "导入")
+                    item.image = buttonSymbolImage(AppSymbol.importCompleted, isEnabled: state.importCompletedEnabled, label: "导入“照片”")
                 case ID.compose:
                     item.isEnabled = state.composeEnabled
                     item.image = buttonSymbolImage(AppSymbol.composeLivePhoto, isEnabled: state.composeEnabled, label: "合成 Live Photo")
@@ -226,14 +220,18 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         private func updateToggleItem(_ item: NSToolbarItem, symbol: AppSymbol.Stateful, label: String, state: Bool, isEnabled: Bool) {
             item.isEnabled = isEnabled
             item.image = symbolImage(symbol, isActive: state, isEnabled: isEnabled, label: label)
+            item.toolTip = "\(label)：\(state ? "已开启" : "已关闭")"
+            if let button = item.view as? NSButton {
+                button.image = item.image
+                button.state = state ? .on : .off
+                button.isEnabled = isEnabled
+                button.toolTip = item.toolTip
+                button.setAccessibilityLabel(label)
+            }
         }
 
         func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-            FinderStyleSidebarController.toolbarAllowedItemIdentifiers + [
-                ID.filter, ID.refresh, ID.openFolder, ID.chooseFolder,
-                ID.importToPhotos, ID.addToAlbum, ID.clear, ID.addFiles,
-                ID.importCompleted, ID.compose, .space, .flexibleSpace
-            ]
+            Array(Set(defaultIdentifiers + [.space, .flexibleSpace]))
         }
 
         func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -249,19 +247,19 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             case ID.openFolder:
                 return buttonItem(itemIdentifier, symbol: AppSymbol.openFolder, label: "打开文件夹", help: openFolderHelp, action: #selector(openFolder(_:)), isEnabled: true)
             case ID.chooseFolder:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.chooseFolder, label: "选择文件夹", help: chooseFolderHelp, action: #selector(chooseFolder(_:)), isEnabled: true)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.chooseFolder, label: chooseFolderHelp, help: chooseFolderHelp, action: #selector(chooseFolder(_:)), isEnabled: true)
             case ID.importToPhotos:
-                return toggleItem(itemIdentifier, symbol: AppSymbol.importToPhotos, label: "导入照片", help: "导入系统相册", state: model.importToPhotos, action: #selector(toggleImportToPhotos(_:)), isEnabled: true)
+                return toggleItem(itemIdentifier, symbol: AppSymbol.importToPhotos, label: "合成后自动导入“照片”", help: "导入系统相册", state: model.importToPhotos, action: #selector(toggleImportToPhotos(_:)), isEnabled: true)
             case ID.addToAlbum:
-                return toggleItem(itemIdentifier, symbol: AppSymbol.addToAlbum, label: "添加到相簿", help: "添加到相簿", state: addToAlbumState, action: #selector(toggleAddToAlbum(_:)), isEnabled: addToAlbumEnabled)
+                return toggleItem(itemIdentifier, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", help: "添加到相簿", state: addToAlbumState, action: #selector(toggleAddToAlbum(_:)), isEnabled: addToAlbumEnabled)
             case ID.clear:
                 return buttonItem(itemIdentifier, symbol: AppSymbol.clear, label: clearLabel, help: clearHelp, action: #selector(clear(_:)), isEnabled: clearEnabled)
             case ID.addFiles:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.addFiles, label: "添加文件", help: "添加文件", action: #selector(addFiles(_:)), isEnabled: true)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.addFiles, label: "添加文件…", help: "选择要添加的照片、视频或文件夹", action: #selector(addFiles(_:)), isEnabled: true)
             case ID.importCompleted:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.importCompleted, label: "导入", help: "导入所选", action: #selector(importCompleted(_:)), isEnabled: !model.selectedCompletedIDs.isEmpty && !model.isImportingCompleted)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.importCompleted, label: "导入“照片”", help: "将选中的项目导入系统“照片”App", action: #selector(importCompleted(_:)), isEnabled: !model.selectedCompletedIDs.isEmpty && !model.isImportingCompleted)
             case ID.compose:
-                return buttonItem(itemIdentifier, symbol: AppSymbol.composeLivePhoto, label: "合成 Live Photo", help: "合成所选", action: #selector(compose(_:)), isEnabled: composeEnabled)
+                return buttonItem(itemIdentifier, symbol: AppSymbol.composeLivePhoto, label: "合成 Live Photo", help: composeHelp, action: #selector(compose(_:)), isEnabled: composeEnabled)
             default:
                 return nil
             }
@@ -299,6 +297,18 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             item.target = self
             item.action = action
             item.isEnabled = isEnabled
+            let button = ToolbarToggleButton()
+            button.toolbarItem = item
+            button.actionTarget = self
+            button.forwardedAction = action
+            button.setButtonType(.toggle)
+            button.bezelStyle = .texturedRounded
+            button.imagePosition = .imageOnly
+            button.target = button
+            button.action = #selector(ToolbarToggleButton.forwardAction(_:))
+            button.frame.size = NSSize(width: 32, height: 28)
+            item.view = button
+            updateToggleItem(item, symbol: symbol, label: label, state: state, isEnabled: isEnabled)
             return item
         }
 
@@ -392,42 +402,42 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         private var clearLabel: String {
             switch model.selection ?? .queue {
             case .queue:
-                "清空"
+                model.selectedPairIDs.isEmpty ? "清空列表" : "移除选中项目"
             case .downloads:
-                model.selectedDownloadItemIDs.isEmpty ? "清空下载项目" : "删除选中的下载项目"
+                model.selectedDownloadItemIDs.isEmpty ? "清空当前筛选记录…" : "移除选中记录…"
             case .completed:
-                model.selectedCompletedIDs.isEmpty ? "清空完成项目" : "删除选中的完成项目"
+                model.selectedCompletedIDs.isEmpty ? "清空当前筛选记录…" : "移除选中记录…"
             }
         }
 
         private var clearHelp: String {
-            switch model.selection ?? .queue {
-            case .queue:
-                "清空列表"
-            case .downloads:
-                model.selectedDownloadItemIDs.isEmpty ? "清空列表" : "删除所选"
-            case .completed:
-                model.selectedCompletedIDs.isEmpty ? "清空列表" : "删除所选"
+            if model.selection == .queue || model.selection == nil {
+                return model.selectedPairIDs.isEmpty
+                    ? "移除列表中的全部项目，保留本地文件"
+                    : "移除选中的项目，保留本地文件"
             }
+            return "移除记录；下一步可选择保留本地文件或将文件移到废纸篓"
         }
 
-        private var refreshHelp: String {
-            switch model.selection ?? .queue {
-            case .queue:
-                "刷新"
-            case .downloads:
-                "刷新"
-            case .completed:
-                "刷新"
+        private var composeHelp: String {
+            if model.selection == .downloads {
+                return model.selectedDownloadItemIDs.isEmpty
+                    ? "合成当前筛选中所有可合成的照片与视频配对"
+                    : "合成选中项目中的照片与视频配对"
             }
+            return model.selectedPairIDs.isEmpty
+                ? "将列表中的全部照片与视频配对合成为 Live Photo"
+                : "将选中的照片与视频配对合成为 Live Photo"
         }
+
+        private var refreshHelp: String { "重新扫描当前文件夹并更新列表" }
 
         private var openFolderHelp: String {
-            "打开文件夹"
+            model.selection == .downloads ? "在访达中打开下载文件夹" : "在访达中打开导出文件夹"
         }
 
         private var chooseFolderHelp: String {
-            "选择文件夹"
+            model.selection == .downloads ? "更改下载文件夹…" : "更改导出位置…"
         }
 
         @objc private func refresh(_ sender: Any?) {
@@ -486,23 +496,23 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
 
         @objc private func toggleImportToPhotos(_ sender: NSToolbarItem) {
             model.importToPhotos.toggle()
-            updateToggleItem(sender, symbol: AppSymbol.importToPhotos, label: "导入照片", state: model.importToPhotos, isEnabled: true)
+            updateToggleItem(sender, symbol: AppSymbol.importToPhotos, label: "合成后自动导入“照片”", state: model.importToPhotos, isEnabled: true)
             reloadToolbarIfNeeded()
         }
 
         @objc private func toggleAddToAlbum(_ sender: NSToolbarItem) {
             guard addToAlbumEnabled else {
-                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "添加到相簿", state: addToAlbumState, isEnabled: false)
+                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", state: addToAlbumState, isEnabled: false)
                 return
             }
             switch model.selection ?? .queue {
             case .completed:
                 model.completedAddToAlbum.toggle()
-                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "添加到相簿", state: model.completedAddToAlbum, isEnabled: addToAlbumEnabled)
+                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", state: model.completedAddToAlbum, isEnabled: addToAlbumEnabled)
             case .queue, .downloads:
                 let newValue = model.importToPhotos && !model.addToAlbum
                 model.addToAlbum = newValue
-                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "添加到相簿", state: newValue, isEnabled: model.importToPhotos)
+                updateToggleItem(sender, symbol: AppSymbol.addToAlbum, label: "导入时加入 HERMES 相簿", state: newValue, isEnabled: model.importToPhotos)
             }
         }
 
@@ -524,3 +534,15 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             }
         }
     }
+
+@MainActor
+private final class ToolbarToggleButton: NSButton {
+    weak var toolbarItem: NSToolbarItem?
+    weak var actionTarget: AnyObject?
+    var forwardedAction: Selector?
+
+    @objc func forwardAction(_ sender: Any?) {
+        guard let item = toolbarItem, let action = forwardedAction else { return }
+        NSApp.sendAction(action, to: actionTarget, from: item)
+    }
+}

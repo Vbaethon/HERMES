@@ -6,34 +6,31 @@ final class SystemThumbnailProvider: @unchecked Sendable {
 
     private init() {}
 
-    func thumbnail(for url: URL, maxPixelSize: Int) async -> NSImage {
-        let requestedSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+    func thumbnail(for url: URL, pointSize: CGFloat, scale: CGFloat) async -> NSImage {
+        // Quick Look takes a size in points and applies the display scale itself.
+        let requestedSize = CGSize(width: pointSize, height: pointSize)
         let request = QLThumbnailGenerator.Request(
             fileAt: url.standardizedFileURL,
             size: requestedSize,
-            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            scale: scale,
             representationTypes: [.thumbnail, .lowQualityThumbnail, .icon]
         )
 
         let image = await withCheckedContinuation { continuation in
-            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, error in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
                 if let representation {
                     continuation.resume(returning: representation.nsImage)
                     return
                 }
-                if error != nil {
-                    continuation.resume(returning: self.fallbackIcon(for: url, maxPixelSize: maxPixelSize))
-                } else {
-                    continuation.resume(returning: self.fallbackIcon(for: url, maxPixelSize: maxPixelSize))
-                }
+                continuation.resume(returning: self.fallbackIcon(for: url, pointSize: pointSize))
             }
         }
         return image
     }
 
-    private func fallbackIcon(for url: URL, maxPixelSize: Int) -> NSImage {
+    private func fallbackIcon(for url: URL, pointSize: CGFloat) -> NSImage {
         let icon = NSWorkspace.shared.icon(forFile: url.path)
-        icon.size = NSSize(width: maxPixelSize, height: maxPixelSize)
+        icon.size = NSSize(width: pointSize, height: pointSize)
         return icon
     }
 }

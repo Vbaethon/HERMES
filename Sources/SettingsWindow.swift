@@ -18,9 +18,9 @@ final class SettingsWindowController: NSWindowController {
 }
 
 final class SettingsViewController: NSViewController {
-    private let importToPhotosButton = NSButton(checkboxWithTitle: "合成后导入系统相册", target: nil, action: nil)
-    private let addToAlbumButton = NSButton(checkboxWithTitle: "导入时添加到 HERMES 相簿", target: nil, action: nil)
-    private let completedAddToAlbumButton = NSButton(checkboxWithTitle: "从已完成导入时添加到 HERMES 相簿", target: nil, action: nil)
+    private let importToPhotosButton = NSButton(checkboxWithTitle: "合成后自动导入“照片”", target: nil, action: nil)
+    private let addToAlbumButton = NSButton(checkboxWithTitle: "导入时加入 HERMES 相簿", target: nil, action: nil)
+    private let completedAddToAlbumButton = NSButton(checkboxWithTitle: "从“已完成”导入时加入 HERMES 相簿", target: nil, action: nil)
 
     override func loadView() {
         view = SystemWindowBackgroundController.makePageBackgroundView()

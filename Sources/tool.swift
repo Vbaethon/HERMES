@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import Darwin
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -1241,6 +1242,37 @@ func detectStillImageExtension(_ url: URL) -> String {
     return "jpeg"
 }
 
+
+/// Serialize publication across helper processes. Existing files are never replaced.
+func publishLivePhoto(still: URL, movie: URL, to folder: URL, baseName: String) throws -> (URL, URL) {
+    let fm = FileManager.default
+    let lockPath = folder.appendingPathComponent(".hermes-publish.lock").path
+    let fd = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw POSIXError(.EACCES) }
+    defer { close(fd) }
+    guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(.EIO) }
+    defer { flock(fd, LOCK_UN) }
+    let names = try fm.contentsOfDirectory(atPath: folder.path)
+    let occupied = Set(names.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent.lowercased() })
+    var stem = baseName
+    var number = 2
+    while occupied.contains(stem.lowercased()) {
+        stem = "\(baseName) (\(number))"
+        number += 1
+    }
+    let imageURL = folder.appendingPathComponent(stem).appendingPathExtension(still.pathExtension)
+    let movieURL = folder.appendingPathComponent(stem).appendingPathExtension("mov")
+    // Publish the photo last: directory scans cannot see a completed photo before its movie.
+    try fm.moveItem(at: movie, to: movieURL)
+    do {
+        try fm.moveItem(at: still, to: imageURL)
+    } catch {
+        try? fm.moveItem(at: movieURL, to: movie)
+        throw error
+    }
+    return (imageURL, movieURL)
+}
+
 @main
 struct Main {
     static func main() async {
@@ -1250,7 +1282,14 @@ struct Main {
 
             let jpegURL = URL(fileURLWithPath: args[0])
             let videoURL = URL(fileURLWithPath: args[1])
-            let outputFolder = URL(fileURLWithPath: args[2])
+            let destinationFolder = URL(fileURLWithPath: args[2]).standardizedFileURL
+            guard FileManager.default.isReadableFile(atPath: jpegURL.path),
+                  FileManager.default.isReadableFile(atPath: videoURL.path) else {
+                throw NSError(domain: "HERMES.Tool", code: 1, userInfo: [NSLocalizedDescriptionKey: "照片或视频不存在或不可读取。"])
+            }
+            try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+            let outputFolder = destinationFolder.appendingPathComponent(".hermes-stage-" + UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: outputFolder) }
             let assetIDIndex = args.firstIndex(of: "--asset-id")
             let providedAssetID = assetIDIndex.flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
 
@@ -1361,9 +1400,14 @@ struct Main {
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputJPEG.path)
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputMOV.path)
 
+            guard CGImageSourceCreateWithURL(outputJPEG as CFURL, nil) != nil,
+                  try extractAssetIDFromMovie(outputMOV) == assetID else {
+                throw NSError(domain: "HERMES.Tool", code: 2, userInfo: [NSLocalizedDescriptionKey: "合成结果验证失败，未发布文件。"])
+            }
+            let published = try publishLivePhoto(still: outputJPEG, movie: outputMOV, to: destinationFolder, baseName: baseName)
+            let result = try JSONSerialization.data(withJSONObject: ["imagePath": published.0.path, "moviePath": published.1.path], options: [.sortedKeys])
             print("Asset ID: \(assetID)")
-            print("JPEG: \(outputJPEG.path)")
-            print("MOV: \(outputMOV.path)")
+            print("HERMES_RESULT:" + String(decoding: result, as: UTF8.self))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8))
             Foundation.exit(1)
