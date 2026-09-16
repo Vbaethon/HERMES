@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>HERMES</string>
+	<key>CFBundleExecutable</key>
+	<string>HERMES</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>HERMES</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 九尾大人。保留所有权利。</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.lifestyle</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSRequiresNativeExecution</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>生成并管理Live Photo的工具，同时提供下载其他平台的功能</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于将生成的 Live Photo 导入到照片图库。</string>
+</dict>
+</plist>

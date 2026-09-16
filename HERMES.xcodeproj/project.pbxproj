@@ -1,0 +1,665 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		111111111111111111111149 /* DouyinSourceResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111148 /* DouyinSourceResolver.swift */; };
+		111111111111111111111102 /* dwdl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111002 /* dwdl.swift */; };
+		111111111111111111111103 /* rndl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111003 /* rndl.swift */; };
+		111111111111111111111104 /* tool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111004 /* tool.swift */; };
+		111111111111111111111105 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111006 /* AppIcon.icon */; };
+		111111111111111111111106 /* tool in Copy Helper Tool */ = {isa = PBXBuildFile; fileRef = 111111111111111111111016 /* tool */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		111111111111111111111117 /* dydl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111017 /* dydl.swift */; };
+		111111111111111111111121 /* DownloaderHTTPCompatibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111022 /* DownloaderHTTPCompatibility.swift */; };
+		111111111111111111111123 /* LivePhotoToolRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111024 /* LivePhotoToolRunner.swift */; };
+		111111111111111111111124 /* PhotoLibraryImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111025 /* PhotoLibraryImporter.swift */; };
+		111111111111111111111125 /* DewuLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111026 /* DewuLogStore.swift */; };
+		111111111111111111111126 /* UIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111027 /* UIModels.swift */; };
+		111111111111111111111127 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111028 /* SettingsWindow.swift */; };
+		111111111111111111111128 /* HermesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111029 /* HermesApp.swift */; };
+		111111111111111111111129 /* SidebarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102A /* SidebarController.swift */; };
+		11111111111111111111112A /* EmptyStateViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102B /* EmptyStateViews.swift */; };
+		11111111111111111111112B /* DownloadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102C /* DownloadViews.swift */; };
+		11111111111111111111112C /* FileNaming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102D /* FileNaming.swift */; };
+		11111111111111111111112D /* FileSystemUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102E /* FileSystemUtilities.swift */; };
+		11111111111111111111112E /* RegexUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111102F /* RegexUtilities.swift */; };
+		11111111111111111111112F /* Models/ImporterModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111039 /* Models/ImporterModel.swift */; };
+		111111111111111111111130 /* Views/CollectionViews/PairCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */; };
+		111111111111111111111131 /* Views/CollectionViews/DownloadCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */; };
+		111111111111111111111132 /* Views/CollectionViews/CompletedCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */; };
+		111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111034 /* Views/Other/MainWindowController.swift */; };
+		111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */; };
+		111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111036 /* Views/Other/PageControllers.swift */; };
+		111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */; };
+		111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */; };
+		111111111111111111111138 /* DownloaderInfra.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111047 /* DownloaderInfra.swift */; };
+		111111111111111111111139 /* JSONValueUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111048 /* JSONValueUtilities.swift */; };
+		11111111111111111111113A /* MediaFileUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111049 /* MediaFileUtilities.swift */; };
+		11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */; };
+		11111111111111111111113E /* Views/Thumbnail/SystemThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */; };
+		11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */; };
+		111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */; };
+		111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111050 /* DownloaderNetworkPolicy.swift */; };
+		111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */; };
+		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
+		111111111111111111111147 /* SubprocessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111146 /* SubprocessRunner.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		111111111111111111111107 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 111111111111111111111020 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 111111111111111111111012;
+			remoteInfo = tool;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		111111111111111111111108 /* Copy Helper Tool */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 7;
+			files = (
+				111111111111111111111106 /* tool in Copy Helper Tool */,
+			);
+			name = "Copy Helper Tool";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		111111111111111111111148 /* DouyinSourceResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/DouyinSourceResolver.swift; sourceTree = "<group>"; };
+		111111111111111111111002 /* dwdl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = dwdl.swift; sourceTree = "<group>"; };
+		111111111111111111111003 /* rndl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rndl.swift; sourceTree = "<group>"; };
+		111111111111111111111004 /* tool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = tool.swift; sourceTree = "<group>"; };
+		111111111111111111111005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		111111111111111111111006 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		111111111111111111111015 /* HERMES.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HERMES.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		111111111111111111111016 /* tool */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = tool; sourceTree = BUILT_PRODUCTS_DIR; };
+		111111111111111111111017 /* dydl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = dydl.swift; sourceTree = "<group>"; };
+		111111111111111111111022 /* DownloaderHTTPCompatibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderHTTPCompatibility.swift; sourceTree = "<group>"; };
+		111111111111111111111024 /* LivePhotoToolRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePhotoToolRunner.swift; sourceTree = "<group>"; };
+		111111111111111111111025 /* PhotoLibraryImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryImporter.swift; sourceTree = "<group>"; };
+		111111111111111111111026 /* DewuLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuLogStore.swift; sourceTree = "<group>"; };
+		111111111111111111111027 /* UIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIModels.swift; sourceTree = "<group>"; };
+		111111111111111111111028 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		111111111111111111111029 /* HermesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesApp.swift; sourceTree = "<group>"; };
+		11111111111111111111102A /* SidebarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarController.swift; sourceTree = "<group>"; };
+		11111111111111111111102B /* EmptyStateViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateViews.swift; sourceTree = "<group>"; };
+		11111111111111111111102C /* DownloadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadViews.swift; sourceTree = "<group>"; };
+		11111111111111111111102D /* FileNaming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileNaming.swift; sourceTree = "<group>"; };
+		11111111111111111111102E /* FileSystemUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSystemUtilities.swift; sourceTree = "<group>"; };
+		11111111111111111111102F /* RegexUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegexUtilities.swift; sourceTree = "<group>"; };
+		111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/CompletedCollectionView.swift; sourceTree = "<group>"; };
+		111111111111111111111034 /* Views/Other/MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MainWindowController.swift; sourceTree = "<group>"; };
+		111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativeWindowToolbarController.swift; sourceTree = "<group>"; };
+		111111111111111111111036 /* Views/Other/PageControllers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/PageControllers.swift; sourceTree = "<group>"; };
+		111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailItemViews.swift; sourceTree = "<group>"; };
+		111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailService.swift; sourceTree = "<group>"; };
+		111111111111111111111039 /* Models/ImporterModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ImporterModel.swift; sourceTree = "<group>"; };
+		11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/PairCollectionView.swift; sourceTree = "<group>"; };
+		11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/DownloadCollectionView.swift; sourceTree = "<group>"; };
+		111111111111111111111047 /* DownloaderInfra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderInfra.swift; sourceTree = "<group>"; };
+		111111111111111111111048 /* JSONValueUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValueUtilities.swift; sourceTree = "<group>"; };
+		111111111111111111111049 /* MediaFileUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaFileUtilities.swift; sourceTree = "<group>"; };
+		11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridController.swift; sourceTree = "<group>"; };
+		11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/SystemThumbnailProvider.swift; sourceTree = "<group>"; };
+		11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/SystemWindowBackgroundController.swift; sourceTree = "<group>"; };
+		11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/NativePanelPresenter.swift; sourceTree = "<group>"; };
+		111111111111111111111050 /* DownloaderNetworkPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloaderNetworkPolicy.swift; sourceTree = "<group>"; };
+		111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuPlaybackLogVideoExtractor.swift; sourceTree = "<group>"; };
+		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
+		111111111111111111111146 /* SubprocessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/SubprocessRunner.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		111111111111111111111109 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		111111111111111111111110 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		111111111111111111111013 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111029 /* HermesApp.swift */,
+				111111111111111111111146 /* SubprocessRunner.swift */,
+				111111111111111111111148 /* DouyinSourceResolver.swift */,
+				111111111111111111111002 /* dwdl.swift */,
+				111111111111111111111003 /* rndl.swift */,
+				111111111111111111111017 /* dydl.swift */,
+				111111111111111111111022 /* DownloaderHTTPCompatibility.swift */,
+				111111111111111111111027 /* UIModels.swift */,
+				111111111111111111111028 /* SettingsWindow.swift */,
+				11111111111111111111102A /* SidebarController.swift */,
+				11111111111111111111102B /* EmptyStateViews.swift */,
+				11111111111111111111102C /* DownloadViews.swift */,
+				111111111111111111111024 /* LivePhotoToolRunner.swift */,
+				111111111111111111111025 /* PhotoLibraryImporter.swift */,
+				111111111111111111111026 /* DewuLogStore.swift */,
+				111111111111111111111004 /* tool.swift */,
+				111111111111111111111039 /* Models/ImporterModel.swift */,
+				11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */,
+				11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */,
+				111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */,
+				11111111111111111111104C /* Views/CollectionViews/ThumbnailGridController.swift */,
+				111111111111111111111034 /* Views/Other/MainWindowController.swift */,
+				111111111111111111111035 /* Views/Other/NativeWindowToolbarController.swift */,
+				11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */,
+				111111111111111111111036 /* Views/Other/PageControllers.swift */,
+				11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */,
+				111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */,
+				111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */,
+				11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */,
+				111111111111111111111040 /* Utilities */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		111111111111111111111014 /* Build */ = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111005 /* Info.plist */,
+				111111111111111111111019 /* Assets */,
+			);
+			path = Build;
+			sourceTree = "<group>";
+		};
+		111111111111111111111018 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111015 /* HERMES.app */,
+				111111111111111111111016 /* tool */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		111111111111111111111019 /* Assets */ = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111006 /* AppIcon.icon */,
+			);
+			path = Assets;
+			sourceTree = "<group>";
+		};
+		111111111111111111111021 = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111013 /* Sources */,
+				111111111111111111111014 /* Build */,
+				111111111111111111111018 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		111111111111111111111040 /* Utilities */ = {
+			isa = PBXGroup;
+			children = (
+				11111111111111111111102D /* FileNaming.swift */,
+				11111111111111111111102E /* FileSystemUtilities.swift */,
+				11111111111111111111102F /* RegexUtilities.swift */,
+				111111111111111111111047 /* DownloaderInfra.swift */,
+				111111111111111111111050 /* DownloaderNetworkPolicy.swift */,
+				111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */,
+				111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */,
+				111111111111111111111048 /* JSONValueUtilities.swift */,
+				111111111111111111111049 /* MediaFileUtilities.swift */,
+			);
+			path = Utilities;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		111111111111111111111011 /* HERMES */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 111111111111111111111031 /* Build configuration list for PBXNativeTarget "HERMES" */;
+			buildPhases = (
+				111111111111111111111111 /* Sources */,
+				111111111111111111111109 /* Frameworks */,
+				111111111111111111111112 /* Resources */,
+				111111111111111111111108 /* Copy Helper Tool */,
+				111111111111111111111115 /* Strip Bundle Metadata */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				111111111111111111111113 /* PBXTargetDependency */,
+			);
+			name = HERMES;
+			packageProductDependencies = (
+			);
+			productName = HERMES;
+			productReference = 111111111111111111111015 /* HERMES.app */;
+			productType = "com.apple.product-type.application";
+		};
+		111111111111111111111012 /* tool */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 111111111111111111111032 /* Build configuration list for PBXNativeTarget "tool" */;
+			buildPhases = (
+				111111111111111111111114 /* Sources */,
+				111111111111111111111110 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = tool;
+			packageProductDependencies = (
+			);
+			productName = tool;
+			productReference = 111111111111111111111016 /* tool */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		111111111111111111111020 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					111111111111111111111011 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					111111111111111111111012 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = 111111111111111111111030 /* Build configuration list for PBXProject "HERMES" */;
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				zh_CN,
+				Base,
+			);
+			mainGroup = 111111111111111111111021;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 111111111111111111111018 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				111111111111111111111011 /* HERMES */,
+				111111111111111111111012 /* tool */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		111111111111111111111112 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				111111111111111111111105 /* AppIcon.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		111111111111111111111115 /* Strip Bundle Metadata */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Strip Bundle Metadata";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "APP_BUNDLE=\"${TARGET_BUILD_DIR}/${WRAPPER_NAME}\"\nif [ -d \"$APP_BUNDLE\" ]; then\n    /usr/bin/find \"$APP_BUNDLE\" -name .DS_Store -delete\n    /usr/bin/xattr -cr \"$APP_BUNDLE\" || true\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		111111111111111111111111 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				111111111111111111111128 /* HermesApp.swift in Sources */,
+				111111111111111111111147 /* SubprocessRunner.swift in Sources */,
+				111111111111111111111149 /* DouyinSourceResolver.swift in Sources */,
+				111111111111111111111102 /* dwdl.swift in Sources */,
+				111111111111111111111103 /* rndl.swift in Sources */,
+				111111111111111111111117 /* dydl.swift in Sources */,
+				111111111111111111111121 /* DownloaderHTTPCompatibility.swift in Sources */,
+				111111111111111111111126 /* UIModels.swift in Sources */,
+				111111111111111111111127 /* SettingsWindow.swift in Sources */,
+				111111111111111111111129 /* SidebarController.swift in Sources */,
+				11111111111111111111112A /* EmptyStateViews.swift in Sources */,
+				11111111111111111111112B /* DownloadViews.swift in Sources */,
+				11111111111111111111112C /* FileNaming.swift in Sources */,
+				11111111111111111111112D /* FileSystemUtilities.swift in Sources */,
+				11111111111111111111112E /* RegexUtilities.swift in Sources */,
+				11111111111111111111112F /* Models/ImporterModel.swift in Sources */,
+				111111111111111111111130 /* Views/CollectionViews/PairCollectionView.swift in Sources */,
+				111111111111111111111131 /* Views/CollectionViews/DownloadCollectionView.swift in Sources */,
+				111111111111111111111132 /* Views/CollectionViews/CompletedCollectionView.swift in Sources */,
+				111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */,
+				111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */,
+				111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */,
+				111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */,
+				11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */,
+				111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */,
+				111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */,
+				11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */,
+				11111111111111111111113E /* Views/Thumbnail/SystemThumbnailProvider.swift in Sources */,
+				111111111111111111111138 /* DownloaderInfra.swift in Sources */,
+				111111111111111111111141 /* DownloaderNetworkPolicy.swift in Sources */,
+				111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */,
+				111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */,
+				111111111111111111111139 /* JSONValueUtilities.swift in Sources */,
+				11111111111111111111113A /* MediaFileUtilities.swift in Sources */,
+				111111111111111111111123 /* LivePhotoToolRunner.swift in Sources */,
+				111111111111111111111124 /* PhotoLibraryImporter.swift in Sources */,
+				111111111111111111111125 /* DewuLogStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		111111111111111111111114 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				111111111111111111111104 /* tool.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		111111111111111111111113 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 111111111111111111111012 /* tool */;
+			targetProxy = 111111111111111111111107 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		111111111111111111111041 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		111111111111111111111042 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		111111111111111111111043 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 0609;
+				DEAD_CODE_STRIPPING = YES;
+
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Build/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LM_FILTER_WARNINGS = YES;
+				MARKETING_VERSION = 1.8;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lsqlite3",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.Hermes;
+				PRODUCT_NAME = HERMES;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		111111111111111111111044 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 0609;
+				DEAD_CODE_STRIPPING = YES;
+
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Build/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LM_FILTER_WARNINGS = YES;
+				MARKETING_VERSION = 1.8;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lsqlite3",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.codex.Hermes;
+				PRODUCT_NAME = HERMES;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		111111111111111111111045 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = tool;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		111111111111111111111046 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path",
+				);
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_NAME = tool;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		111111111111111111111030 /* Build configuration list for PBXProject "HERMES" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				111111111111111111111041 /* Debug */,
+				111111111111111111111042 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		111111111111111111111031 /* Build configuration list for PBXNativeTarget "HERMES" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				111111111111111111111043 /* Debug */,
+				111111111111111111111044 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		111111111111111111111032 /* Build configuration list for PBXNativeTarget "tool" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				111111111111111111111045 /* Debug */,
+				111111111111111111111046 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 111111111111111111111020 /* Project object */;
+}
