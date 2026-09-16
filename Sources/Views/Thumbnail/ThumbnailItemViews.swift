@@ -288,6 +288,11 @@ final class ThumbnailBadgeLabel: NSTextField {
 
     override func draw(_ dirtyRect: NSRect) {
         guard !stringValue.isEmpty else { return }
+        let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        NSColor.black.withAlphaComponent(opaque ? 1 : 0.62).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: ThumbnailBadgeStyle.cornerRadius,
+                     yRadius: ThumbnailBadgeStyle.cornerRadius).fill()
         let textInsets = NSEdgeInsets(
             top: 0,
             left: ThumbnailBadgeStyle.horizontalPadding,
@@ -298,7 +303,7 @@ final class ThumbnailBadgeLabel: NSTextField {
         paragraphStyle.alignment = .center
         paragraphStyle.lineBreakMode = .byClipping
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: ThumbnailBadgeStyle.font,
+            .font: ThumbnailBadgeStyle.font(for: stringValue),
             .foregroundColor: ThumbnailBadgeStyle.textColor,
             .paragraphStyle: paragraphStyle
         ]

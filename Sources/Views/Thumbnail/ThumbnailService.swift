@@ -68,14 +68,19 @@ enum ThumbnailCollectionStyle {
 
 @MainActor
 enum ThumbnailBadgeStyle {
-    static let height: CGFloat = 10
-    static let horizontalPadding: CGFloat = 0
-    static let inset: CGFloat = 2
-    static let font = NSFont.systemFont(ofSize: 8, weight: .regular)
+    static let height: CGFloat = 16
+    static let horizontalPadding: CGFloat = 4
+    static let inset: CGFloat = 6
+    static let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+    static let cornerRadius: CGFloat = 4
+
+    static func font(for text: String) -> NSFont {
+        text.contains(":") ? .monospacedDigitSystemFont(ofSize: 10, weight: .medium) : font
+    }
     static let textColor = NSColor.white
 
     static func size(for text: String) -> NSSize {
-        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font(for: text)]).width)
         return NSSize(width: textWidth + horizontalPadding * 2, height: height)
     }
 }
