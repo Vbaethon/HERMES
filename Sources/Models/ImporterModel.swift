@@ -299,14 +299,14 @@ final class ImporterModel: ObservableObject {
         }
         let unsortedItems = pairItems + photoItems + videoItems
         let itemGroups = Dictionary(grouping: unsortedItems) {
-            Self.downloadPostGroupKey(for: $0.imageURL, root: downloadOutputFolder)
+            Self.downloadPostGroupKey(for: $0.imageURL)
         }
         let groupModifiedTimes = itemGroups.mapValues { items in
             items.map(\.modifiedTime).max() ?? .leastNonzeroMagnitude
         }
         let allItems = unsortedItems.sorted {
-            let lhsGroup = Self.downloadPostGroupKey(for: $0.imageURL, root: downloadOutputFolder)
-            let rhsGroup = Self.downloadPostGroupKey(for: $1.imageURL, root: downloadOutputFolder)
+            let lhsGroup = Self.downloadPostGroupKey(for: $0.imageURL)
+            let rhsGroup = Self.downloadPostGroupKey(for: $1.imageURL)
             if lhsGroup != rhsGroup {
                 let lhsDate = groupModifiedTimes[lhsGroup] ?? .leastNonzeroMagnitude
                 let rhsDate = groupModifiedTimes[rhsGroup] ?? .leastNonzeroMagnitude
@@ -1808,15 +1808,11 @@ final class ImporterModel: ObservableObject {
         }
     }
 
-    private nonisolated static func downloadPostGroupKey(for url: URL, root: URL) -> String {
+    private nonisolated static func downloadPostGroupKey(for url: URL) -> String {
         let itemURL = url.standardizedFileURL
         let parentURL = itemURL.deletingLastPathComponent().standardizedFileURL
-        let rootPath = root.standardizedFileURL.path
         let parentPath = parentURL.path
         let stem = normalizedDownloadPostStem(itemURL.deletingPathExtension().lastPathComponent)
-        if parentPath == rootPath {
-            return parentPath + "/" + stem
-        }
         return parentPath + "/" + stem
     }
 

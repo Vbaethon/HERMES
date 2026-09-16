@@ -51,6 +51,7 @@ enum DouyinNativeDownloader {
         var height: Int
         var videoWidth: Int
         var videoHeight: Int
+        var alternateURLs: [URL] = []
     }
 
     struct VideoItem {
@@ -78,6 +79,11 @@ enum DouyinNativeDownloader {
         var destination: URL
         var fallbackURL: URL? = nil
         var alternateURLs: [URL] = []
+    }
+
+    static func livePhotoDownloadTask(_ item: MediaItem, destination: URL) -> DownloadTask? {
+        guard let video = item.videoURL else { return nil }
+        return DownloadTask(url: video, destination: destination, alternateURLs: item.alternateURLs)
     }
 
     struct DownloadOutcome: Sendable {
@@ -148,7 +154,7 @@ enum DouyinNativeDownloader {
             var fileNames: [String]
         }
 
-        private static let storeVersion = 7
+        private static let storeVersion = 8
         private let lock = NSLock()
         private var snapshotsByPath: [String: DouyinCacheSnapshot]
         private var rootSnapshotsByPath: [String: DouyinCacheRootSnapshot]
@@ -437,11 +443,9 @@ enum DouyinNativeDownloader {
                         url: item.imageURL,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).jpg", usedNames: &usedNames)
                     ))
-                    if let videoURL = item.videoURL {
-                        tasks.append(DownloadTask(
-                            url: videoURL,
-                            destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames)
-                        ))
+                    if item.videoURL != nil {
+                        tasks.append(livePhotoDownloadTask(item, destination:
+                            FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames))!)
                     }
                 }
                 let usesIndexedVideoNames = info.videos.count > 1
@@ -802,7 +806,7 @@ enum DouyinNativeDownloader {
         // empty or incomplete.
         let isVideoOnly = publicInfo.map { !$0.videos.isEmpty && $0.images.isEmpty } ?? false
         let isResolvedVideoPage = referer.path.lowercased().contains("/video/")
-        var needsLivePhotoVideo = isMissingLivePhotoVideo(publicInfo)
+        let needsLivePhotoVideo = isMissingLivePhotoVideo(publicInfo)
         let hasSuspiciousLivePhoto = publicInfo.map(hasSuspiciousLivePhotoVideo) ?? false
         var directCacheInfo: AwemeInfo?
         // Collect video IDs from both public API and seed info (share page).
@@ -915,7 +919,6 @@ enum DouyinNativeDownloader {
                     return info
                 }
                 publicInfo = await preferredInfo(info, over: publicInfo)
-                needsLivePhotoVideo = isMissingLivePhotoVideo(publicInfo)
             }
         }
         // Scan phase complete — report 100% of scan budget before final return/throw.
@@ -934,7 +937,7 @@ enum DouyinNativeDownloader {
         }
         if debugEnabled { print("[DouyinDebug] fetchAweme: ALL sources failed, throwing error") }
 
-        throw NSError(domain: "DouyinDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "未能从公开接口提取抖音媒体。"])
+        throw NSError(domain: "DouyinDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "公开接口未返回作品媒体，抖音客户端缓存也未找到当前作品的可靠详情。请在抖音客户端打开该作品并逐张播放后重试；若仍失败，需要检查该作品的访问限制。"])
     }
 
     private static func resolveSourceVideo(_ info: AwemeInfo) async -> AwemeInfo? {
@@ -1045,6 +1048,8 @@ enum DouyinNativeDownloader {
             guard matches.count == 1, let video = matches[0].videoURL,
                   isUsableVideoURL(video), !hasSuspiciousLivePhotoURL(video) else { continue }
             merged.images[index].videoURL = video
+            merged.images[index].alternateURLs = matches[0].alternateURLs
+            merged.images[index].sourceMarkedHDR = matches[0].sourceMarkedHDR
             merged.images[index].videoWidth = matches[0].videoWidth
             merged.images[index].videoHeight = matches[0].videoHeight
             merged.images[index].streamMarkedHDR = matches[0].streamMarkedHDR
@@ -1270,19 +1275,32 @@ enum DouyinNativeDownloader {
             return nil
         }
 
-        var merged = publicInfo
-        var videoIndex = 0
-        for index in merged.images.indices {
-            let current = merged.images[index].videoURL
-            let shouldReplace = current == nil
-                || hasSuspiciousLivePhotoURL(current!)
-                || !isLikelyDouyinVideoPlaybackURL(current!)
-            guard shouldReplace, videoIndex < verified.count else { continue }
-            merged.images[index].videoURL = verified[videoIndex]
-            videoIndex += 1
-        }
+        let merged = mergeTimelineLivePhotoCandidates(verified, into: publicInfo)
         await progress?(1.0)
-        return videoIndex > 0 ? merged : nil
+        return merged.images.map(\.videoURL) != publicInfo.images.map(\.videoURL) ? merged : nil
+    }
+
+    static func mergeTimelineLivePhotoCandidates(_ candidates: [URL], into info: AwemeInfo) -> AwemeInfo {
+        func videoID(_ url: URL) -> String? {
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "video_id" && !($0.value ?? "").isEmpty }?.value
+        }
+        var merged = info
+        for index in merged.images.indices {
+            guard let current = info.images[index].videoURL,
+                  let identity = videoID(current),
+                  info.images.filter({ $0.videoURL.flatMap(videoID) == identity }).count == 1,
+                  hasSuspiciousLivePhotoURL(current) || !isLikelyDouyinVideoPlaybackURL(current) else { continue }
+            let matches = candidates.filter { url in
+                let work = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "__vid" }?.value
+                return videoID(url) == identity && (work == nil || work == info.awemeID)
+                    && !hasSuspiciousLivePhotoURL(url) && isLikelyDouyinVideoPlaybackURL(url)
+            }
+            guard let first = matches.first else { continue }
+            merged.images[index].videoURL = first
+            merged.images[index].alternateURLs = orderedVideoURLs(matches.dropFirst().map { $0 } + info.images[index].alternateURLs)
+        }
+        return merged
     }
 
     private static func douyinImageCacheCluster(matchesByIndex: [[DouyinCacheEntry]]) -> [DouyinCacheEntry]? {
@@ -1479,22 +1497,21 @@ enum DouyinNativeDownloader {
         }
     }
 
-    private static func cachedDesktopAweme(awemeID: String, description: String?, videoIDs: [String] = [], progress: DownloaderInfra.ProgressHandler? = nil) async -> AwemeInfo? {
-        guard let electronURL = douyinElectronURL() else {
-            if debugEnabled { print("[DouyinDebug] desktop cache: Douyin Electron executable not found") }
-            return nil
-        }
-		let fileStages = douyinCacheFileStages(matching: awemeID, description: description, videoIDs: videoIDs) { fraction in
-            Task { @Sendable in await progress?(min(max(fraction, 0), 1) * 0.12) }
-        }
-        if let progress { await progress(0.12) }
-        guard !fileStages.stages.isEmpty else {
-            if debugEnabled { print("[DouyinDebug] desktop cache: no matching cache entries") }
-            return nil
-        }
-        if debugEnabled { print("[DouyinDebug] desktop cache: inspecting \(fileStages.totalCandidateCount) matching entries") }
+    struct CacheScanTracker {
+        private var versions = Set<String>()
 
-        let script = """
+        mutating func uncheckedFiles(_ files: [URL]) -> [URL] {
+            files.filter { url in
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      let size = attrs[.size] as? NSNumber,
+                      let date = attrs[.modificationDate] as? Date else { return true }
+                let version = "\(url.standardizedFileURL.path)|\(size)|\(date.timeIntervalSince1970)|\(attrs[.systemFileNumber] ?? "")"
+                return versions.insert(version).inserted
+            }
+        }
+    }
+
+    static let desktopCacheScript = """
         const fs = require("fs");
         const zlib = require("zlib");
         const args = process.argv.slice(1);
@@ -1504,7 +1521,7 @@ enum DouyinNativeDownloader {
         const workerPriority = Number.parseInt(process.env.HERMES_DOUYIN_CACHE_PRIORITY || "0", 10);
         const targets = args.filter(function(arg) { return /^\\d{16,20}$/.test(arg) || /^v[a-zA-Z0-9_-]{8,}$/.test(arg); });
         const cachePaths = args.filter(function(arg) {
-          try { return targets.indexOf(arg) < 0 && arg.endsWith("_0") && fs.existsSync(arg) && fs.statSync(arg).isFile(); } catch(e) { return false; }
+          try { return targets.indexOf(arg) < 0 && (arg.endsWith("_0") || /f_[0-9a-f]+$/i.test(arg)) && fs.existsSync(arg) && fs.statSync(arg).isFile(); } catch(e) { return false; }
         });
         if (debug) console.error("targets=" + JSON.stringify(targets) + " cachePaths=" + cachePaths.length);
         function shouldStop() {
@@ -1525,12 +1542,8 @@ enum DouyinNativeDownloader {
         function targetMatches(value) {
           if (!value || typeof value !== "object") return false;
           const ids = [value.aweme_id, value.group_id, value.group_id_str, value.comment_gid, value.item_id].filter(Boolean).map(String);
-          if (ids.some(function(id) { return targets.indexOf(id) >= 0; })) return true;
-          if (value.video) {
-            const serialized = JSON.stringify(value);
-            return targets.some(function(item) { return serialized.indexOf(item) >= 0; });
-          }
-          return false;
+          // A video ID or incidental text in another work is not a post identity.
+          return ids.indexOf(targets[0]) >= 0;
         }
         function find(value) {
           if (!value || typeof value !== "object") return null;
@@ -1562,37 +1575,38 @@ enum DouyinNativeDownloader {
           if (shouldStop()) process.exit(2);
           var path = cachePaths[i];
           try {
+            if (fs.statSync(path).size > 32 * 1024 * 1024) continue;
             var cache = fs.readFileSync(path);
+            const options = { maxOutputLength: 64 * 1024 * 1024 };
+            var body;
+            if (/f_[0-9a-f]+$/i.test(path)) {
+              // TTNet block-cache external streams contain the response body itself.
+              if (cache[0] === 0x1f && cache[1] === 0x8b) body = zlib.gunzipSync(cache, options);
+              else if (cache[0] === 0x7b || cache[0] === 0x5b) body = cache;
+              else continue;
+            } else {
             if (cache.length < 24) continue;
             var bodyOffset = 24 + cache.readUInt32LE(12);
-            if (bodyOffset >= cache.length) continue;
-            var body;
-            try {
-              body = zlib.brotliDecompressSync(cache.subarray(bodyOffset));
-            } catch(e) {
-              // Body may be in companion *_1 file (Chromium simple cache splits large
-              // responses: *_0 = headers, *_1 = brotli-compressed body).
-              var path1 = path.replace(/_0$/, "_1");
-              if (path1 !== path && fs.existsSync(path1)) {
-                try {
-                  var cache1 = fs.readFileSync(path1);
-                  // *_1 file has an 8-byte SimpleFileHeader prefix; skip it.
-                  body = zlib.brotliDecompressSync(cache1.subarray(8));
-                  if (debug) console.error("read body from " + path1 + " bytes=" + body.length);
-                } catch(e2) {
-                  // Try uncompressed *_1 body as last resort.
-                  try {
-                    body = cache1.subarray(8);
-                    if (debug) console.error("read uncompressed body from " + path1 + " bytes=" + body.length);
-                  } catch(e3) {
-                    console.error("cache failed " + path + ": " + e.message + " (_1 also failed: " + e2.message + ")");
-                    continue;
-                  }
-                }
-              } else {
-                console.error("cache failed " + path + ": " + e.message + " (no _1 companion)");
-                continue;
-              }
+            const finalMagic = 0xf4fa6f45970d41d8n;
+            if (cache.readBigUInt64LE(0) !== 0xfcfb6d1ba7725c30n || cache.length < 72) continue;
+            const lastEOF = cache.length - 24;
+            if (cache.readBigUInt64LE(lastEOF) !== finalMagic) continue;
+            const flags = cache.readUInt32LE(lastEOF + 8);
+            const headerSize = cache.readUInt32LE(lastEOF + 16);
+            const headerEnd = lastEOF - ((flags & 2) ? 32 : 0);
+            const headerStart = headerEnd - headerSize;
+            const bodyEnd = headerStart - 24;
+            if (bodyOffset > bodyEnd || bodyEnd < 24 || headerEnd < headerStart) continue;
+            if (cache.readBigUInt64LE(bodyEnd) !== finalMagic) continue;
+            const encoded = cache.subarray(bodyOffset, bodyEnd);
+            const headers = cache.subarray(headerStart, headerEnd).toString();
+            const encoding = /content-encoding:\\s*([^\\x00\\r\\n]+)/i.exec(headers);
+            const coding = encoding ? encoding[1].trim().toLowerCase() : "identity";
+            if (coding === "br") body = zlib.brotliDecompressSync(encoded, options);
+            else if (coding === "gzip") body = zlib.gunzipSync(encoded, options);
+            else if (coding === "deflate") body = zlib.inflateSync(encoded, options);
+            else if (coding === "identity") body = encoded;
+            else continue;
             }
             var chunksList = chunks(body);
             var chunkMatched = false;
@@ -1623,9 +1637,31 @@ enum DouyinNativeDownloader {
         process.exit(1);
         """
 
+
+    private static func cachedDesktopAweme(awemeID: String, description: String?, videoIDs: [String] = [], progress: DownloaderInfra.ProgressHandler? = nil) async -> AwemeInfo? {
+        guard let electronURL = douyinElectronURL() else {
+            if debugEnabled { print("[DouyinDebug] desktop cache: Douyin Electron executable not found") }
+            return nil
+        }
+		let fileStages = douyinCacheFileStages(matching: awemeID, description: description, videoIDs: videoIDs) { fraction in
+            Task { @Sendable in await progress?(min(max(fraction, 0), 1) * 0.12) }
+        }
+        if let progress { await progress(0.12) }
+        guard !fileStages.stages.isEmpty else {
+            if debugEnabled { print("[DouyinDebug] desktop cache: no matching cache entries") }
+            return nil
+        }
+        if debugEnabled { print("[DouyinDebug] desktop cache: inspecting \(fileStages.totalCandidateCount) matching entries") }
+
+        let script = desktopCacheScript
+
         let totalFiles = fileStages.totalCandidateCount
         var cumulativeProcessed = 0
-        for cacheFiles in fileStages.stages {
+        var scanTracker = CacheScanTracker()
+        for stageFiles in fileStages.stages {
+            let cacheFiles = scanTracker.uncheckedFiles(stageFiles)
+            cumulativeProcessed += stageFiles.count - cacheFiles.count
+            guard !cacheFiles.isEmpty else { continue }
             let stageOffset = cumulativeProcessed
             let stageFileCount = cacheFiles.count
             let stageProgress: DownloaderInfra.ProgressHandler?
@@ -1649,7 +1685,9 @@ enum DouyinNativeDownloader {
             guard let aweme = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 continue
             }
-            return parseAweme(aweme)
+            let info = parseAweme(aweme)
+            guard info.awemeID == awemeID else { continue }
+            return info
         }
         return nil
     }
@@ -1676,7 +1714,6 @@ enum DouyinNativeDownloader {
         let workerCount = min(maxDouyinCacheWorkers, cacheFiles.count)
         let filesPerWorker = max(1, min(32, Int(ceil(Double(cacheFiles.count) / Double(workerCount)))))
         var start = fastPathCount
-        var batchIndex = 0
         while start < cacheFiles.count {
             let batchEnd = min(start + workerCount * filesPerWorker, cacheFiles.count)
             let resultBox = DouyinAwemeDataBox()
@@ -1717,7 +1754,6 @@ enum DouyinNativeDownloader {
                 return data
             }
             start = batchEnd
-            batchIndex += 1
         }
         return nil
     }
@@ -1796,7 +1832,6 @@ enum DouyinNativeDownloader {
 	            if debugEnabled { print("[DouyinDebug] liveDesktopAweme: trying \(config.label) config") }
 	            let script = """
 	        const https = require("https");
-	        const target = process.argv[1];
 	        const url = "\(config.url)";
 	        const options = {
 	          headers: {
@@ -1847,14 +1882,6 @@ enum DouyinNativeDownloader {
 	                if output.hasPrefix("PARSE_ERROR") {
 	                    let bodyText = String(output.dropFirst("PARSE_ERROR:".count))
 	                    if debugEnabled { print("[DouyinDebug] liveDesktopAweme[\(config.label)]: PARSE_ERROR body: \(bodyText.prefix(200))") }
-	                    continue // try fallback config
-	                }
-	                if output.hasPrefix("NET_ERROR") {
-	                    if debugEnabled { print("[DouyinDebug] liveDesktopAweme[\(config.label)]: NET_ERROR, trying fallback") }
-	                    continue // try fallback config
-	                }
-	                if output.hasPrefix("TIMEOUT") {
-	                    if debugEnabled { print("[DouyinDebug] liveDesktopAweme[\(config.label)]: TIMEOUT, trying fallback") }
 	                    continue // try fallback config
 	                }
 	                guard !output.isEmpty,
@@ -1963,6 +1990,10 @@ enum DouyinNativeDownloader {
             lastStagePaths = stagePaths
         }
 
+        // Current desktop versions can route responses through TTNet instead of
+        // Chromium Simple Cache. Its external gzip/JSON streams have no URL key.
+        appendStage(douyinTTNetCacheFiles())
+
         // When no cache key matches exactly, add a targeted body-scan stage from
         // recent rich JSON entries.  Douyin often stores the useful aweme object
         // inside aweme/favorite or feed response bodies whose cache key does not
@@ -2006,10 +2037,54 @@ enum DouyinNativeDownloader {
         if stages.isEmpty, !entries.isEmpty {
             appendStage(entries.map(\.url))
         }
+        // A liked/post response can predate the current visit; its key contains the
+        // account, not each work ID. Only scan these older structured responses
+        // after recent stages miss, retaining version-aware execution deduplication.
+        appendStage(archivedDouyinCacheFiles(totalEntries.map {
+            (url: $0.url, date: $0.date, priority: $0.priority)
+        }, cutoff: cutoff))
         return DouyinCacheFileStages(
             stages: stages,
             totalCandidateCount: max(stages.reduce(0) { $0 + $1.count }, stages.last?.count ?? 0)
         )
+    }
+
+    static func douyinTTNetCacheFiles(roots: [URL]? = nil) -> [URL] {
+        let cacheRoots = roots ?? douyinCacheRootPaths.map {
+            URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("TTNetCache/disk_cache", isDirectory: true)
+        }
+        var candidates: [(url: URL, date: Date)] = []
+        for root in cacheRoots {
+            let files = (try? FileManager.default.contentsOfDirectory(at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey])) ?? []
+            for file in files {
+                guard file.lastPathComponent.range(of: "^f_[0-9a-f]+$", options: .regularExpression) != nil,
+                      let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                      values.isRegularFile == true,
+                      let size = values.fileSize, size > 2, size <= 32 * 1024 * 1024,
+                      let handle = try? FileHandle(forReadingFrom: file) else { continue }
+                let prefix = (try? handle.read(upToCount: 2)) ?? Data()
+                try? handle.close()
+                guard prefix.starts(with: [0x1f, 0x8b]) || prefix.first == 0x7b || prefix.first == 0x5b else { continue }
+                candidates.append((file, values.contentModificationDate ?? .distantPast))
+            }
+        }
+        return candidates.sorted {
+            $0.date == $1.date ? $0.url.path < $1.url.path : $0.date > $1.date
+        }.map(\.url)
+    }
+
+    static func archivedDouyinCacheFiles(
+        _ entries: [(url: URL, date: Date, priority: Int)], cutoff: Date
+    ) -> [URL] {
+        entries.filter { $0.date < cutoff && (0...4).contains($0.priority) }
+            .sorted {
+                if $0.priority != $1.priority { return $0.priority < $1.priority }
+                if $0.date != $1.date { return $0.date > $1.date }
+                return $0.url.path < $1.url.path
+            }
+            .prefix(512).map(\.url)
     }
 
     private static func douyinCacheEntry(for file: URL, modDate: Date, fileSize: Int) -> DouyinCacheEntry? {
@@ -2044,7 +2119,7 @@ enum DouyinNativeDownloader {
         )
     }
 
-	    private static func douyinCachePriority(for key: String) -> Int {
+	    static func douyinCachePriority(for key: String) -> Int {
 	        // Direct media CDN entries — indexed so cachedTimelineLivePhotoVideos
 	        // can find motion videos near image cache entries.  They are skipped
 	        // by douyinCacheFileStages so the Electron body scan stays lean.
@@ -2058,7 +2133,7 @@ enum DouyinNativeDownloader {
         if key.contains("aweme/detail") { return 0 }
         if key.contains("web/tab/feed") && key.contains("aweme/v1") { return 1 }
         if key.contains("history/read") && key.contains("aweme/v1") { return 1 }
-        if key.contains("aweme/favorite") { return 2 }
+        if key.contains("aweme/favorite") || key.contains("aweme/post") { return 2 }
         if key.contains("slidesinfo") { return 3 }
         if key.contains("/aweme/v1/feed") { return 4 }
         if key.contains("/share/video/") { return 5 }
@@ -2174,21 +2249,10 @@ enum DouyinNativeDownloader {
                 imageCandidates.append((offset + 1, imageDict, imageURL, bestVideo))
             }
         }
-        let metaWidth = JSONValueUtilities.intValue(aweme["width"])
-        let metaHeight = JSONValueUtilities.intValue(aweme["height"])
-        var bestByIndex: [Int: (image: [String: Any], imageURL: URL, video: VideoSelection?)] = [:]
-        for candidate in imageCandidates {
-            let score = imageURLScore(candidate.imageURL, metaWidth: JSONValueUtilities.intValue(candidate.image["width"]) != 0 ? JSONValueUtilities.intValue(candidate.image["width"]) : metaWidth, metaHeight: JSONValueUtilities.intValue(candidate.image["height"]) != 0 ? JSONValueUtilities.intValue(candidate.image["height"]) : metaHeight)
-            if let existing = bestByIndex[candidate.index] {
-                let existingScore = imageURLScore(existing.imageURL, metaWidth: JSONValueUtilities.intValue(existing.image["width"]) != 0 ? JSONValueUtilities.intValue(existing.image["width"]) : metaWidth, metaHeight: JSONValueUtilities.intValue(existing.image["height"]) != 0 ? JSONValueUtilities.intValue(existing.image["height"]) : metaHeight)
-                if score <= existingScore { continue }
-            }
-            bestByIndex[candidate.index] = (candidate.image, candidate.imageURL, candidate.video)
-        }
-        for index in bestByIndex.keys.sorted() {
-            guard let best = bestByIndex[index] else { continue }
+        // Both source loops enumerate unique ordinals and are mutually exclusive.
+        for best in imageCandidates {
             info.images.append(MediaItem(
-                index: index,
+                index: best.index,
                 imageURL: best.imageURL,
                 videoURL: best.video?.url,
                 sourceMarkedHDR: best.video?.sourceMarkedHDR ?? false,
@@ -2196,7 +2260,8 @@ enum DouyinNativeDownloader {
                 width: JSONValueUtilities.intValue(best.image["width"]),
                 height: JSONValueUtilities.intValue(best.image["height"]),
                 videoWidth: best.video?.width ?? 0,
-                videoHeight: best.video?.height ?? 0
+                videoHeight: best.video?.height ?? 0,
+                alternateURLs: best.video?.alternateURLs ?? []
             ))
         }
         if images.isEmpty,
@@ -2347,23 +2412,6 @@ enum DouyinNativeDownloader {
         return [selection]
     }
 
-    private static func livePhotoVideoScore(_ url: URL) -> Int {
-        guard isLikelyDouyinVideoPlaybackURL(url) else { return Int.min }
-        let text = url.absoluteString.lowercased()
-        var score = 0
-        if isDirectDouyinVideoURL(url) { score += 1000 }
-        if text.contains("/aweme/v1/play") { score += 800 }
-        if text.contains("douyinvod.com") { score += 700 }
-        if text.contains("live") { score += 300 }
-        if text.contains("motion") { score += 250 }
-        if text.contains("photo") { score += 150 }
-        if text.contains(".mp4") { score += 120 }
-        if text.contains(".mov") { score += 100 }
-        if text.contains("cover") || text.contains("thumb") || text.contains("preview") { score -= 500 }
-        if text.contains("watermark=1") || text.contains("playwm") { score -= 300 }
-        return score
-    }
-
     private static func bestVideoURL(from video: [String: Any]) -> VideoSelection? {
         var candidates: [(score: Int64, selection: VideoSelection)] = []
         if let bitRates = video["bit_rate"] as? [[String: Any]] {
@@ -2388,7 +2436,7 @@ enum DouyinNativeDownloader {
             }
         }
         if candidates.isEmpty {
-            candidates = nestedVideoCandidates(in: video, meta: video, inheritedMeta: nil)
+            candidates = nestedVideoCandidates(in: video, inheritedMeta: nil)
         }
         if candidates.isEmpty {
             let fallbackWidth = JSONValueUtilities.intValue(video["width"])
@@ -2416,10 +2464,10 @@ enum DouyinNativeDownloader {
         return candidates.max { $0.score < $1.score }?.selection
     }
 
-    private static func nestedVideoCandidates(in value: Any, meta: [String: Any], inheritedMeta: [String: Any]?, depth: Int = 0) -> [(score: Int64, selection: VideoSelection)] {
+    private static func nestedVideoCandidates(in value: Any, inheritedMeta: [String: Any]?, depth: Int = 0) -> [(score: Int64, selection: VideoSelection)] {
         guard depth <= 8 else { return [] }
         if let values = value as? [Any] {
-            return values.flatMap { nestedVideoCandidates(in: $0, meta: meta, inheritedMeta: inheritedMeta, depth: depth + 1) }
+            return values.flatMap { nestedVideoCandidates(in: $0, inheritedMeta: inheritedMeta, depth: depth + 1) }
         }
         guard let dictionary = value as? [String: Any] else { return [] }
         var candidates: [(score: Int64, selection: VideoSelection)] = []
@@ -2448,7 +2496,7 @@ enum DouyinNativeDownloader {
             }
         }
         for nestedValue in dictionary.values {
-            candidates.append(contentsOf: nestedVideoCandidates(in: nestedValue, meta: dictionary, inheritedMeta: inheritedMeta, depth: depth + 1))
+            candidates.append(contentsOf: nestedVideoCandidates(in: nestedValue, inheritedMeta: inheritedMeta, depth: depth + 1))
         }
         return candidates
     }
@@ -2561,7 +2609,7 @@ enum DouyinNativeDownloader {
                 return VideoSelection(url: url, width: width, height: height, sourceMarkedHDR: false, streamMarkedHDR: false)
             }
         }
-        let candidates = nestedVideoCandidates(in: image, meta: image, inheritedMeta: nil)
+        let candidates = nestedVideoCandidates(in: image, inheritedMeta: nil)
             .filter { isUsableVideoURL($0.selection.url) }
         if let best = candidates.max(by: { $0.score < $1.score })?.selection {
             if debugEnabled {
@@ -2799,9 +2847,6 @@ enum DouyinNativeDownloader {
                 request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }
         }
-        if DownloaderHTTPCompatibility.shouldUseDirectly(for: request) {
-            return try await DownloaderHTTPCompatibility.dataAsync(for: request, readsBody: readsBody)
-        }
         return try await DownloaderHTTPCompatibility.requestData(
             for: request, session: networkSession, readsBody: readsBody
         )
@@ -2896,12 +2941,9 @@ enum DouyinNativeDownloader {
         to destination: URL,
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
-        try await DownloaderInfra.downloadOnceAsync(url, to: destination, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, extraHeaders: ["Referer": "https://www.douyin.com/"], progress: progress)
+        try await DownloaderInfra.downloadOnceAsync(url, to: destination, userAgent: userAgent, session: networkSession, shouldUseDirectly: { _ in false }, extraHeaders: ["Referer": "https://www.douyin.com/"], progress: progress)
     }
 
-    private static func shouldUseDirectly(_ req: URLRequest) -> Bool {
-        DownloaderHTTPCompatibility.shouldUseDirectly(for: req)
-    }
 
 }
 

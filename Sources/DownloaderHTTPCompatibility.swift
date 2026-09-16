@@ -124,10 +124,6 @@ enum DownloaderHTTPCompatibility {
 
     // MARK: - Public API
 
-    static func shouldUseDirectly(for request: URLRequest) -> Bool {
-        false
-    }
-
     static func shouldFallback(after error: Error) -> Bool {
         shouldFallback(after: error, for: nil)
     }

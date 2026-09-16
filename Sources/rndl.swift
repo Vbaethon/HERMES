@@ -1,16 +1,14 @@
 import AppKit
 import AVFoundation
 import Foundation
-import ImageIO
-import UniformTypeIdentifiers
 
 enum XHSNativeDownloader {
-    private static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
-    private static let mobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+    static let mobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
     private static let maxConcurrentDownloads = DownloaderHTTPCompatibility.downloadConcurrencyLimit()
     private static let networkSession: URLSession = DownloaderHTTPCompatibility.makeDownloadSession()
 
-    private struct NoteInfo {
+    struct NoteInfo {
         var noteID = ""
         var title = ""
         var author = "unknown"
@@ -28,28 +26,28 @@ enum XHSNativeDownloader {
         }
     }
 
-    private struct MediaItem {
+    struct MediaItem {
         var index: Int
         var imageURL: URL
         var liveURL: URL?
         var liveURLs: [URL]
         var fileID: String
+        var imageQuality: Int = 0
+        var liveScore: Int64 = 0
+        var imageUserAgent: String?
+        var liveUserAgent: String?
     }
 
     private struct DownloadTask {
         var urls: [URL]
         var destination: URL
-        var stripsDescription: Bool
         var requestUserAgent: String
         var videoHDRHint: VideoHDRHint?
     }
 
-    private struct VideoHDRHint {
+    struct VideoHDRHint {
         var sourceMarkedHDR = false
         var streamMarkedHDR = false
-        var transferFunction: String?
-        var colorPrimaries: String?
-        var yCbCrMatrix: String?
 
         var needsPassthroughRemux: Bool {
             sourceMarkedHDR || streamMarkedHDR
@@ -107,16 +105,14 @@ enum XHSNativeDownloader {
                     tasks.append(DownloadTask(
                         urls: [item.imageURL],
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).bin", usedNames: &usedNames),
-                        stripsDescription: false,
-                        requestUserAgent: note.requestUserAgent,
+                        requestUserAgent: item.imageUserAgent ?? note.requestUserAgent,
                         videoHDRHint: nil
                     ))
                     if let liveURL = item.liveURL {
                         tasks.append(DownloadTask(
                             urls: item.liveURLs.isEmpty ? [liveURL] : item.liveURLs,
                             destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).mp4", usedNames: &usedNames),
-                            stripsDescription: false,
-                            requestUserAgent: note.requestUserAgent,
+                            requestUserAgent: item.liveUserAgent ?? note.requestUserAgent,
                             videoHDRHint: nil
                         ))
                     }
@@ -126,7 +122,6 @@ enum XHSNativeDownloader {
                     tasks.append(DownloadTask(
                         urls: note.videoURLs.isEmpty ? [videoURL] : note.videoURLs,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: originalURLFilename(videoURL, defaultName: "video.mp4"), usedNames: &usedNames),
-                        stripsDescription: false,
                         requestUserAgent: note.requestUserAgent,
                         videoHDRHint: note.videoHDRHint
                     ))
@@ -258,16 +253,7 @@ enum XHSNativeDownloader {
 
         if let progress { await progress(1) }
 
-        if let bestNote = notes.max(by: { lhs, rhs in
-            let lhsScore = noteScore(lhs)
-            let rhsScore = noteScore(rhs)
-            if lhsScore != rhsScore { return lhsScore < rhsScore }
-            // Tiebreaker: mobile UA responses typically carry richer stream metadata
-            // (width, height, videoBitrate, etc.) that desktop responses strip out.
-            return lhs.requestUserAgent == mobileUserAgent
-        }) {
-            return bestNote
-        }
+        if let bestNote = preferredNote(notes) { return bestNote }
         if let firstError {
             throw firstError
         }
@@ -318,7 +304,7 @@ enum XHSNativeDownloader {
         return nil
     }
 
-    private static func parseNote(_ note: [String: Any], fallbackURL: URL) throws -> NoteInfo {
+    static func parseNote(_ note: [String: Any], fallbackURL: URL) throws -> NoteInfo {
         let user = note["user"] as? [String: Any] ?? [:]
         var info = NoteInfo()
         info.noteID = JSONValueUtilities.string(note["noteId"]) ?? fallbackURL.lastPathComponent
@@ -343,7 +329,9 @@ enum XHSNativeDownloader {
                     imageURL: imageCandidate.url,
                     liveURL: liveURLs.first,
                     liveURLs: liveURLs,
-                    fileID: JSONValueUtilities.nonEmptyString(item["fileId"]) ?? imageCandidate.token
+                    fileID: JSONValueUtilities.nonEmptyString(item["fileId"]) ?? imageCandidate.token,
+                    imageQuality: imageScore(imageCandidate),
+                    liveScore: liveCandidate.map(streamScore) ?? 0
                 ))
             }
         }
@@ -424,10 +412,6 @@ enum XHSNativeDownloader {
         return candidates.max(by: { streamScore($0) < streamScore($1) })
     }
 
-    private static func bestLivePhotoURL(from item: [String: Any]) -> URL? {
-        bestLivePhotoCandidate(from: item).flatMap { streamURL($0.item) }
-    }
-
     private static func bestLivePhotoCandidate(from item: [String: Any]) -> StreamCandidate? {
         let candidates = nestedStreamCandidates(in: item)
         return candidates.max { lhs, rhs in
@@ -442,6 +426,53 @@ enum XHSNativeDownloader {
         }
     }
 
+    static func noteIsLessComplete(_ lhs: NoteInfo, _ rhs: NoteInfo) -> Bool {
+        if lhs.type != "video", rhs.type != "video" {
+            if lhs.items.count != rhs.items.count { return lhs.items.count < rhs.items.count }
+            let left = lhs.items.filter { $0.liveURL != nil }.count
+            let right = rhs.items.filter { $0.liveURL != nil }.count
+            if left != right { return left < right }
+        }
+        let left = noteScore(lhs), right = noteScore(rhs)
+        if left != right { return left < right }
+        return lhs.requestUserAgent != mobileUserAgent && rhs.requestUserAgent == mobileUserAgent
+    }
+
+    static func preferredNote(_ notes: [NoteInfo]) -> NoteInfo? {
+        // Do not compare or combine different works returned by inconsistent pages.
+        guard let identity = notes.first?.noteID else { return nil }
+        let matching = notes.filter { $0.noteID == identity }
+        guard var result = matching.max(by: noteIsLessComplete) else { return nil }
+        guard !identity.isEmpty, result.type != "video" else { return result }
+        for note in matching where note.type == result.type {
+            for item in note.items where !item.fileID.isEmpty {
+                guard note.items.filter({ $0.fileID == item.fileID }).count == 1 else { continue }
+                let indices = result.items.indices.filter { result.items[$0].fileID == item.fileID }
+                if indices.count == 1, let i = indices.first {
+                    if item.imageQuality > result.items[i].imageQuality {
+                        result.items[i].imageURL = item.imageURL
+                        result.items[i].imageQuality = item.imageQuality
+                        result.items[i].imageUserAgent = item.imageUserAgent ?? note.requestUserAgent
+                    }
+                    if item.liveURL != nil,
+                       result.items[i].liveURL == nil || item.liveScore > result.items[i].liveScore {
+                        result.items[i].liveURL = item.liveURL
+                        result.items[i].liveURLs = item.liveURLs
+                        result.items[i].liveScore = item.liveScore
+                        result.items[i].liveUserAgent = item.liveUserAgent ?? note.requestUserAgent
+                    }
+                } else if indices.isEmpty, !result.items.contains(where: { $0.index == item.index }) {
+                    var extra = item
+                    extra.imageUserAgent = item.imageUserAgent ?? note.requestUserAgent
+                    extra.liveUserAgent = item.liveUserAgent ?? note.requestUserAgent
+                    result.items.append(extra)
+                }
+            }
+        }
+        result.items.sort { $0.index < $1.index }
+        return result
+    }
+
     private static func noteScore(_ note: NoteInfo) -> Int64 {
         if note.videoURL != nil {
             var score = note.videoScore
@@ -454,7 +485,7 @@ enum XHSNativeDownloader {
             }
             return score
         }
-        return Int64(note.items.count) * 1_000_000_000
+        return note.items.reduce(Int64(0)) { $0 + $1.liveScore }
     }
 
     private static func streamCandidates(from stream: [String: Any], inheritedMeta: [String: Any] = [:]) -> [StreamCandidate] {
@@ -656,9 +687,6 @@ enum XHSNativeDownloader {
         var hint = VideoHDRHint()
         hint.sourceMarkedHDR = hdrType > 0 || JSONValueUtilities.boolValue(meta["hdr"]) || JSONValueUtilities.boolValue(meta["isHDR"]) || JSONValueUtilities.boolValue(meta["is_hdr"]) || text.contains("hdr") || text.contains("hlg") || text.contains("dolby") || text.contains("dovi")
         hint.streamMarkedHDR = hdrType > 1 || text.contains("hdr10") || text.contains("10bit") || text.contains("10-bit") || text.contains("main10") || text.contains("dvhe")
-        hint.transferFunction = text.contains("hlg") ? "ITU_R_2100_HLG" : (text.contains("pq") || text.contains("hdr10") || text.contains("dolby") ? "SMPTE_ST_2084_PQ" : nil)
-        hint.colorPrimaries = hint.sourceMarkedHDR ? "ITU_R_2020" : nil
-        hint.yCbCrMatrix = hint.sourceMarkedHDR ? "ITU_R_2020" : nil
         return hint.sourceMarkedHDR ? hint : nil
     }
 
@@ -748,8 +776,7 @@ enum XHSNativeDownloader {
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
         request.setValue("https://www.xiaohongshu.com/explore", forHTTPHeaderField: "Referer")
 
-        if DownloaderNetworkPolicy.isXHSShortLinkHost(requestURL.host)
-            || DownloaderHTTPCompatibility.shouldUseDirectly(for: request) {
+        if DownloaderNetworkPolicy.isXHSShortLinkHost(requestURL.host) {
             return try await DownloaderHTTPCompatibility.dataAsync(for: request, readsBody: readsBody)
         }
         return try await DownloaderHTTPCompatibility.requestData(
@@ -807,9 +834,6 @@ enum XHSNativeDownloader {
                         try? FileManager.default.removeItem(at: finalURL)
                         try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
                         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: finalURL.path)
-                        if task.stripsDescription, ["heic", "heif", "jpg", "jpeg", "png", "webp"].contains(finalURL.pathExtension.lowercased()) {
-                            try? stripImageDescription(finalURL)
-                        }
                         if let videoHDRHint = task.videoHDRHint, finalURL.pathExtension.lowercased() == "mp4" {
                             try? await remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
                         }
@@ -852,7 +876,7 @@ enum XHSNativeDownloader {
     }
 
     private static func shouldUseDirectly(_ req: URLRequest) -> Bool {
-        DownloaderNetworkPolicy.isXHSShortLinkHost(req.url?.host) || DownloaderHTTPCompatibility.shouldUseDirectly(for: req)
+        DownloaderNetworkPolicy.isXHSShortLinkHost(req.url?.host)
     }
 
     private static func downloadOnceAsync(
@@ -893,33 +917,6 @@ enum XHSNativeDownloader {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.scheme = "https"
         return components?.url ?? url
-    }
-
-    private static func stripImageDescription(_ url: URL) throws {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
-        let type = CGImageSourceGetType(source) ?? UTType.heic.identifier as CFString
-        let count = CGImageSourceGetCount(source)
-        let temporaryURL = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).tmp")
-        defer { try? FileManager.default.removeItem(at: temporaryURL) }
-        guard let destination = CGImageDestinationCreateWithURL(temporaryURL as CFURL, type, count, nil) else { return }
-        for index in 0..<count {
-            guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
-            let properties = JSONValueUtilities.mutableDictionary(CGImageSourceCopyPropertiesAtIndex(source, index, nil))
-            let tiff = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyTIFFDictionary])
-            tiff.removeObject(forKey: kCGImagePropertyTIFFImageDescription)
-            tiff.removeObject(forKey: "ImageDescription")
-            properties[kCGImagePropertyTIFFDictionary] = tiff
-            let iptc = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyIPTCDictionary])
-            iptc.removeObject(forKey: kCGImagePropertyIPTCCaptionAbstract)
-            iptc.removeObject(forKey: "Caption/Abstract")
-            properties[kCGImagePropertyIPTCDictionary] = iptc
-            let exif = JSONValueUtilities.mutableDictionary(properties[kCGImagePropertyExifDictionary])
-            exif.removeObject(forKey: kCGImagePropertyExifUserComment)
-            properties[kCGImagePropertyExifDictionary] = exif
-            CGImageDestinationAddImage(destination, image, properties)
-        }
-        guard CGImageDestinationFinalize(destination) else { return }
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: temporaryURL)
     }
 
     private static func extractImageToken(_ value: String) -> String {

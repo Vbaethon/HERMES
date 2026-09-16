@@ -75,7 +75,6 @@ enum DewuNativeDownloader {
             let recentDatabaseLimit = 3
             let databases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
             var didFetchAPIDetail = false
-            var didConfirmNoAPIVideo = false
             if !databases.isEmpty {
                 if let progress { await progress(0.18) }
                 let apiResult = await fetchAPIMediaResult(contentID: pageInfo.contentID, databases: databases)
@@ -98,18 +97,7 @@ enum DewuNativeDownloader {
             }
 
             if mediaPairs.isEmpty || videoURLs.isEmpty {
-                let shouldSearchPlaybackLogs = DewuPlaybackLogVideoExtractor.shouldSearchPlaybackLogs(
-                    didFetchAPIDetail: didFetchAPIDetail,
-                    hasAPIMediaPairs: !mediaPairs.isEmpty,
-                    hasVideoURLs: !videoURLs.isEmpty,
-                    isVideoPost: pageInfo.isVideoPost,
-                    hasImageSources: !imageSources.isEmpty,
-                    hasShareVideoURLs: !shareVideoURLs.isEmpty
-                )
-                if didFetchAPIDetail, !shouldSearchPlaybackLogs, !pageInfo.isVideoPost, !imageSources.isEmpty, shareVideoURLs.isEmpty {
-                    didConfirmNoAPIVideo = true
-                    lines.append("App 接口已确认当前帖子没有 Live Photo 视频。")
-                } else if roots.isEmpty {
+                if roots.isEmpty {
                     lines.append("未找到得物 App 容器，使用分享页公开媒体兜底。")
                 } else {
                     lines.append(didFetchAPIDetail ? "App 接口未返回 Live Photo 视频，继续读取播放日志..." : "本机没有当前帖子的详情接口记录，正在后台打开得物 App 生成签名请求...")
@@ -127,15 +115,22 @@ enum DewuNativeDownloader {
                         videoSource = "App 接口 JSON"
                     }
 
-                if videoURLs.isEmpty {
-                    if let progress { await progress(0.45) }
-                    let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
-                    videoURLs = bestVideoVariants(await waitForMediaVideoURLs(contentID: pageInfo.contentID, databases: recentDatabases, timeout: min(max(waitSeconds, 1), 8)))
-                    if let progress { await progress(0.50) }
-                    if videoURLs.isEmpty {
-                        let allDatabases = DewuLogStore.logDatabases(roots: roots)
-                        videoURLs = bestVideoVariants(extractMediaVideoURLsFromLogs(contentID: pageInfo.contentID, databases: allDatabases))
-                    }
+                    if DewuPlaybackLogVideoExtractor.shouldSearchPlaybackLogs(
+                        didFetchAPIDetail: didFetchAPIDetail,
+                        hasAPIMediaPairs: !mediaPairs.isEmpty,
+                        hasVideoURLs: !videoURLs.isEmpty,
+                        isVideoPost: pageInfo.isVideoPost,
+                        hasImageSources: !imageSources.isEmpty,
+                        hasShareVideoURLs: !shareVideoURLs.isEmpty
+                    ) {
+                        if let progress { await progress(0.45) }
+                        let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
+                        videoURLs = bestVideoVariants(await waitForMediaVideoURLs(contentID: pageInfo.contentID, databases: recentDatabases, timeout: min(max(waitSeconds, 1), 8)))
+                        if let progress { await progress(0.50) }
+                        if videoURLs.isEmpty {
+                            let allDatabases = DewuLogStore.logDatabases(roots: roots)
+                            videoURLs = bestVideoVariants(extractMediaVideoURLsFromLogs(contentID: pageInfo.contentID, databases: allDatabases))
+                        }
                         videoSource = "播放日志"
                     }
                 }
@@ -176,9 +171,7 @@ enum DewuNativeDownloader {
             }
 
             if videoURLs.isEmpty {
-                if !didConfirmNoAPIVideo {
-                    lines.append("未在 App 日志中发现当前帖子的视频源。")
-                }
+                lines.append("未在 App 日志中发现当前帖子的视频源。")
                 if let staticImageDownloadError,
                    DewuDownloadRecoveryPolicy.shouldFailAfterStaticImageFailure(downloadedVideoCount: 0) {
                     throw staticImageDownloadError
@@ -581,7 +574,7 @@ enum DewuNativeDownloader {
 
     private static func shouldUseDirectly(_ req: URLRequest) -> Bool {
         if let host = req.url?.host?.lowercased(), directHosts.contains(host) { return true }
-        return DownloaderHTTPCompatibility.shouldUseDirectly(for: req)
+        return false
     }
 
     private static func requestAsync(_ url: URL, headers: [String: String] = [:]) async throws -> Data {
