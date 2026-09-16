@@ -26,7 +26,7 @@ XCODE_DEVELOPER_DIR="$(resolve_developer_dir)"
 XCODEBUILD="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
 
 usage() {
-  echo "usage: $0 [--bump patch|minor|major | --version X.Y.ZZ | --no-version-bump] [--no-open]" >&2
+  echo "usage: $0 [--bump patch|minor|major | --version X.Y.Z | --no-version-bump] [--no-open]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -58,18 +58,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 bump_build_number() {
-  local current_build build_width next_build next_build_padded current_version next_version
+  local current_build next_build current_version next_version
   if [[ ! -f "$PROJECT_FILE" ]]; then
     echo "missing Xcode project file: $PROJECT_FILE" >&2
     exit 1
   fi
   current_version="$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);/\1/p' "$PROJECT_FILE" | head -n 1)"
   if [[ -n "$EXPLICIT_VERSION" ]]; then
-    if [[ ! "$EXPLICIT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]{2,}$ ]]; then
-      echo "Version must use X.Y.ZZ format" >&2
-      exit 1
-    fi
-    next_version="$EXPLICIT_VERSION"
+    next_version="$(normalize_marketing_version "$EXPLICIT_VERSION")"
   else
     next_version="$(next_marketing_version "$current_version" "$VERSION_SCOPE")"
   fi
@@ -78,10 +74,8 @@ bump_build_number() {
   if [[ ! "$current_build" =~ ^[0-9]+$ ]]; then
     current_build="0"
   fi
-  build_width=${#current_build}
   next_build=$((10#$current_build + 1))
-  next_build_padded="$(printf "%0${build_width}d" "$next_build")"
-  perl -0pi -e "s/CURRENT_PROJECT_VERSION = \\d+;/CURRENT_PROJECT_VERSION = $next_build_padded;/g" "$PROJECT_FILE"
+  perl -0pi -e "s/CURRENT_PROJECT_VERSION = \\d+;/CURRENT_PROJECT_VERSION = $next_build;/g" "$PROJECT_FILE"
 }
 
 cleanup() {
