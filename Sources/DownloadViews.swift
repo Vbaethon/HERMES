@@ -41,10 +41,10 @@ private enum DownloadInputMetrics {
     static let verticalPadding: CGFloat = 9
     static let minimumVisibleLineCount = 3
     static let maxVisibleLineCount = 8
-    static let progressWidthMultiplier: CGFloat = 0.84
-    static let progressMaxWidth: CGFloat = 560
-    static let progressBottomSpacing: CGFloat = 6
-    static let progressStackHeight: CGFloat = 68
+    static let progressWidthMultiplier: CGFloat = 0.90
+    static let progressMaxWidth: CGFloat = 620
+    static let progressBottomSpacing: CGFloat = 12
+    static let progressStackHeight: CGFloat = 84
 
     static func rawLineCount(for text: String) -> Int {
         max(text.split(separator: "\n", omittingEmptySubsequences: false).count, 1)
@@ -67,7 +67,7 @@ private enum DownloadInputMetrics {
     }
 
     static func downloadCollectionBottomInset(for rawLineCount: Int) -> CGFloat {
-        barHeight(for: rawLineCount) + bottomPadding * 2
+        barHeight(for: rawLineCount) + bottomPadding + progressBottomSpacing + progressStackHeight + 12
     }
 }
 
@@ -499,12 +499,107 @@ final class DownloadBarView: NSView {
 
 // MARK: - Download Progress Bar Views
 
+/// Native, soft radial color fields. Movement is decorative; width belongs to real progress.
+@MainActor
+private final class DownloadFluidColorView: NSView {
+    private let fields = (0..<3).map { _ in CAGradientLayer() }
+    var isFlowing = false { didSet { updateMotion() } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        for field in fields {
+            field.type = .radial
+            field.locations = [0, 0.48, 1]
+            layer?.addSublayer(field)
+        }
+        updateColors()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshMotion),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshMotion),
+            name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for field in fields { field.frame = bounds }
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateMotion()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+
+    private func updateColors() {
+        // HERMES icon colors sit behind the native glass and are sampled by its material.
+        // Keep the foreground content transparent so it cannot cover the glass surface.
+        let colors: [NSColor] = [
+            NSColor(srgbRed: 0.00, green: 0.96, blue: 0.22, alpha: 1),
+            NSColor(srgbRed: 0.10, green: 0.88, blue: 1.00, alpha: 1),
+            NSColor(srgbRed: 0.00, green: 0.82, blue: 0.48, alpha: 1)
+        ]
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.backgroundColor = NSColor(srgbRed: 0.00, green: 0.82, blue: 0.48, alpha: 0.35).cgColor
+        for (index, field) in fields.enumerated() {
+            field.colors = [colors[index].withAlphaComponent(0.92).cgColor,
+                            colors[index].withAlphaComponent(0.52).cgColor,
+                            colors[index].withAlphaComponent(0).cgColor]
+            field.startPoint = CGPoint(x: [0.12, 0.52, 0.88][index], y: [0.2, 0.85, 0.25][index])
+            field.endPoint = CGPoint(x: [0.65, 1.08, 1.38][index], y: [1.5, 1.8, 1.5][index])
+        }
+        CATransaction.commit()
+    }
+
+    @objc private func refreshMotion() { updateMotion() }
+
+    private func updateMotion() {
+        let animate = isFlowing && window?.occlusionState.contains(.visible) == true
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        for (index, field) in fields.enumerated() {
+            if !animate {
+                field.removeAllAnimations()
+                continue
+            }
+            guard field.animation(forKey: "fluid") == nil else { continue }
+            let start = field.startPoint
+            let end = field.endPoint
+            let dx: CGFloat = index == 1 ? -0.24 : 0.23
+            let dy: CGFloat = index == 1 ? -0.42 : 0.40
+            let animations = [("startPoint", start), ("endPoint", end)].map { key, point in
+                let animation = CABasicAnimation(keyPath: key)
+                animation.fromValue = NSValue(point: point)
+                animation.toValue = NSValue(point: CGPoint(x: point.x + dx, y: point.y + dy))
+                return animation
+            }
+            let group = CAAnimationGroup()
+            group.animations = animations
+            group.duration = [5.5, 7.0, 6.2][index]
+            group.autoreverses = true
+            group.repeatCount = .infinity
+            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            field.add(group, forKey: "fluid")
+        }
+    }
+}
+
 @MainActor
 final class DownloadTaskProgressBarView: NSView {
-    private let glassSurface: NSView
-    private let tintOverlay = NSView()
+    private let glassSurface: NSGlassEffectView
     private let fillClipView = NSView()
-    private let fillView = NSView()
+    private let fillView = DownloadFluidColorView()
     private let fillEdgeView = NSView()
     private let textLabel = NSTextField(labelWithString: "")
     private let countField = NSTextField(labelWithString: "")
@@ -536,7 +631,7 @@ final class DownloadTaskProgressBarView: NSView {
     override func layout() {
         super.layout()
         updateGlassRadius()
-        fillWidthConstraint?.constant = max(bounds.width * currentProgress, currentProgress > 0 ? 10 : 0)
+        fillWidthConstraint?.constant = bounds.width * currentProgress
     }
 
     func update(with item: DownloadProgressItem, stackIndex: Int, defersPrimaryText: Bool = false) {
@@ -550,7 +645,8 @@ final class DownloadTaskProgressBarView: NSView {
         isRemovingFromStack = false
         let isPrimary = stackIndex == 0
         let isSameItem = representedID == item.id
-        let targetFillAlpha = (item.isActive ? 0.82 : 0.30) * [1.0, 0.55, 0.30][min(stackIndex, 2)]
+        fillView.isFlowing = item.isActive && isPrimary
+        let targetFillAlpha = (item.isActive ? 0.82 : 0.42) * [1.0, 0.70, 0.45][min(stackIndex, 2)]
         if isPrimary {
             if defersPrimaryText {
                 primaryTextDeferred = true
@@ -570,9 +666,8 @@ final class DownloadTaskProgressBarView: NSView {
                 textLabel.animator().alphaValue = self.primaryTextVisible ? 1 : 0
             }
             countField.animator().alphaValue = self.primaryTextVisible ? 1 : 0
-            tintOverlay.animator().alphaValue = isPrimary ? 0.12 : 0
             fillView.animator().alphaValue = targetFillAlpha
-            fillEdgeView.animator().alphaValue = targetFillAlpha
+            fillEdgeView.animator().alphaValue = item.progress > 0 && item.progress < 1 ? targetFillAlpha : 0
         }
 
         if isPrimary {
@@ -585,7 +680,7 @@ final class DownloadTaskProgressBarView: NSView {
             countField.stringValue = item.countText
         }
 
-        let nextProgress = item.isActive ? max(item.progress, 0.04) : item.progress
+        let nextProgress = item.progress
         animateProgress(to: nextProgress, animated: isSameItem)
     }
 
@@ -629,7 +724,7 @@ final class DownloadTaskProgressBarView: NSView {
     private func resetTextAnimation(alpha: CGFloat? = nil) {
         isAnimating = false
         queuedText = nil
-        for view in subviews where view.tag == 9999 {
+        for view in glassSurface.contentView?.subviews ?? [] where view.tag == 9999 {
             view.removeFromSuperview()
         }
         textLabel.alphaValue = alpha ?? (primaryTextVisible ? 1 : 0)
@@ -638,9 +733,9 @@ final class DownloadTaskProgressBarView: NSView {
     private func animateText(from oldText: String, to newText: String) {
         isAnimating = true
         // Remove any stale overlay labels (tag 9999)
-        for v in subviews where v.tag == 9999 { v.removeFromSuperview() }
+        for v in glassSurface.contentView?.subviews ?? [] where v.tag == 9999 { v.removeFromSuperview() }
 
-        let hostFrame = convert(textLabel.bounds, from: textLabel)
+        let hostFrame = textLabel.convert(textLabel.bounds, to: glassSurface.contentView)
         let outgoing = makeOverlay(oldText, frame: hostFrame)
         let incoming = makeOverlay(newText, frame: hostFrame.offsetBy(dx: 0, dy: -hostFrame.height))
         incoming.alphaValue = 0
@@ -675,13 +770,13 @@ final class DownloadTaskProgressBarView: NSView {
     private func makeOverlay(_ text: String, frame: NSRect) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = textLabel.font
-        label.textColor = .secondaryLabelColor
+        label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         label.wantsLayer = true
         label.frame = frame
         label.tag = 9999
-        addSubview(label)
+        glassSurface.contentView?.addSubview(label)
         return label
     }
 
@@ -692,18 +787,11 @@ final class DownloadTaskProgressBarView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
         glassSurface.translatesAutoresizingMaskIntoConstraints = false
-        tintOverlay.translatesAutoresizingMaskIntoConstraints = false
         fillClipView.translatesAutoresizingMaskIntoConstraints = false
         fillView.translatesAutoresizingMaskIntoConstraints = false
         fillEdgeView.translatesAutoresizingMaskIntoConstraints = false
         textLabel.translatesAutoresizingMaskIntoConstraints = false
         countField.translatesAutoresizingMaskIntoConstraints = false
-
-        tintOverlay.wantsLayer = true
-        tintOverlay.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        tintOverlay.layer?.cornerRadius = 14
-        tintOverlay.layer?.masksToBounds = true
-        tintOverlay.alphaValue = 0
 
         fillClipView.wantsLayer = true
         fillClipView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -711,7 +799,7 @@ final class DownloadTaskProgressBarView: NSView {
         fillClipView.layer?.masksToBounds = true
 
         fillView.wantsLayer = true
-        fillView.layer?.backgroundColor = NSColor.white.cgColor
+        // The fluid view owns its adaptive color fields.
         fillView.layer?.cornerRadius = 0
         fillView.layer?.masksToBounds = false
         fillView.layer?.compositingFilter = nil
@@ -721,23 +809,24 @@ final class DownloadTaskProgressBarView: NSView {
         fillEdgeView.layer?.compositingFilter = nil
         fillEdgeView.alphaValue = 0
 
-        textLabel.font = .systemFont(ofSize: 12)
-        textLabel.textColor = .secondaryLabelColor
+        textLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        textLabel.textColor = .labelColor
         textLabel.lineBreakMode = .byTruncatingTail
         textLabel.maximumNumberOfLines = 1
 
-        countField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        countField.textColor = .secondaryLabelColor
+        countField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        countField.textColor = .labelColor
         countField.alignment = .right
         countField.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         addSubview(fillClipView)
+        addSubview(glassSurface)
+        let glassContent = NSView()
+        glassSurface.contentView = glassContent
         fillClipView.addSubview(fillView)
         fillClipView.addSubview(fillEdgeView)
-        addSubview(glassSurface)
-        addSubview(tintOverlay)
-        addSubview(textLabel)
-        addSubview(countField)
+        glassContent.addSubview(textLabel)
+        glassContent.addSubview(countField)
 
         let fillWidthConstraint = fillView.widthAnchor.constraint(equalToConstant: 0)
         self.fillWidthConstraint = fillWidthConstraint
@@ -746,11 +835,6 @@ final class DownloadTaskProgressBarView: NSView {
             glassSurface.trailingAnchor.constraint(equalTo: trailingAnchor),
             glassSurface.topAnchor.constraint(equalTo: topAnchor),
             glassSurface.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            tintOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
-            tintOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tintOverlay.topAnchor.constraint(equalTo: topAnchor),
-            tintOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             fillClipView.leadingAnchor.constraint(equalTo: leadingAnchor),
             fillClipView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -767,44 +851,34 @@ final class DownloadTaskProgressBarView: NSView {
             fillEdgeView.bottomAnchor.constraint(equalTo: fillClipView.bottomAnchor),
             fillEdgeView.widthAnchor.constraint(equalToConstant: 1.5),
 
-            textLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            textLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             textLabel.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -8),
             textLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            countField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            countField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             countField.centerYAnchor.constraint(equalTo: centerYAnchor),
             countField.widthAnchor.constraint(equalToConstant: 52)
         ])
     }
 
-    private static func makeGlassSurface() -> NSView {
-        // Progress is status content, so reserve Liquid Glass for interactive controls.
-        let visualEffectView = NSVisualEffectView()
-        visualEffectView.material = .contentBackground
-        visualEffectView.blendingMode = .withinWindow
-        visualEffectView.state = .active
-        visualEffectView.wantsLayer = true
-        visualEffectView.layer?.cornerRadius = 14
-        visualEffectView.layer?.masksToBounds = true
-        return visualEffectView
+    private static func makeGlassSurface() -> NSGlassEffectView {
+        let glass = NSGlassEffectView()
+        glass.style = .regular
+        glass.cornerRadius = 20
+        return glass
     }
 
     private func updateGlassRadius() {
-        let radius = min(bounds.height / 2, 14)
-        if glassSurface.responds(to: Selector(("setCornerRadius:"))) {
-            glassSurface.setValue(radius, forKey: "cornerRadius")
-        }
-        glassSurface.layer?.cornerRadius = radius
-        tintOverlay.layer?.cornerRadius = radius
+        let radius = bounds.height / 2
+        glassSurface.cornerRadius = radius
         fillClipView.layer?.cornerRadius = radius
-        fillView.layer?.cornerRadius = 0
     }
 
     private func animateProgress(to progress: CGFloat, animated: Bool) {
         let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let clampedProgress = min(max(progress, 0), 1)
         currentProgress = clampedProgress
-        let width = max(bounds.width * clampedProgress, clampedProgress > 0 ? 10 : 0)
+        let width = bounds.width * clampedProgress
         guard animated else {
             displayedProgress = clampedProgress
             fillWidthConstraint?.constant = width
@@ -828,8 +902,8 @@ final class DownloadProgressStackView: NSView {
     private var barViewsByID: [UUID: DownloadTaskProgressBarView] = [:]
     private var isAnimatingStackLayout = false
     private let maximumVisibleBars = 3
-    private let barHeight: CGFloat = 28
-    private let slotYOffset: CGFloat = 10
+    private let barHeight: CGFloat = 40
+    private let slotYOffset: CGFloat = 12
     private let slotWidthStep: CGFloat = 52
     private let verticalTransitionOffset: CGFloat = 16
     private let slotAlphas: [CGFloat] = [1.0, 0.66, 0.42]
