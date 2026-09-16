@@ -67,10 +67,15 @@ import Foundation
         let sidebar = FinderStyleSidebarController(sections: SidebarSection.allCases, selection: .queue, count: { _ in nil }, onSelect: { selected = $0 })
         let table = descendants(sidebar.view).compactMap { $0 as? NSTableView }.first!
         let sidebarWindow = NSWindow(contentViewController: sidebar)
+        sidebarWindow.setContentSize(NSSize(width: 220, height: 300))
         expect(sidebarWindow.makeFirstResponder(table), "sidebar must accept keyboard focus")
         try await Task.sleep(for: .milliseconds(100))
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         expect(selected == .downloads, "native selection must switch page")
+        sidebar.view.layoutSubtreeIfNeeded()
+        let selectedRow = table.rowView(atRow: 1, makeIfNecessary: true)!
+        selectedRow.isEmphasized = true
+        expect(selectedRow.isSelected && !selectedRow.isEmphasized, "focused navigation selection must retain the native neutral appearance")
         let field = NSTextField()
         sidebar.view.addSubview(field)
         expect(sidebarWindow.makeFirstResponder(field), "focus must leave sidebar")

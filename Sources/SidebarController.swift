@@ -121,6 +121,10 @@ final class FinderStyleSidebarController: NSViewController {
             controller?.sections.count ?? 0
         }
 
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            FinderSidebarRowView()
+        }
+
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let controller, controller.sections.indices.contains(row) else { return nil }
 
@@ -208,6 +212,15 @@ private final class NotificationObserver: @unchecked Sendable {
 
 private final class FinderSidebarTableView: NSTableView {
 
+}
+
+private final class FinderSidebarRowView: NSTableRowView {
+    // Sidebar selection identifies the current destination, even with keyboard focus.
+    // Keep AppKit's neutral selection rendering without disabling first-responder support.
+    override var isEmphasized: Bool {
+        get { false }
+        set { super.isEmphasized = false }
+    }
 }
 
 private final class FinderSidebarCellView: NSTableCellView {
