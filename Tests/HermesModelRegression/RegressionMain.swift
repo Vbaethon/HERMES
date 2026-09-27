@@ -206,6 +206,65 @@ import Foundation
         expect(filterModel.visibleDownloadItems.isEmpty && filterModel.downloadCompleted.count == 1, "refresh invalidates stale association without deleting history")
         pass("filter reuses snapshot; refresh revalidates changed files and retains history")
 
+        let missingDownload = try model("missing-download-history")
+        let missingSource = try pair(missingDownload.downloadOutputFolder, "source")
+        let missingOutput = try pair(missingDownload.outputFolder, "export")
+        let historicalDownload = record(missingOutput, source: missingSource)
+        missingDownload.downloadCompleted = [historicalDownload]
+        for url in [missingSource.imageURL, missingSource.videoURL, missingOutput.imageURL, missingOutput.videoURL] { try fm.removeItem(at: url) }
+        missingDownload.downloadFilter = .composed
+        expect(missingDownload.visibleDownloadItems.isEmpty, "missing downloads must not create blank history cards")
+        pass("missing download sources do not appear as blank cards")
+
+        let ordering = try model("post-order")
+        let older1 = try pair(ordering.downloadOutputFolder, "z-first")
+        let older2 = try pair(ordering.downloadOutputFolder, "a-second")
+        let newer1 = try pair(ordering.downloadOutputFolder, "m-newest")
+        let orderedSources = [newer1, older1, older2]
+        let orders = [MediaDisplayOrder(postID: "newer", downloadedAt: 200, index: 1),
+                      MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 1),
+                      MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 2)]
+        for (source, order) in zip(orderedSources, orders) {
+            order.write(to: source.imageURL)
+            order.write(to: source.videoURL)
+            expect(MediaDisplayOrder.read(from: source.imageURL) == order, "download order metadata round trips")
+        }
+        ordering.refreshDownloads()
+        try await waitUntil { ordering.visibleDownloadItems.count == 3 }
+        expect(ordering.visibleDownloadItems.map(\.imageURL) == orderedSources.map(\.imageURL), "newest post first and opaque names retain original photo index")
+        pass("downloads sort by post download time then original item index")
+        var exports: [String: PairItem] = [:]
+        for source in orderedSources { exports[source.id] = try pair(ordering.outputFolder, source.imageURL.deletingPathExtension().lastPathComponent) }
+        let exportsByID = exports
+        ordering.compositionRunner = { source, _ in
+            let target = exportsByID[source.id]!
+            let result = ["imagePath": target.imageURL.path, "moviePath": target.videoURL.path]
+            return .success("HERMES_RESULT:" + String(decoding: try! JSONEncoder().encode(result), as: UTF8.self))
+        }
+        // Deliberately compose in the opposite order to downloading.
+        for source in orderedSources.reversed() {
+            ordering.selectedDownloadItemIDs = ["pair:" + source.id]
+            await ordering.processDownloadPairs()
+        }
+        ordering.downloadFilter = .composed
+        expect(ordering.visibleDownloadItems.map(\.imageURL) == orderedSources.map(\.imageURL), "composed filter preserves download order")
+        expect(ordering.completed.map(\.sourceImagePath) == orderedSources.map { Optional($0.imageURL.path) }, "completed page ignores composition order")
+        let reloadedRecords = try JSONDecoder().decode([CompletedItem].self, from: UserDefaults.standard.data(forKey: "CompletedRecords.v1")!)
+        expect(reloadedRecords.map(\.displayOrder) == orders.map(Optional.init), "original order survives persisted records")
+        pass("opposite composition order and persisted records retain download order")
+        // Remove sources and history to force a real disk scan of the exports alone.
+        for source in orderedSources { try fm.removeItem(at: source.imageURL); try fm.removeItem(at: source.videoURL) }
+        ordering.completed = []
+        ordering.refreshCompleted()
+        try await waitUntil { ordering.completed.count == 3 }
+        expect(ordering.completed.map(\.displayOrder) == orders.map(Optional.init), "export metadata survives source deletion and record recreation")
+        try fm.removeItem(at: ordering.completed[0].imageURL)
+        try fm.removeItem(at: ordering.completed[0].movieURL!)
+        ordering.refreshCompleted()
+        try await waitUntil { ordering.completed.count == 2 }
+        expect(ordering.completed.map { $0.displayOrder?.index } == [1, 2], "deleted outputs disappear after scan without disturbing surviving post order")
+        pass("rescanning exports retains original order and removes missing outputs")
+
         let failures = try model("failure-notice")
         failures.recordDownloadFailures(["第一条失败"])
         failures.recordDownloadFailures([])
@@ -412,12 +471,17 @@ import Foundation
         try await waitUntil { history.completed.first?.importedToPhotos == false }
         expect(history.operationNotices[.completed] == nil, "recovery clears the error")
         pass("replaced media does not inherit a previous imported flag")
+        history.completedScanner = { _ in throw CocoaError(.fileReadNoPermission) }
+        history.refreshCompleted()
+        try await waitUntil { history.operationNotices[.completed] != nil }
+        history.completedScanner = realScanner
         try fm.removeItem(at: auditExported.imageURL)
         try fm.removeItem(at: auditExported.videoURL)
         history.refreshCompleted()
-        try await waitUntil { history.completed.isEmpty }
+        try await waitUntil { history.operationNotices[.completed] == nil }
+        expect(history.completed.isEmpty, "successful empty scan must remove absent files")
         expect(history.operationNotices[.completed] == nil, "successful empty scan clears unavailable notice")
-        pass("permission failure is preserved while successful empty scan is distinguished")
+        pass("successful empty scan removes missing files but permission failures preserve records")
 
         // Suspend the real refresh state machine, not a copy of its control flow.
         let switching = try model("audit-directory-switch")

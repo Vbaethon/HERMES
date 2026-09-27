@@ -1,4 +1,55 @@
 import Foundation
+import Darwin
+
+/// Presentation metadata only. It never participates in media pairing or validation.
+struct MediaDisplayOrder: Codable, Hashable, Sendable {
+    let postID: String
+    let downloadedAt: TimeInterval
+    let index: Int
+    private static let attribute = "com.codex.hermes.media-order.v1"
+
+    func write(to url: URL) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        // Unsupported filesystems may omit this optional presentation metadata.
+        _ = data.withUnsafeBytes { bytes in
+            setxattr(url.path, Self.attribute, bytes.baseAddress, bytes.count, 0, 0)
+        }
+    }
+
+    static func read(from url: URL) -> Self? {
+        let size = getxattr(url.path, attribute, nil, 0, 0, 0)
+        guard size > 0, size <= 4096 else { return nil }
+        var data = Data(count: size)
+        let count = data.withUnsafeMutableBytes { getxattr(url.path, attribute, $0.baseAddress, size, 0, 0) }
+        guard count == size, let order = try? JSONDecoder().decode(Self.self, from: data),
+              !order.postID.isEmpty, order.index > 0, order.downloadedAt.isFinite else { return nil }
+        return order
+    }
+
+    static func legacy(for url: URL, downloadedAt: TimeInterval) -> Self {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let suffix = stem.range(of: #"_[0-9]{2,}$"#, options: .regularExpression)
+        let postStem = suffix.map { String(stem[..<$0.lowerBound]) } ?? stem
+        let index = suffix.flatMap { Int(stem[$0].dropFirst()) } ?? 1
+        return Self(postID: url.deletingLastPathComponent().standardizedFileURL.path + "/" + postStem,
+                    downloadedAt: downloadedAt, index: index)
+    }
+
+    static func sorted<T>(_ items: [T], order: (T) -> Self, name: (T) -> String) -> [T] {
+        let entries = items.map { (item: $0, order: order($0), name: name($0)) }
+        let dates = Dictionary(grouping: entries, by: { $0.order.postID })
+            .mapValues { $0.map { $0.order.downloadedAt }.max()! }
+        return entries.sorted { lhs, rhs in
+            if lhs.order.postID != rhs.order.postID {
+                let leftDate = dates[lhs.order.postID]!, rightDate = dates[rhs.order.postID]!
+                if leftDate != rightDate { return leftDate > rightDate }
+                return lhs.order.postID < rhs.order.postID
+            }
+            if lhs.order.index != rhs.order.index { return lhs.order.index < rhs.order.index }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }.map(\.item)
+    }
+}
 
 enum FileSystemUtilities {
     /// Returns the content modification date of a URL, or `.distantPast` on failure.

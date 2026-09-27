@@ -8,6 +8,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var mediaKind: ThumbnailMediaKind = .photo
     private var thumbnailTask: Task<Void, Never>?
     private var badgeTask: Task<Void, Never>?
+    private var unavailableMessage: String?
+    private var previewMessage: String?
     private var thumbnailView: ThumbnailItemView? { view as? ThumbnailItemView }
 
     deinit {
@@ -60,6 +62,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         failureLabel.isHidden = true
         rootView.addSubview(failureLabel)
         rootView.failureLabel = failureLabel
+        let placeholderLabel = NSTextField(labelWithString: "")
+        placeholderLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        placeholderLabel.textColor = .secondaryLabelColor
+        placeholderLabel.alignment = .center
+        placeholderLabel.lineBreakMode = .byTruncatingMiddle
+        placeholderLabel.isHidden = true
+        rootView.addSubview(placeholderLabel)
+        rootView.placeholderLabel = placeholderLabel
         rootView.onEffectiveAppearanceChanged = { [weak self] in
             self?.updateBorderAppearance(isSelected: self?.isSelected ?? false)
         }
@@ -74,9 +84,12 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask = nil
         representedURL = nil
         representedContentVersion = nil
+        unavailableMessage = nil
+        previewMessage = nil
         view.setAccessibilityLabel(nil)
         view.setAccessibilityValue(nil)
         thumbnailView?.failureLabel?.isHidden = true
+        thumbnailView?.placeholderLabel?.isHidden = true
         imageView?.image = nil
         imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
@@ -93,8 +106,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: selected)
     }
 
-    func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0) {
-        if representedURL == url, representedContentVersion == contentVersion {
+    func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0, unavailableMessage: String? = nil) {
+        if representedURL == url, representedContentVersion == contentVersion, self.unavailableMessage == unavailableMessage {
             thumbnailStatus = status
             self.mediaKind = mediaKind
             loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
@@ -113,6 +126,9 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailView?.setBadge(nil)
         representedURL = url
         representedContentVersion = contentVersion
+        self.unavailableMessage = unavailableMessage
+        previewMessage = nil
+        thumbnailView?.placeholderLabel?.isHidden = true
         thumbnailDurationCache.cache.removeObject(forKey: url.standardizedFileURL as NSURL)
         thumbnailStatus = status
         self.mediaKind = mediaKind
@@ -132,7 +148,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
-            let image = await SystemThumbnailProvider.shared.thumbnail(
+            let result = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,
                 pointSize: ThumbnailCollectionStyle.cellSide,
                 scale: displayScale
@@ -140,9 +156,26 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.representedURL == url, !Task.isCancelled else { return }
+                self.thumbnailTask = nil
+                self.previewMessage = result.unavailableMessage
                 let shouldFadeIn = self.imageView?.image == nil
-                self.showLoadedThumbnail(image, animated: shouldFadeIn)
+                self.showLoadedThumbnail(result.image ?? Self.unavailableThumbnail(), animated: shouldFadeIn)
+                self.thumbnailView?.placeholderLabel?.stringValue = url.lastPathComponent
+                self.thumbnailView?.placeholderLabel?.isHidden = result.image != nil
+                self.updateBorderAppearance(isSelected: self.isSelected)
             }
+        }
+    }
+
+    private static func unavailableThumbnail() -> NSImage {
+        let size = ThumbnailCollectionStyle.itemSize
+        return NSImage(size: size, flipped: false) { bounds in
+            NSColor.controlBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+            let symbol = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor]))
+            symbol?.draw(in: NSRect(x: (size.width - 44) / 2, y: 54, width: 44, height: 40))
+            return true
         }
     }
 
@@ -205,10 +238,12 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.group)
         view.setAccessibilityLabel(representedURL.map { "\($0.lastPathComponent)，\(kind)" })
-        view.setAccessibilityValue("\(status)，\(isSelected ? "已选择" : "未选择")")
-        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .running ? "正在合成…" : "合成失败"
+        let availability = unavailableMessage ?? previewMessage
+        view.setAccessibilityValue(([status, availability, isSelected ? "已选择" : "未选择"].compactMap { $0 }).joined(separator: "，"))
+        view.toolTip = representedURL.map { availability == nil ? $0.lastPathComponent : "\(availability!)\n\($0.path)" }
+        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .running ? "正在合成…" : (thumbnailStatus == .failed ? "合成失败" : availability ?? "")
         thumbnailView?.failureLabel?.textColor = .labelColor
-        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && thumbnailStatus != .running
+        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && thumbnailStatus != .running && availability == nil
         thumbnailView?.needsLayout = true
         if isSelected {
             thumbnailView?.setRingState(.selected)
@@ -324,6 +359,7 @@ final class ThumbnailItemView: NSView {
     weak var imageView: NSImageView?
     weak var badgeLabel: NSTextField?
     weak var failureLabel: NSTextField?
+    weak var placeholderLabel: NSTextField?
     weak var ringView: ThumbnailStateRingView?
     private var interactiveFrame: NSRect = .zero
     var onEffectiveAppearanceChanged: (() -> Void)?
@@ -387,8 +423,9 @@ final class ThumbnailItemView: NSView {
         if let failureLabel, !failureLabel.isHidden {
             let size = failureLabel.fittingSize
             failureLabel.frame = NSRect(x: baseFrame.minX + 4, y: baseFrame.maxY - size.height - 4,
-                                       width: size.width + 8, height: size.height)
+                                       width: min(size.width + 8, baseFrame.width - 8), height: size.height)
         }
+        placeholderLabel?.frame = NSRect(x: baseFrame.minX + 8, y: baseFrame.minY + 12, width: max(0, baseFrame.width - 16), height: 18)
         if let badgeLabel, !badgeLabel.isHidden {
             let labelSize = ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
             let origin = NSPoint(

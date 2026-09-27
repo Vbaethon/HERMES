@@ -149,6 +149,7 @@ final class ImporterModel: ObservableObject {
     private var needsAnotherDownloadRefresh = false
     private var downloadModifiedTimesByPath: [String: TimeInterval] = [:] { didSet { downloadPresentationIsDirty = true } }
     private var downloadPresentationIsDirty = true
+    private var downloadDisplayOrdersByPath: [String: MediaDisplayOrder] = [:]
     private var allDownloadItemsCache: [DownloadGridItem] = []
     private var completedDownloadPairIDsCache = Set<PairItem.ID>()
     private var pendingDownloadTasks: [DownloadQueueTask] = []
@@ -297,26 +298,10 @@ final class ImporterModel: ObservableObject {
                 mediaKind: .video
             )
         }
-        let unsortedItems = pairItems + photoItems + videoItems
-        let itemGroups = Dictionary(grouping: unsortedItems) {
-            Self.downloadPostGroupKey(for: $0.imageURL)
-        }
-        let groupModifiedTimes = itemGroups.mapValues { items in
-            items.map(\.modifiedTime).max() ?? .leastNonzeroMagnitude
-        }
-        let allItems = unsortedItems.sorted {
-            let lhsGroup = Self.downloadPostGroupKey(for: $0.imageURL)
-            let rhsGroup = Self.downloadPostGroupKey(for: $1.imageURL)
-            if lhsGroup != rhsGroup {
-                let lhsDate = groupModifiedTimes[lhsGroup] ?? .leastNonzeroMagnitude
-                let rhsDate = groupModifiedTimes[rhsGroup] ?? .leastNonzeroMagnitude
-                if lhsDate == rhsDate {
-                    return lhsGroup.localizedStandardCompare(rhsGroup) == .orderedAscending
-                }
-                return lhsDate > rhsDate
-            }
-            return $0.imageURL.lastPathComponent.localizedStandardCompare($1.imageURL.lastPathComponent) == .orderedAscending
-        }
+        let allItems = MediaDisplayOrder.sorted(pairItems + photoItems + videoItems, order: { item in
+            downloadDisplayOrdersByPath[item.imageURL.standardizedFileURL.path]
+                ?? .legacy(for: item.imageURL, downloadedAt: item.modifiedTime)
+        }, name: { $0.imageURL.path })
         allDownloadItemsCache = allItems
         completedDownloadPairIDsCache = completedIDs
         downloadPresentationIsDirty = false
@@ -709,6 +694,7 @@ final class ImporterModel: ObservableObject {
             completed = completed.map(record)
             downloadCompleted = downloadCompleted.map(record)
             downloadModifiedTimesByPath = Dictionary(downloadModifiedTimesByPath.map { (path($0.key), $0.value) }, uniquingKeysWith: { _, next in next })
+            downloadDisplayOrdersByPath = Dictionary(downloadDisplayOrdersByPath.map { (path($0.key), $0.value) }, uniquingKeysWith: { _, next in next })
             completedMutationVersion += 1
             outputFolder = destination
             Self.saveOutputFolderBookmark(for: destination)
@@ -1026,6 +1012,7 @@ final class ImporterModel: ObservableObject {
         downloadPhotos = scannedItems.photos
         downloadVideos = scannedItems.videos
         downloadModifiedTimesByPath = scannedItems.modifiedTimesByPath
+        downloadDisplayOrdersByPath = scannedItems.displayOrdersByPath
         // A scan describes what is currently available, not the lifetime of a record.
         // Retain legacy, temporarily missing and other-directory records; only validated
         // current source/output revisions contribute to the composed filter.
@@ -1212,6 +1199,10 @@ final class ImporterModel: ObservableObject {
                 item.sourceImagePath = pair.imageURL.standardizedFileURL.path
                 item.sourceVideoPath = pair.videoURL.standardizedFileURL.path
                 item.sourceRevision = originalRevision
+                item.displayOrder = MediaDisplayOrder.read(from: pair.imageURL)
+                    ?? .legacy(for: pair.imageURL, downloadedAt: originalRevision.image.modified)
+                item.displayOrder?.write(to: item.imageURL)
+                if let movie = item.movieURL { item.displayOrder?.write(to: movie) }
                 // Record the valid local result even if Photos import fails.
                 mergeCompletedItem(item)
                 if fromDownloads { mergeDownloadCompletedItem(item) }
@@ -1410,6 +1401,16 @@ final class ImporterModel: ObservableObject {
                     mergedItem.sourceImagePath = existingItem.sourceImagePath
                     mergedItem.sourceVideoPath = existingItem.sourceVideoPath
                     mergedItem.sourceRevision = existingItem.sourceRevision
+                    if mergedItem.displayOrder == nil {
+                        mergedItem.displayOrder = existingItem.displayOrder
+                        if let source = existingItem.sourceImagePath {
+                            let sourceURL = URL(fileURLWithPath: source)
+                            mergedItem.displayOrder = MediaDisplayOrder.read(from: sourceURL) ?? existingItem.displayOrder
+                                ?? .legacy(for: sourceURL, downloadedAt: existingItem.sourceRevision?.image.modified ?? existingItem.modifiedTime)
+                        }
+                    }
+                    mergedItem.displayOrder?.write(to: mergedItem.imageURL)
+                    if let movie = mergedItem.movieURL { mergedItem.displayOrder?.write(to: movie) }
                 }
                 return mergedItem
             })
@@ -1482,12 +1483,10 @@ final class ImporterModel: ObservableObject {
     }
 
     private nonisolated static func sortedCompletedItems(_ items: [CompletedItem]) -> [CompletedItem] {
-        items.sorted { lhs, rhs in
-            if lhs.modifiedTime == rhs.modifiedTime {
-                return lhs.imageURL.lastPathComponent.localizedStandardCompare(rhs.imageURL.lastPathComponent) == .orderedAscending
-            }
-            return lhs.modifiedTime > rhs.modifiedTime
-        }
+        MediaDisplayOrder.sorted(items, order: { item in
+            item.displayOrder ?? .legacy(for: item.sourceImagePath.map(URL.init(fileURLWithPath:)) ?? item.imageURL,
+                                         downloadedAt: item.sourceRevision?.image.modified ?? item.modifiedTime)
+        }, name: { $0.sourceImagePath ?? $0.imagePath })
     }
 
     private nonisolated static func completedItems(in folder: URL) async throws -> [CompletedItem] {
@@ -1522,7 +1521,8 @@ final class ImporterModel: ObservableObject {
                             imagePath: image.url.path,
                             moviePath: movieByStem[stem]?.path,
                             modifiedTime: image.date.timeIntervalSince1970,
-                            revision: revision
+                            revision: revision,
+                            displayOrder: MediaDisplayOrder.read(from: image.url)
                         )
                     }
                 )
@@ -1808,19 +1808,6 @@ final class ImporterModel: ObservableObject {
         }
     }
 
-    private nonisolated static func downloadPostGroupKey(for url: URL) -> String {
-        let itemURL = url.standardizedFileURL
-        let parentURL = itemURL.deletingLastPathComponent().standardizedFileURL
-        let parentPath = parentURL.path
-        let stem = normalizedDownloadPostStem(itemURL.deletingPathExtension().lastPathComponent)
-        return parentPath + "/" + stem
-    }
-
-    private nonisolated static func normalizedDownloadPostStem(_ stem: String) -> String {
-        let pattern = #"_[0-9]{2,}$"#
-        return stem.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
-    }
-
     private nonisolated static func downloadItems(in folder: URL, excluding excludedFolder: URL) async -> DownloadScanResult {
         await Task.detached(priority: .utility) { () -> DownloadScanResult in
             let fileManager = FileManager.default
@@ -1837,6 +1824,7 @@ final class ImporterModel: ObservableObject {
             var images: [URL] = []
             var videos: [URL] = []
             var modifiedTimesByPath: [String: TimeInterval] = [:]
+            var displayOrdersByPath: [String: MediaDisplayOrder] = [:]
             while let url = enumerator.nextObject() as? URL {
                 let standardizedURL = url.standardizedFileURL
                 if standardizedURL.path == excludedPath || standardizedURL.path.hasPrefix(excludedPath + "/") {
@@ -1848,6 +1836,9 @@ final class ImporterModel: ObservableObject {
                     continue
                 }
                 modifiedTimesByPath[standardizedURL.path] = (values.contentModificationDate ?? .distantPast).timeIntervalSince1970
+                if let order = MediaDisplayOrder.read(from: standardizedURL) {
+                    displayOrdersByPath[standardizedURL.path] = order
+                }
                 if FileSystemUtilities.isImage(standardizedURL) {
                     images.append(standardizedURL)
                 } else if FileSystemUtilities.isVideo(standardizedURL) {
@@ -1868,7 +1859,7 @@ final class ImporterModel: ObservableObject {
             let photos = sortedImages.filter { !usedImages.contains($0) }
             let unpairedVideos = sortedVideos.filter { !usedVideos.contains($0) }
 
-            return DownloadScanResult(pairs: pairs, photos: photos, videos: unpairedVideos, modifiedTimesByPath: modifiedTimesByPath)
+            return DownloadScanResult(pairs: pairs, photos: photos, videos: unpairedVideos, modifiedTimesByPath: modifiedTimesByPath, displayOrdersByPath: displayOrdersByPath)
         }.value
     }
 

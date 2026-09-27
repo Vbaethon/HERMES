@@ -78,7 +78,8 @@ enum DownloadCollectionView {
                 url: item.imageURL,
                 status: item.status,
                 mediaKind: item.mediaKind,
-                contentVersion: item.modifiedTime
+                contentVersion: item.modifiedTime,
+                unavailableMessage: item.unavailableMessage
             )
         }
 

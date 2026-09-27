@@ -79,7 +79,9 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
             stack.addArrangedSubview(label)
         }
         addLabel("H E R M E S", size: 22, weight: .semibold)
-        addLabel(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—", size: 12, secondary: true)
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        addLabel("\(version)（\(build)）", size: 12, secondary: true)
         addLabel("一个有趣的工具。", size: 14, weight: .semibold)
         addLabel("带着一点好奇，去发现它。", size: 13)
         addLabel("✦", size: 16, secondary: true)

@@ -5,10 +5,13 @@ import sys
 
 media = Path(sys.argv[1]).read_bytes()
 port = int(sys.argv[2]) if len(sys.argv) > 2 else 18761
+silent = Path(sys.argv[3]).read_bytes() if len(sys.argv) > 3 else None
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         data = media if self.path == '/good.mp4' else b'<html>verification required</html>'
+        if self.path == '/silent.mp4' and silent is not None:
+            data = silent
         self.send_response(200)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()

@@ -80,6 +80,44 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         videoMobile.requestUserAgent = X.mobileUserAgent
         videoMobile.videoScore = 1
         precondition(X.preferredNote([videoDesktop,videoMobile])!.requestUserAgent == X.desktopUserAgent)
+
+        // Client snapshots use a different schema and carry the AAC motion source.
+        // All images in the real response report index=0; bind only by unique fileid.
+        let noteID = "0123456789abcdef01234567"
+        let fallback = URL(string: "https://www.xiaohongshu.com/discovery/item/\(noteID)")!
+        var web = try xhsNote([1,2], mobile:true, identity:noteID)
+        func appImage(_ number: Int, audio: Bool = true) -> [String: Any] {
+            ["fileid":"image-\(number)", "index":0, "original":"https://sns-img.xhscdn.com/image-\(number)",
+             "live_photo":["media":["stream":["h265":[["master_url":"https://sns-video.xhscdn.com/client-\(number).mp4",
+                "backup_urls":["https://sns-bak.xhscdn.com/client-\(number).mp4"],
+                "width":720,"height":1280,"audio_channels":audio ? 2 : 0,"audio_bitrate":audio ? 60000 : 0]]]]]]
+        }
+        var appNote: [String: Any] = ["id":noteID,"type":"normal","images_list":[appImage(2),appImage(1)]]
+        let client = X.parseAppNote(appNote,expectedID:noteID,fallbackURL:fallback)!
+        let combined = X.preferredNote([web,client])!
+        precondition(combined.items[0].liveURL!.lastPathComponent == "client-1.mp4")
+        precondition(combined.items[1].liveURL!.lastPathComponent == "client-2.mp4")
+        precondition(combined.items.allSatisfy { $0.liveHasAudio && $0.audioURLs.count == 2 })
+        precondition(combined.items.map(\.imageURL) == web.items.map(\.imageURL))
+        precondition(combined.items[0].liveURLs.contains(web.items[0].liveURL!))
+        precondition(combined.usedAppCache)
+        precondition(X.parseAppNote(appNote,expectedID:"ffffffffffffffffffffffff",fallbackURL:fallback) == nil)
+        appNote["images_list"] = [appImage(1),appImage(1)]
+        precondition(X.parseAppNote(appNote,expectedID:noteID,fallbackURL:fallback) == nil)
+        appNote["images_list"] = [appImage(2)]
+        let sparseClient = X.parseAppNote(appNote,expectedID:noteID,fallbackURL:fallback)!
+        let sparseCombined = X.preferredNote([web,sparseClient])!
+        precondition(!sparseCombined.items[0].liveHasAudio && sparseCombined.items[1].liveHasAudio)
+        web.items[0].liveScore = Int64.max / 4
+        precondition(X.preferredNote([web,client])!.items[0].liveHasAudio)
+        let body = String(data: try JSONSerialization.data(withJSONObject:[["note_list":[appNote]]]),encoding:.utf8)!
+        let envelope = try JSONSerialization.data(withJSONObject:["noteId":"another-visible-note","note_detail_response":body])
+        precondition(XHSAppCache.notes(in:envelope,noteID:noteID).count == 1)
+        precondition(XHSAppCache.notes(in:envelope,noteID:"ffffffffffffffffffffffff").isEmpty)
+        precondition(XHSAppCache.notes(in:Data("{broken".utf8),noteID:noteID).isEmpty)
+        precondition(XHSAppCache.noteID(from:fallback) == noteID)
+        precondition(XHSAppCache.noteID(from:URL(string:"https://xhslink.cn/o/short")!) == nil)
+        precondition(!XHSAppCache.isNoteID("../../other"))
         let dewuPairs = [DewuNativeDownloader.APIMediaPair(imageURL: a, videoURL: b),
                          DewuNativeDownloader.APIMediaPair(imageURL: b, videoURL: a)]
         precondition(DewuNativeDownloader.pairedImageURL(for: a, in: dewuPairs) == b)
@@ -216,10 +254,13 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
             missingMotion.images[0].videoURL = nil
             missingMotion.images[0].alternateURLs = []
             let mergedMotion = D.mergeLivePhotoVideos(from:parsed,into:missingMotion)
-            let task = D.livePhotoDownloadTask(mergedMotion.images[0],destination:dir.appendingPathComponent("fixture-image-01.mp4"))!
+            let displayOrder = MediaDisplayOrder(postID: "fixture", downloadedAt: 100, index: 1)
+            var task = D.livePhotoDownloadTask(mergedMotion.images[0],destination:dir.appendingPathComponent("fixture-image-01.mp4"))!
+            task.displayOrder = displayOrder
             precondition(task.url == base.appendingPathComponent("bad.mp4"))
             let parsedOutcome = try await D.download(task,retries:0)
             precondition(parsedOutcome.usedFallback && parsedOutcome.fileURL.lastPathComponent == "fixture-image-01.mp4")
+            precondition(MediaDisplayOrder.read(from: parsedOutcome.fileURL) == displayOrder)
             precondition(mergedMotion.images[0].index == 1 && mergedMotion.images[1].videoURL == parsed.images[1].videoURL)
             let badDestination = dir.appendingPathComponent("rejected.mp4")
             do {
@@ -236,6 +277,40 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
                 .init(url:base.appendingPathComponent("good.mp4"),destination:dir.appendingPathComponent("two.mp4"))
             ],maxConcurrentDownloads:2)
             precondition(outcomes.count == 2 && outcomes.allSatisfy { !$0.usedFallback })
+            if CommandLine.arguments.count > 3 {
+                let silent = base.appendingPathComponent("silent.mp4")
+                let good = base.appendingPathComponent("good.mp4")
+                var audioItem = combined.items[0]
+                audioItem.liveURL = silent
+                audioItem.liveURLs = [silent, good]
+                audioItem.audioURLs = [silent, good]
+                let destination = dir.appendingPathComponent("xhs-audio.mp4")
+                var audioTask = X.livePhotoDownloadTask(audioItem, destination:destination)!
+                audioTask.displayOrder = displayOrder
+                let result = try await X.download(audioTask, retries:0)
+                precondition(result.isLivePhoto && result.hasAudio)
+                precondition(MediaDisplayOrder.read(from: destination) == displayOrder)
+                let expectedAudio = try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[1]))
+                let downloadedAudio = try Data(contentsOf:destination)
+                precondition(downloadedAudio == expectedAudio)
+                // A failed client source may fall back, but must report actual silence.
+                audioItem.liveURL = base.appendingPathComponent("bad.mp4")
+                audioItem.liveURLs = [audioItem.liveURL!,silent]
+                audioItem.audioURLs = [audioItem.liveURL!]
+                let fallbackTask = X.livePhotoDownloadTask(audioItem,destination:dir.appendingPathComponent("xhs-silent.mp4"))!
+                let silentResult = try await X.download(fallbackTask,retries:0)
+                precondition(silentResult.isLivePhoto && !silentResult.hasAudio)
+                // An advertised audio source alone must not publish a silent file.
+                audioItem.liveURL = silent; audioItem.liveURLs = [silent]; audioItem.audioURLs = [silent]
+                let rejected = dir.appendingPathComponent("xhs-rejected.mp4")
+                do {
+                    _ = try await X.download(X.livePhotoDownloadTask(audioItem,destination:rejected)!,retries:0)
+                    fatalError("advertised audio silently lost")
+                } catch { }
+                precondition(!FileManager.default.fileExists(atPath:rejected.path))
+                precondition(!FileManager.default.fileExists(atPath:rejected.appendingPathExtension("part").path))
+                print("PASS: XHS client audio validation, silent source rejection, audio backup, explicit silent fallback")
+            }
         }
         let remaining = try FileManager.default.contentsOfDirectory(atPath:dir.path)
         precondition(remaining.allSatisfy { !$0.hasPrefix(".media-check") })

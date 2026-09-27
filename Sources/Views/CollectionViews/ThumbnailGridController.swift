@@ -6,6 +6,7 @@ struct ThumbnailGridItem: Identifiable, Hashable {
     let status: PairItem.Status
     let mediaKind: ThumbnailMediaKind
     let contentVersion: TimeInterval
+    var unavailableMessage: String? = nil
 }
 
 @MainActor
@@ -59,7 +60,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                   let gridItem = (collectionView as? GridCollectionView)?.gridController?.itemByID[itemID] else {
                 return item
             }
-            thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion)
+            thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion, unavailableMessage: gridItem.unavailableMessage)
             thumbnailItem.setSelectedAppearance(
                 (collectionView as? GridCollectionView)?.gridController?.selectedIDs.contains(itemID) == true
             )

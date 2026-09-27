@@ -34,6 +34,7 @@ enum DewuNativeDownloader {
                 "输出目录: \(outputFolder.path)"
             ]
 
+            let downloadedAt = Date().timeIntervalSince1970
             var usedNames = Set<String>()
             let shareVideoURLs = bestVideoVariants(pageInfo.videos)
             var imageSources = pageInfo.isVideoPost ? [] : pageInfo.images
@@ -43,10 +44,10 @@ enum DewuNativeDownloader {
             } else {
                 lines.append("下载静态图: \(imageSources.count) 张（来源：分享页原图 URL）")
                 var tasks: [DownloadTask] = []
-                for source in imageSources {
+                for (index, source) in imageSources.enumerated() {
                     let url = source.url
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
-                    tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs))
+                    tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1)))
                 }
                 do {
                     let imageDownloadProgress: DownloaderInfra.ProgressHandler?
@@ -153,10 +154,10 @@ enum DewuNativeDownloader {
                 if !imageSources.isEmpty {
                     lines.append("下载静态图: \(imageSources.count) 张（来源：App 接口 JSON）")
                     var tasks: [DownloadTask] = []
-                    for source in imageSources {
+                    for (index, source) in imageSources.enumerated() {
                         let url = source.url
                         let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
-                        tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs))
+                        tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1)))
                     }
                     let apiImageDownloadProgress: DownloaderInfra.ProgressHandler?
                     if let progress {
@@ -179,13 +180,18 @@ enum DewuNativeDownloader {
             } else {
                 lines.append(pageInfo.isVideoPost ? "下载视频: \(videoURLs.count) 个（来源：\(videoSource)）" : "下载 Live Photo/动态图视频: \(videoURLs.count) 个（来源：\(videoSource)）")
                 var tasks: [DownloadTask] = []
-                for url in videoURLs {
+                for (offset, url) in videoURLs.enumerated() {
                     let stillURL = pageInfo.isVideoPost ? nil : pairedImageURL(for: url, in: mediaPairs)
                     if !pageInfo.isVideoPost, stillURL == nil {
                         lines.append("一段视频缺少可靠的图片关联，保留为独立视频。")
                     }
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: videoName(stillURL: stillURL, videoURL: url), usedNames: &usedNames)
-                    tasks.append(DownloadTask(url: url, destination: destination))
+                    let imageIndices = stillURL.map { still in
+                        imageSources.indices.filter { fileName(from: imageSources[$0].url) == fileName(from: still) }
+                    } ?? []
+                    let index = imageIndices.count == 1 ? imageIndices[0] + 1 : imageSources.count + offset + 1
+                    tasks.append(DownloadTask(url: url, destination: destination,
+                        displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index)))
                 }
                 let videoDownloadProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
@@ -236,6 +242,7 @@ enum DewuNativeDownloader {
         var url: URL
         var destination: URL
         var fallbackURLs: [URL] = []
+        var displayOrder: MediaDisplayOrder? = nil
     }
 
     private static func extractShareURL(from text: String) throws -> URL {
@@ -617,6 +624,7 @@ enum DewuNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
         try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, validate: { url in try await MediaFileUtilities.validateMedia(url, expectedSuffix: task.destination.pathExtension) }, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress)
+        task.displayOrder?.write(to: task.destination)
     }
 
     private static func openDewuApp(_ url: URL) {

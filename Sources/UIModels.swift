@@ -105,6 +105,7 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var sourceImagePath: String?
     var sourceVideoPath: String?
     var sourceRevision: MediaPairRevision?
+    var displayOrder: MediaDisplayOrder?
 
     var outputIsCurrent: Bool {
         guard let movieURL, let revision else { return false }
@@ -124,6 +125,12 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var sourceExists: Bool {
         FileManager.default.fileExists(atPath: imagePath)
             && moviePath.map { FileManager.default.fileExists(atPath: $0) } == true
+    }
+
+    var unavailableMessage: String? {
+        guard FileManager.default.isReadableFile(atPath: imagePath) else { return "原文件不可用" }
+        if let moviePath, !FileManager.default.isReadableFile(atPath: moviePath) { return "动态文件不可用" }
+        return nil
     }
 }
 
@@ -190,6 +197,7 @@ struct DownloadGridItem: Identifiable, Hashable {
     let kind: Kind
     let isCompleted: Bool
     let mediaKind: ThumbnailMediaKind
+    var unavailableMessage: String? = nil
 }
 
 struct DownloadScanResult: Hashable {
@@ -197,6 +205,7 @@ struct DownloadScanResult: Hashable {
     var photos: [URL]
     var videos: [URL]
     var modifiedTimesByPath: [String: TimeInterval] = [:]
+    var displayOrdersByPath: [String: MediaDisplayOrder] = [:]
 }
 
 enum ToolRunResult: Sendable {

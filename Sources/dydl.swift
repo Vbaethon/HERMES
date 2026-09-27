@@ -79,6 +79,7 @@ enum DouyinNativeDownloader {
         var destination: URL
         var fallbackURL: URL? = nil
         var alternateURLs: [URL] = []
+        var displayOrder: MediaDisplayOrder? = nil
     }
 
     static func livePhotoDownloadTask(_ item: MediaItem, destination: URL) -> DownloadTask? {
@@ -432,20 +433,24 @@ enum DouyinNativeDownloader {
                 let folderName = outputFolder.lastPathComponent
                 try FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true)
 
+                let downloadedAt = Date().timeIntervalSince1970
                 var usedNames = Set<String>()
                 var tasks: [DownloadTask] = []
                 let usesIndexedNames = info.images.count > 1
                 for item in info.images {
+                    let order = MediaDisplayOrder(postID: "douyin:" + info.awemeID, downloadedAt: downloadedAt, index: item.index)
                     let stem = usesIndexedNames
                         ? "\(info.awemeID)_\(String(format: "%02d", item.index))"
                         : info.awemeID
                     tasks.append(DownloadTask(
                         url: item.imageURL,
-                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).jpg", usedNames: &usedNames)
+                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).jpg", usedNames: &usedNames), displayOrder: order
                     ))
                     if item.videoURL != nil {
-                        tasks.append(livePhotoDownloadTask(item, destination:
-                            FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames))!)
+                        var task = livePhotoDownloadTask(item, destination:
+                            FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames))!
+                        task.displayOrder = order
+                        tasks.append(task)
                     }
                 }
                 let usesIndexedVideoNames = info.videos.count > 1
@@ -457,7 +462,8 @@ enum DouyinNativeDownloader {
                         url: item.videoURL,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).mp4", usedNames: &usedNames),
                         fallbackURL: item.fallbackVideoURL,
-                        alternateURLs: item.alternateURLs
+                        alternateURLs: item.alternateURLs,
+                        displayOrder: MediaDisplayOrder(postID: "douyin:" + info.awemeID, downloadedAt: downloadedAt, index: item.index)
                     ))
                 }
 
@@ -2906,6 +2912,7 @@ enum DouyinNativeDownloader {
                 try? FileManager.default.removeItem(at: finalURL)
                 try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: finalURL.path)
+                task.displayOrder?.write(to: finalURL)
                 print("[HERMES] 媒体校验通过: \(finalURL.lastPathComponent), 来源主机: \(task.url.host ?? "unknown")")
                 return DownloadOutcome(fileURL: finalURL, sourceHost: task.url.host ?? "unknown")
             } catch {
@@ -2919,7 +2926,7 @@ enum DouyinNativeDownloader {
         }
         for alternate in task.alternateURLs where alternate != task.url {
             do {
-                var outcome = try await download(DownloadTask(url: alternate, destination: task.destination), retries: 0, progress: progress)
+                var outcome = try await download(DownloadTask(url: alternate, destination: task.destination, displayOrder: task.displayOrder), retries: 0, progress: progress)
                 outcome.usedFallback = true
                 return outcome
             } catch {
@@ -2929,7 +2936,7 @@ enum DouyinNativeDownloader {
         }
         if let fallback = task.fallbackURL {
             print("[HERMES] 当前候选失败，回退到保留的视频流。")
-            var outcome = try await download(DownloadTask(url: fallback, destination: task.destination), retries: 1, progress: progress)
+            var outcome = try await download(DownloadTask(url: fallback, destination: task.destination, displayOrder: task.displayOrder), retries: 1, progress: progress)
             outcome.usedFallback = true
             return outcome
         }
