@@ -45,6 +45,39 @@ import Foundation
             while !predicate() && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
             expect(predicate(), "asynchronous test timed out")
         }
+        let singles = try model("standalone-completion")
+        let still = singles.downloadOutputFolder.appendingPathComponent("photo.jpg")
+        let video = singles.downloadOutputFolder.appendingPathComponent("video.mp4")
+        try Data("photo".utf8).write(to: still)
+        try Data("video".utf8).write(to: video)
+        singles.downloadScanner = { _, _ in DownloadScanResult(pairs: [], photos: [still], videos: [video]) }
+        singles.refreshDownloads()
+        try await waitUntil { singles.completed.count == 2 }
+        expect(singles.completed.allSatisfy { !$0.importedToPhotos && $0.outputIsCurrent && $0.sourceExists }, "download completion is not Photos import")
+        expect(singles.completed.first { $0.imageURL == video }?.mediaKind == .video, "single video must use video thumbnail")
+        singles.completedFilter = .all
+        singles.selectedCompletedIDs = Set(singles.completed.map(\.id))
+        singles.mediaFilesImporter = { urls, _ in .success(urls.count) }
+        await singles.importCompletedToPhotos()
+        expect(singles.completed.allSatisfy(\.importedToPhotos), "successful plain import must mark exact revisions")
+        singles.refreshDownloads()
+        try await Task.sleep(for: .milliseconds(100))
+        expect(singles.completed.count == 2 && singles.completed.allSatisfy(\.importedToPhotos), "rescan must deduplicate and preserve import flags")
+        singles.refreshCompleted()
+        try await Task.sleep(for: .milliseconds(100))
+        expect(singles.completed.count == 2 && singles.completed.allSatisfy(\.importedToPhotos), "output-folder scan must retain downloaded single-file history")
+        let reloaded = ImporterModel(refreshOnInit: false)
+        expect(reloaded.completed.count == 2 && reloaded.completed.allSatisfy(\.importedToPhotos), "single-file history must survive relaunch")
+        try Data("replacement video".utf8).write(to: video)
+        singles.refreshDownloads()
+        try await waitUntil { singles.completed.first { $0.imageURL == video }?.importedToPhotos == false }
+        expect(singles.completed.first { $0.imageURL == still }?.importedToPhotos == true, "replacement must only reset changed resource")
+        singles.selectedCompletedIDs = [video.path]
+        singles.mediaFilesImporter = { _, _ in .failure("fixture failure") }
+        await singles.importCompletedToPhotos()
+        expect(singles.completed.first { $0.imageURL == video }?.importedToPhotos == false, "failed import must not mark video")
+        pass("ordinary downloads enter completed, persist, deduplicate and retain revision-based import flags")
+
         let a = try pair(root.appendingPathComponent("A"), "same")
         let b = try pair(root.appendingPathComponent("B"), "same")
         let pairing = try model("pairing")

@@ -19,22 +19,75 @@ import Foundation
         func pass(_ message: String) { checks += 1; print("PASS: \(message)") }
 
         let settings = SettingsWindowController(model: model)
-        let buttons = descendants(settings.window!.contentView!).compactMap { $0 as? NSButton }
-        let automatic = buttons.first { $0.title == "合成后自动导入“照片”" }!
-        let album = buttons.first { $0.title == "从“已完成”导入时加入 HERMES 相簿" }!
+        expect(settings.window!.contentViewController is NSSplitViewController, "settings must use AppKit split-view containment")
+        expect(settings.window!.styleMask.contains(.resizable), "settings must support resizing")
         model.importToPhotos = true
+        model.addToAlbum = true
         model.completedAddToAlbum = true
-        automatic.state = .off
-        NSApp.sendAction(automatic.action!, to: automatic.target, from: automatic)
-        expect(!model.importToPhotos, "settings must update execution model synchronously")
-        expect(model.completedAddToAlbum && album.isEnabled, "manual album preference must survive disabling automatic import")
+        model.importToPhotos = false
+        expect(!model.addToAlbum, "automatic album preference follows automatic import")
+        expect(model.completedAddToAlbum, "manual album preference is independent")
         expect(UserDefaults.standard.bool(forKey: AppPreferenceKey.completedAddToAlbum), "manual preference must persist")
+        expect(!UserDefaults.standard.bool(forKey: AppPreferenceKey.importToPhotos), "automatic preference must persist")
         model.importToPhotos = true
         model.completedAddToAlbum = false
+        let settingsRoot = settings.window!.contentView!
+        settingsRoot.layoutSubtreeIfNeeded()
+        let settingsControls = descendants(settingsRoot).compactMap { $0 as? NSSwitch }
+        let automatic = settingsControls.first { $0.identifier?.rawValue == "settings.importToPhotos" }!
+        let automaticAlbum = settingsControls.first { $0.identifier?.rawValue == "settings.addToAlbum" }!
+        let manualAlbum = settingsControls.first { $0.identifier?.rawValue == "settings.completedAddToAlbum" }!
+        automatic.state = .off
+        NSApp.sendAction(automatic.action!, to: automatic.target, from: automatic)
+        expect(!model.importToPhotos && !automaticAlbum.isEnabled, "native switch must update model and dependent control immediately")
+        model.importToPhotos = true
+        model.completedAddToAlbum = true
         try await Task.sleep(for: .milliseconds(100))
-        expect(automatic.state == .on && album.state == .off, "model changes must refresh cached settings window")
-        expect(settings.window?.title == "HERMES 设置", "settings title")
-        pass("settings/model two-way synchronization and independent manual album preference")
+        expect(automatic.state == .on && manualAlbum.state == .on, "model changes must refresh native controls")
+        let settingsNavigation = descendants(settingsRoot).compactMap { $0 as? NSTableView }.first!
+        settingsNavigation.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        expect(!manualAlbum.isHiddenOrHasHiddenAncestor && automatic.isHiddenOrHasHiddenAncestor, "native navigation switches the visible settings")
+        expect(settings.window!.title == "已完成", "single window title follows navigation")
+        settingsNavigation.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        expect(settings.window!.makeFirstResponder(settingsNavigation), "settings sidebar must support keyboard focus")
+        let focusedSettingsRow = settingsNavigation.rowView(atRow: 0, makeIfNecessary: true)!
+        focusedSettingsRow.isEmphasized = true
+        expect(focusedSettingsRow.isSelected && !focusedSettingsRow.isEmphasized, "settings must retain the main sidebar's native gray selection with keyboard focus")
+        let navigationScroll = settingsNavigation.enclosingScrollView!
+        expect(navigationScroll.automaticallyAdjustsContentInsets, "AppKit must manage the toolbar content inset")
+        for size in [NSSize(width: 780, height: 480), NSSize(width: 680, height: 360)] {
+            settings.window!.setContentSize(size)
+            settingsRoot.layoutSubtreeIfNeeded()
+            settingsNavigation.scrollRowToVisible(0)
+            settingsRoot.layoutSubtreeIfNeeded()
+            let rowRect = settingsNavigation.convert(settingsNavigation.rect(ofRow: 0), to: nil)
+            expect(rowRect.maxY <= settings.window!.contentLayoutRect.maxY + 1, "first sidebar row must be below native toolbar")
+            let switchRect = automatic.convert(automatic.bounds, to: nil)
+            expect(switchRect.maxY <= settings.window!.contentLayoutRect.maxY + 1, "settings controls must be below native toolbar")
+            expect(switchRect.maxX <= settings.window!.contentLayoutRect.maxX, "switch must fit at the minimum width")
+        }
+        var previousFontSize: CGFloat = 0
+        for size in [NSTableView.RowSizeStyle.small, .medium, .large] {
+            settingsNavigation.rowSizeStyle = size
+            settingsRoot.layoutSubtreeIfNeeded()
+            let first = settingsNavigation.view(atColumn: 0, row: 0, makeIfNecessary: true) as! NSTableCellView
+            let second = settingsNavigation.view(atColumn: 0, row: 1, makeIfNecessary: true) as! NSTableCellView
+            first.layoutSubtreeIfNeeded()
+            second.layoutSubtreeIfNeeded()
+            let firstFontSize = first.textField!.font!.pointSize
+            expect(firstFontSize == second.textField!.font!.pointSize, "selected and unselected sidebar rows must use the same point size")
+            expect(firstFontSize > previousFontSize, "sidebar text must follow the system row size")
+            let firstSymbolSlot = first.imageView!.alignmentRect(forFrame: first.imageView!.frame)
+            let secondSymbolSlot = second.imageView!.alignmentRect(forFrame: second.imageView!.frame)
+            expect(firstSymbolSlot.size == secondSymbolSlot.size, "sidebar symbols must share their Auto Layout size, allowing native SF Symbol optical insets")
+            expect(first.textField!.frame.minX == second.textField!.frame.minX, "sidebar labels must align across different symbol shapes")
+            expect(first.imageView!.symbolConfiguration != nil && second.imageView!.symbolConfiguration != nil, "SF Symbols must have an explicit matching typographic scale")
+            previousFontSize = firstFontSize
+        }
+        settingsNavigation.rowSizeStyle = .default
+        let toolbarIDs = settings.window!.toolbar!.items.map(\.itemIdentifier)
+        expect(toolbarIDs.prefix(3).elementsEqual([.flexibleSpace, .toggleSidebar, .sidebarTrackingSeparator]), "sidebar button must sit at the end of its toolbar region")
+        pass("AppKit settings: native navigation, switch bindings, persistence and titlebar-safe layout")
 
         model.downloadPhotos = [root.appendingPathComponent("existing.jpg")]
         model.downloadShareText = "这是一段没有链接的文本"
@@ -66,6 +119,10 @@ import Foundation
         var selected: SidebarSection?
         let sidebar = FinderStyleSidebarController(sections: SidebarSection.allCases, selection: .queue, count: { _ in nil }, onSelect: { selected = $0 })
         let table = descendants(sidebar.view).compactMap { $0 as? NSTableView }.first!
+        expect(type(of: settingsNavigation) == type(of: table), "both sidebars must share the same table implementation")
+        expect(settingsNavigation.intercellSpacing == table.intercellSpacing, "both sidebars must share row spacing")
+        expect(navigationScroll.hasVerticalScroller == table.enclosingScrollView!.hasVerticalScroller, "both sidebars must share native scrolling behavior")
+        expect(type(of: focusedSettingsRow) == type(of: table.rowView(atRow: 0, makeIfNecessary: true)!), "both sidebars must share AppKit selection rendering")
         let sidebarWindow = NSWindow(contentViewController: sidebar)
         sidebarWindow.setContentSize(NSSize(width: 220, height: 300))
         expect(sidebarWindow.makeFirstResponder(table), "sidebar must accept keyboard focus")

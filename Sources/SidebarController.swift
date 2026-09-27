@@ -1,32 +1,41 @@
 import AppKit
 
-final class FinderStyleSidebarController: NSViewController {
-    static let toolbarAllowedItemIdentifiers: [NSToolbarItem.Identifier] = [
-        .toggleSidebar,
-        .sidebarTrackingSeparator
-    ]
-    static let toolbarDefaultItemIdentifiers: [NSToolbarItem.Identifier] = [
-        .flexibleSpace,
-        .toggleSidebar,
-        .sidebarTrackingSeparator
-    ]
+protocol SidebarDestination: Hashable {
+    var title: String { get }
+    var symbolName: String { get }
+}
+
+extension SidebarSection: SidebarDestination {}
+typealias FinderStyleSidebarController = NativeSidebarController<SidebarSection>
+
+// Both windows use the same AppKit scroll view, rows, typography and focus behavior.
+final class NativeSidebarController<Destination: SidebarDestination>: NSViewController {
+    static var toolbarAllowedItemIdentifiers: [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .sidebarTrackingSeparator]
+    }
+    static var toolbarDefaultItemIdentifiers: [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .toggleSidebar, .sidebarTrackingSeparator]
+    }
 
     private let coordinator: Coordinator
-    private var sections: [SidebarSection]
-    private var selection: SidebarSection?
-    private var count: (SidebarSection) -> Int?
-    private let onSelect: (SidebarSection) -> Void
+    private var sections: [Destination]
+    private var selection: Destination?
+    private var count: (Destination) -> Int?
+    private let onSelect: (Destination) -> Void
+    private let accessibilityLabel: String
 
     init(
-        sections: [SidebarSection],
-        selection: SidebarSection?,
-        count: @escaping (SidebarSection) -> Int?,
-        onSelect: @escaping (SidebarSection) -> Void
+        sections: [Destination],
+        selection: Destination?,
+        count: @escaping (Destination) -> Int?,
+        accessibilityLabel: String = "主导航",
+        onSelect: @escaping (Destination) -> Void
     ) {
         self.sections = sections
         self.selection = selection
         self.count = count
         self.onSelect = onSelect
+        self.accessibilityLabel = accessibilityLabel
         self.coordinator = Coordinator()
         super.init(nibName: nil, bundle: nil)
         coordinator.controller = self
@@ -60,6 +69,7 @@ final class FinderStyleSidebarController: NSViewController {
         scrollView.hasHorizontalScroller = false
 
         let tableView = FinderSidebarTableView()
+        tableView.setAccessibilityLabel(accessibilityLabel)
         tableView.headerView = nil
         tableView.backgroundColor = .clear
         tableView.usesAlternatingRowBackgroundColors = false
@@ -93,9 +103,9 @@ final class FinderStyleSidebarController: NSViewController {
     }
 
     func update(
-        sections: [SidebarSection],
-        selection: SidebarSection?,
-        count: @escaping (SidebarSection) -> Int?
+        sections: [Destination],
+        selection: Destination?,
+        count: @escaping (Destination) -> Int?
     ) {
         self.sections = sections
         self.selection = selection
@@ -105,10 +115,10 @@ final class FinderStyleSidebarController: NSViewController {
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-        static let columnIdentifier = NSUserInterfaceItemIdentifier("FinderStyleSidebarColumn")
-        static let cellIdentifier = NSUserInterfaceItemIdentifier("FinderStyleSidebarCell")
+        static var columnIdentifier: NSUserInterfaceItemIdentifier { NSUserInterfaceItemIdentifier("FinderStyleSidebarColumn") }
+        static var cellIdentifier: NSUserInterfaceItemIdentifier { NSUserInterfaceItemIdentifier("FinderStyleSidebarCell") }
 
-        weak var controller: FinderStyleSidebarController?
+        weak var controller: NativeSidebarController?
         weak var tableView: NSTableView?
         private var isApplyingSelection = false
         private var userDefaultsObserver: NotificationObserver?

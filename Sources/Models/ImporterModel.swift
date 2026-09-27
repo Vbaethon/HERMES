@@ -137,6 +137,8 @@ final class ImporterModel: ObservableObject {
     // Internal seams let regression tests suspend operations without touching Photos or the network.
     var compositionRunner: @Sendable (PairItem, URL) async -> ToolRunResult = { await LivePhotoToolRunner.run(for: $0, outputFolder: $1) }
     var photoPairImporter: (CompletedItem, String?) async -> PhotoImportResult = { await PhotoLibraryImporter.importLivePhotoPair($0, albumName: $1) }
+    var mediaFilesImporter: ([URL], String?) async -> PhotoImportResult = { await PhotoLibraryImporter.importMediaFiles($0, albumName: $1) }
+    var livePhotoPairsImporter: ([(URL, URL)], String?) async -> PhotoImportResult = { await PhotoLibraryImporter.importLivePhotoPairs($0, albumName: $1) }
     var trashFiles: ([URL]) -> String? = { FileSystemUtilities.trashGroup($0) }
     var completedScanner: @Sendable (URL) async throws -> [CompletedItem] = { try await ImporterModel.completedItems(in: $0) }
     var downloadScanner: @Sendable (URL, URL) async -> DownloadScanResult = { await ImporterModel.downloadItems(in: $0, excluding: $1) }
@@ -670,8 +672,12 @@ final class ImporterModel: ObservableObject {
                 if currentOutputs.contains(value), let movie = updated.movieURL {
                     updated.revision = MediaPairRevision(image: updated.imageURL, movie: movie)
                     updated.importedToPhotos = value.importedToPhotos && updated.revision != nil
+                } else if currentOutputs.contains(value), value.standaloneRevision != nil {
+                    updated.standaloneRevision = MediaFileRevision(updated.imageURL)
+                    updated.importedToPhotos = value.importedToPhotos && updated.standaloneRevision != nil
                 } else {
                     updated.revision = nil
+                    updated.standaloneRevision = nil
                     updated.importedToPhotos = false
                 }
                 if currentSources.contains(value), let image = updated.sourceImagePath, let movie = updated.sourceVideoPath {
@@ -1009,6 +1015,24 @@ final class ImporterModel: ObservableObject {
             }
             return updated
         }
+        // Only settled scans become completion history; active downloads can contain
+        // one half of a Live Photo whose second resource has not arrived yet.
+        if !isDownloading {
+            var records = completed
+            for url in scannedItems.photos + scannedItems.videos {
+                guard let revision = MediaFileRevision(url) else { continue }
+                let item = CompletedItem(imagePath: url.standardizedFileURL.path,
+                    modifiedTime: revision.modified, displayOrder: scannedItems.displayOrdersByPath[url.path],
+                    standaloneRevision: revision)
+                records = Self.merging(item, into: records)
+            }
+            if records != completed {
+                completedMutationVersion += 1
+                completed = records
+                saveCompletedRecords()
+                retainVisibleCompletedSelection()
+            }
+        }
         downloadPhotos = scannedItems.photos
         downloadVideos = scannedItems.videos
         downloadModifiedTimesByPath = scannedItems.modifiedTimesByPath
@@ -1054,10 +1078,12 @@ final class ImporterModel: ObservableObject {
 
         downloadStatusText = addToAlbum ? "正在导入并添加到相簿..." : "正在导入到系统相册..."
         let targetAlbumName = addToAlbum ? Self.appDisplayName : nil
-        let result = await PhotoLibraryImporter.importMediaFiles(mediaURLs, albumName: targetAlbumName)
+        let originals = completed.filter { item in mediaURLs.contains(item.imageURL) && item.movieURL == nil }
+        let result = await mediaFilesImporter(mediaURLs, targetAlbumName)
 
         switch result {
         case .success(let count):
+            if count == mediaURLs.count { markCompletedImported(originals) }
             if count == 0 {
                 downloadStatusText = "没有可导入的照片或视频。"
             } else if let targetAlbumName {
@@ -1120,43 +1146,45 @@ final class ImporterModel: ObservableObject {
             appendOperationNotice(statusText, for: .completed)
             return
         }
-        let pairs = selectedItems.compactMap { item -> (URL, URL)? in
-            guard let movieURL = item.movieURL else { return nil }
-            return (item.imageURL, movieURL)
-        }
-        guard pairs.count == selectedItems.count else {
-            statusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
-            appendOperationNotice(statusText, for: .completed)
-            return
-        }
-
         isImportingCompleted = true
         defer { isImportingCompleted = false; resumeCompletedRefreshIfNeeded() }
-
-        let targetAlbumName = (targetAddToAlbum ?? completedAddToAlbum) ? Self.appDisplayName : nil
-        let result = await PhotoLibraryImporter.importLivePhotoPairs(pairs, albumName: targetAlbumName)
-
-        switch result {
-        case .success(let count):
-            if count == 0 {
-                statusText = "没有可导入的 Live Photo。"
-            } else if let targetAlbumName {
-                statusText = "已导入 \(count) 组到系统相册，并添加到“\(targetAlbumName)”相簿。"
+        let album = (targetAddToAlbum ?? completedAddToAlbum) ? Self.appDisplayName : nil
+        let liveItems = selectedItems.filter { $0.movieURL != nil }
+        let plainItems = selectedItems.filter { $0.movieURL == nil }
+        var count = 0
+        var failures: [String] = []
+        for items in [liveItems, plainItems] where !items.isEmpty {
+            let result: PhotoImportResult
+            if items[0].movieURL != nil {
+                result = await livePhotoPairsImporter(items.compactMap { item in
+                    item.movieURL.map { (item.imageURL, $0) }
+                }, album)
             } else {
-                statusText = "已导入 \(count) 组到系统相册。"
+                result = await mediaFilesImporter(items.map(\.imageURL), album)
             }
-            let importedByID = Dictionary(selectedItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            for index in completed.indices {
-                guard let original = importedByID[completed[index].id], original.outputIsCurrent,
-                      original.revision == completed[index].revision else { continue }
-                completed[index].importedToPhotos = true
+            switch result {
+            case .success(let importedCount):
+                count += importedCount
+                // A partial or empty result does not identify which resources succeeded.
+                if importedCount == items.count { markCompletedImported(items) }
+            case .failure(let message): failures.append(message)
             }
-            saveCompletedRecords()
-            retainVisibleCompletedSelection()
-        case .failure(let message):
-            statusText = "导入失败：\(message)"
         }
+        statusText = "已导入 \(count) 个项目到系统相册。"
+        if let album, count > 0 { statusText += "已添加到“\(album)”相簿。" }
+        if !failures.isEmpty { statusText += "导入失败：" + failures.joined(separator: "；") }
         appendOperationNotice(statusText, for: .completed)
+    }
+
+    private func markCompletedImported(_ items: [CompletedItem]) {
+        let originals = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in completed.indices {
+            guard let original = originals[completed[index].id], original.outputIsCurrent,
+                  original.hasSameRevision(as: completed[index]) else { continue }
+            completed[index].importedToPhotos = true
+        }
+        saveCompletedRecords()
+        retainVisibleCompletedSelection()
     }
 
     func processPairs() async {
@@ -1328,7 +1356,7 @@ final class ImporterModel: ObservableObject {
     private static func merging(_ item: CompletedItem, into records: [CompletedItem]) -> [CompletedItem] {
         var byID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var next = item
-        if let previous = byID[item.id], let revision = item.revision, previous.revision == revision {
+        if let previous = byID[item.id], item.hasSameRevision(as: previous) {
             next.importedToPhotos = previous.importedToPhotos || item.importedToPhotos
         }
         byID[item.id] = next
@@ -1337,6 +1365,11 @@ final class ImporterModel: ObservableObject {
 
     private static func validateLegacyRecord(_ record: CompletedItem) -> CompletedItem {
         var item = record
+        if item.moviePath == nil, let current = MediaFileRevision(item.imageURL) {
+            if item.standaloneRevision != current { item.importedToPhotos = false }
+            item.standaloneRevision = current
+            return item
+        }
         guard let movieURL = item.movieURL, let current = MediaPairRevision(image: item.imageURL, movie: movieURL) else {
             // Unavailable media is not evidence that an imported resource was replaced.
             return item
@@ -1393,10 +1426,13 @@ final class ImporterModel: ObservableObject {
             }
             let existingByID = Dictionary(self.completed.map { (historyKey($0), $0) },
                                           uniquingKeysWith: { first, _ in first })
-            let refreshedItems = Self.sortedCompletedItems(scannedItems.map { scannedItem in
+            let scannedPaths = Set(scannedItems.map(historyKey))
+            let standaloneHistory = self.completed.filter {
+                $0.standaloneRevision != nil && !scannedPaths.contains(historyKey($0))
+            }.map(Self.validateLegacyRecord)
+            let refreshedItems = Self.sortedCompletedItems(standaloneHistory + scannedItems.map { scannedItem in
                 var mergedItem = scannedItem
-                if let existingItem = existingByID[historyKey(scannedItem)], let revision = scannedItem.revision,
-                   existingItem.revision == revision {
+                if let existingItem = existingByID[historyKey(scannedItem)], scannedItem.hasSameRevision(as: existingItem) {
                     mergedItem.importedToPhotos = existingItem.importedToPhotos
                     mergedItem.sourceImagePath = existingItem.sourceImagePath
                     mergedItem.sourceVideoPath = existingItem.sourceVideoPath
@@ -1522,7 +1558,8 @@ final class ImporterModel: ObservableObject {
                             moviePath: movieByStem[stem]?.path,
                             modifiedTime: image.date.timeIntervalSince1970,
                             revision: revision,
-                            displayOrder: MediaDisplayOrder.read(from: image.url)
+                            displayOrder: MediaDisplayOrder.read(from: image.url),
+                            standaloneRevision: movie == nil ? MediaFileRevision(image.url) : nil
                         )
                     }
                 )

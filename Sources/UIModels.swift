@@ -107,7 +107,19 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var sourceRevision: MediaPairRevision?
     var displayOrder: MediaDisplayOrder?
 
+    var standaloneRevision: MediaFileRevision?
+
+    var mediaKind: ThumbnailMediaKind {
+        moviePath != nil ? .livePhoto : (FileSystemUtilities.isVideo(imageURL) ? .video : .photo)
+    }
+
+    func hasSameRevision(as other: CompletedItem) -> Bool {
+        if let revision { return revision == other.revision }
+        return standaloneRevision != nil && standaloneRevision == other.standaloneRevision && other.moviePath == nil
+    }
+
     var outputIsCurrent: Bool {
+        if moviePath == nil { return standaloneRevision != nil && standaloneRevision == MediaFileRevision(imageURL) }
         guard let movieURL, let revision else { return false }
         return revision == MediaPairRevision(image: imageURL, movie: movieURL)
     }
@@ -124,7 +136,7 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var movieURL: URL? { moviePath.map(URL.init(fileURLWithPath:)) }
     var sourceExists: Bool {
         FileManager.default.fileExists(atPath: imagePath)
-            && moviePath.map { FileManager.default.fileExists(atPath: $0) } == true
+            && (moviePath.map { FileManager.default.fileExists(atPath: $0) } ?? true)
     }
 
     var unavailableMessage: String? {

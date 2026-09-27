@@ -69,7 +69,7 @@ enum CompletedCollectionView {
                 id: item.id,
                 url: item.imageURL,
                 status: .finished,
-                mediaKind: item.movieURL == nil ? .photo : .livePhoto,
+                mediaKind: item.mediaKind,
                 contentVersion: item.modifiedTime,
                 unavailableMessage: item.unavailableMessage
             )
