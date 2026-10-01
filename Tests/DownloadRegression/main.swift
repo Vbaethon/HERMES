@@ -1,8 +1,30 @@
 import Foundation
 import AppKit
 import AVFoundation
+import Darwin
 
 enum ToolRunResult: Sendable { case success(String), failure(String) }
+
+private actor DownloadStatusRecorder {
+    private var messages: [String] = []
+    func record(_ message: String) { messages.append(message) }
+    func snapshot() -> [String] { messages }
+}
+
+private final class FailedNativeTransferProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)) }
+    override func stopLoading() { }
+}
+
+private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore) {
+    if process.isRunning { process.terminate() }
+    if terminated.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+        kill(process.processIdentifier, SIGKILL)
+        _ = terminated.wait(timeout: .now() + 1)
+    }
+}
 
 @main struct DownloadRegression {
     static func main() async throws {
@@ -273,11 +295,10 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         imageServer.arguments = ["python3", URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("xhs_image_fixture_server.py").path, imageFixture.path]
         imageServer.standardOutput = FileHandle.nullDevice
         imageServer.standardError = FileHandle.nullDevice
+        let imageServerStopped = DispatchSemaphore(value: 0)
+        imageServer.terminationHandler = { _ in imageServerStopped.signal() }
         try imageServer.run()
-        defer {
-            if imageServer.isRunning { imageServer.terminate() }
-            imageServer.waitUntilExit()
-        }
+        defer { stopFixtureServer(imageServer, terminated: imageServerStopped) }
         let imagePortFile = imageFixture.appendingPathComponent("port")
         for _ in 0..<300 where !FileManager.default.fileExists(atPath: imagePortFile.path) {
             try await Task.sleep(for: .milliseconds(10))
@@ -290,7 +311,12 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
                 destination: imageFixture.appendingPathComponent("photo-\(number).bin"), requestUserAgent: X.mobileUserAgent,
                 videoHDRHint: nil, isImage: true)
         }
-        let imageResults = try await X.download(imageTasks, maxConcurrentDownloads: 4)
+        let imageStatuses = DownloadStatusRecorder()
+        let imageResults = try await DownloaderInfra.$statusHandler.withValue({ message in
+            await imageStatuses.record(message)
+        }) {
+            try await X.download(imageTasks, maxConcurrentDownloads: 4)
+        }
         precondition(imageResults.count == 4)
         for number in 1...4 {
             let saved = imageFixture.appendingPathComponent("photo-\(number).png")
@@ -299,7 +325,92 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         }
         let imageRequests = try String(contentsOf: imageFixture.appendingPathComponent("requests.txt"), encoding: .utf8)
         precondition(imageRequests.split(separator: "\n").filter { $0.hasPrefix("/invalid-") }.count == 2, "Failed first image sources must advance to alternatives without redownloading completed stills")
-        print("PASS: four-photo XHS batch completes with valid image alternatives after two first-source media failures")
+        let sourceStages = await imageStatuses.snapshot()
+        precondition(sourceStages.contains { $0.contains("首选原图") })
+        precondition(sourceStages.contains { $0.contains("首选原图失败") })
+        precondition(sourceStages.contains { $0.contains("切换备用源") })
+        precondition(sourceStages.contains { $0.contains("下载备用图片") })
+        precondition(sourceStages.contains { $0.contains("校验图片") })
+        precondition(sourceStages.last == "媒体下载完成，正在整理结果")
+        precondition(sourceStages.allSatisfy { !$0.contains("http") }, "Progress text must not expose source URLs")
+
+        // The fallback stage comes from the real native-to-curl branch, rather
+        // than being inferred from a long pause in numeric progress.
+        let fallbackStatuses = DownloadStatusRecorder()
+        let failedConfiguration = URLSessionConfiguration.ephemeral
+        failedConfiguration.protocolClasses = [FailedNativeTransferProtocol.self]
+        let failedSession = URLSession(configuration: failedConfiguration)
+        defer { failedSession.invalidateAndCancel() }
+        let compatibilityFile = imageFixture.appendingPathComponent("compatibility.part")
+        let usesNativeFirst: @Sendable (URLRequest) -> Bool = { _ in false }
+        try await DownloaderInfra.$statusHandler.withValue({ message in
+            await fallbackStatuses.record(message)
+        }) {
+            try await DownloaderInfra.downloadOnceAsync(imageBase.appendingPathComponent("compatibility"),
+                to: compatibilityFile, userAgent: X.mobileUserAgent, session: failedSession,
+                shouldUseDirectly: usesNativeFirst, transferPolicy: .init(maximumDuration: 10, idleTimeout: 12))
+        }
+        let compatibilityBytes = try Data(contentsOf: compatibilityFile)
+        let fallbackStages = await fallbackStatuses.snapshot()
+        precondition(compatibilityBytes == validPNG)
+        precondition(fallbackStages == ["当前源传输中断，正在重试"])
+
+        // A completed sibling's validation must not hide the source that is
+        // still waiting. The actual delayed HTTP response must later complete.
+        let waitingStatuses = DownloadStatusRecorder()
+        let waitingTasks = [
+            X.DownloadTask(urls: [imageBase.appendingPathComponent("waiting-image")], destination: imageFixture.appendingPathComponent("waiting.bin"), requestUserAgent: X.mobileUserAgent, videoHDRHint: nil, isImage: true),
+            X.DownloadTask(urls: [imageBase.appendingPathComponent("fast-image")], destination: imageFixture.appendingPathComponent("fast.bin"), requestUserAgent: X.mobileUserAgent, videoHDRHint: nil, isImage: true)
+        ]
+        _ = try await DownloaderInfra.$statusHandler.withValue({ message in
+            await waitingStatuses.record(message)
+        }) {
+            try await X.download(waitingTasks, maxConcurrentDownloads: 2)
+        }
+        let waitingStages = await waitingStatuses.snapshot()
+        precondition(waitingStages.contains { $0.contains("第 1 张图片") && $0.contains("仍在等待下载") })
+        precondition(!waitingStages.contains { $0.contains("失败") }, "Waiting alone must not be described as a failed source")
+        precondition(waitingStages.last == "媒体下载完成，正在整理结果")
+        let priorityStatuses = DownloadStatusRecorder()
+        let statusAggregator = DownloaderInfra.$statusHandler.withValue({ message in
+            await priorityStatuses.record(message)
+        }) { DownloaderInfra.DownloadProgressAggregator(totalCount: 2, handler: nil) }
+        await statusAggregator.updateStatus(index: 0, message: "第 1 张图片：仍在等待下载")
+        await statusAggregator.updateStatus(index: 1, message: "第 2 张图片：正在校验图片")
+        await statusAggregator.complete(index: 1)
+        let priorityStages = await priorityStatuses.snapshot()
+        precondition(priorityStages == ["第 1 张图片：仍在等待下载"])
+        await statusAggregator.updateStatus(index: 0, message: "第 1 张图片：当前源已继续传输，正在下载")
+        await statusAggregator.complete(index: 0)
+
+        // Cancel a real stalled request after its truthful waiting stage. No
+        // backup, post-cancellation status, or staged file may remain.
+        let cancelledStatuses = DownloadStatusRecorder()
+        let cancelledDestination = imageFixture.appendingPathComponent("cancelled.bin")
+        let cancelledTask = Task {
+            try await DownloaderInfra.$statusHandler.withValue({ message in
+                await cancelledStatuses.record(message)
+            }) {
+                try await X.download(X.DownloadTask(urls: [imageBase.appendingPathComponent("stall-cancelled"), imageBase.appendingPathComponent("must-not-retry")], destination: cancelledDestination, requestUserAgent: X.mobileUserAgent, videoHDRHint: nil, isImage: true), retries: 0)
+            }
+        }
+        var observedWaiting = false
+        for _ in 0..<120 {
+            if await cancelledStatuses.snapshot().contains(where: { $0.contains("仍在等待下载") }) { observedWaiting = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        precondition(observedWaiting)
+        cancelledTask.cancel()
+        do { _ = try await cancelledTask.value; fatalError("cancelled image download succeeded") }
+        catch { precondition(DownloaderHTTPCompatibility.isCancellation(error)) }
+        let cancelledStages = await cancelledStatuses.snapshot()
+        try await Task.sleep(for: .milliseconds(250))
+        let laterCancelledStages = await cancelledStatuses.snapshot()
+        precondition(cancelledStages == laterCancelledStages)
+        precondition(!FileManager.default.fileExists(atPath: cancelledDestination.appendingPathExtension("part").path))
+        let cancellationRequests = try String(contentsOf: imageFixture.appendingPathComponent("requests.txt"), encoding: .utf8)
+        precondition(!cancellationRequests.contains("/must-not-retry"))
+        print("PASS: four-photo XHS fallback, real native compatibility retry, delayed-source waiting, concurrent status priority, cancellation status cleanup")
         try validPNG.prefix(33).write(to: part)
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"png"); fatalError("accepted PNG headers without pixel data") } catch { }
         let jpegBitmap = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:64,pixelsHigh:64,bitsPerSample:8,samplesPerPixel:3,hasAlpha:false,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:192,bitsPerPixel:24)!

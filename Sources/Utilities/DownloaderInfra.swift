@@ -6,15 +6,35 @@ import Foundation
 /// Box types and async helpers shared by all platform downloaders (Dewu, Douyin, XHS).
 enum DownloaderInfra {
     typealias ProgressHandler = @Sendable (Double) async -> Void
+    typealias StatusHandler = @Sendable (String) async -> Void
+
+    @TaskLocal static var statusHandler: StatusHandler?
+
+    static func reportStatus(_ message: String) async {
+        guard !Task.isCancelled, let statusHandler else { return }
+        await statusHandler(message)
+    }
 
     actor DownloadProgressAggregator {
+        private struct ActiveStatus {
+            let message: String
+            let priority: Int
+            let sequence: Int
+        }
         private let totalCount: Int
         private let handler: ProgressHandler?
+        private let statusHandler: StatusHandler?
         private var fractions: [Int: Double] = [:]
+        private var statuses: [Int: ActiveStatus] = [:]
+        private var completedIndices = Set<Int>()
+        private var statusSequence = 0
+        private var lastPublishedStatus: String?
+        private var hasStatusUpdates = false
 
         init(totalCount: Int, handler: ProgressHandler?) {
             self.totalCount = max(totalCount, 1)
             self.handler = handler
+            self.statusHandler = DownloaderInfra.statusHandler
         }
 
         func update(index: Int, fraction: Double) async {
@@ -24,7 +44,33 @@ enum DownloaderInfra {
 
         func complete(index: Int) async {
             fractions[index] = 1
+            completedIndices.insert(index)
+            statuses.removeValue(forKey: index)
             await publish()
+            await publishStatus()
+        }
+
+        func updateStatus(index: Int, message: String) async {
+            guard !Task.isCancelled, !completedIndices.contains(index) else { return }
+            hasStatusUpdates = true
+            statusSequence += 1
+            let priority: Int
+            if message.contains("等待") || message.contains("响应较慢") { priority = 3 }
+            else if message.contains("失败") || message.contains("重试") || message.contains("切换") { priority = 2 }
+            else if message.contains("校验") { priority = 0 }
+            else { priority = 1 }
+            statuses[index] = ActiveStatus(message: message, priority: priority, sequence: statusSequence)
+            await publishStatus()
+        }
+
+        private func publishStatus() async {
+            guard !Task.isCancelled, hasStatusUpdates, let statusHandler else { return }
+            let status = statuses.values.max {
+                $0.priority == $1.priority ? $0.sequence < $1.sequence : $0.priority < $1.priority
+            }?.message ?? (completedIndices.count == totalCount ? "媒体下载完成，正在整理结果" : nil)
+            guard let status, status != lastPublishedStatus else { return }
+            lastPublishedStatus = status
+            await statusHandler(status)
         }
 
         private func publish() async {
@@ -85,6 +131,37 @@ enum DownloaderInfra {
         transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil
     ) async throws {
         try Task.checkCancellation()
+        let statusMonitor: Task<Void, Never>?
+        if transferPolicy != nil, statusHandler != nil {
+            statusMonitor = Task { await monitorTransferStatus(at: destination) }
+        } else { statusMonitor = nil }
+        try await withTaskCancellationHandler {
+            do {
+                try await performDownloadOnceAsync(url, to: destination, userAgent: userAgent,
+                    session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders,
+                    progress: progress, transferPolicy: transferPolicy)
+                statusMonitor?.cancel()
+                await statusMonitor?.value
+            } catch {
+                statusMonitor?.cancel()
+                await statusMonitor?.value
+                throw error
+            }
+        } onCancel: {
+            statusMonitor?.cancel()
+        }
+    }
+
+    private static func performDownloadOnceAsync(
+        _ url: URL,
+        to destination: URL,
+        userAgent: String,
+        session: URLSession,
+        shouldUseDirectly: (URLRequest) -> Bool,
+        extraHeaders: [String: String],
+        progress: ProgressHandler?,
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy?
+    ) async throws {
         var req = URLRequest(url: url)
         req.timeoutInterval = transferPolicy.map { TimeInterval($0.idleTimeout) } ?? 30
         req.assumesHTTP3Capable = false
@@ -93,6 +170,7 @@ enum DownloaderInfra {
             req.setValue(value, forHTTPHeaderField: key)
         }
         if shouldUseDirectly(req) {
+            await reportStatus("正在下载当前来源")
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
@@ -118,9 +196,36 @@ enum DownloaderInfra {
         } catch {
             try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
+            await reportStatus("当前源传输中断，正在重试")
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
+        }
+    }
+
+    /// File growth is available for both native streaming and curl. An unchanged
+    /// progress callback alone is not evidence that a transfer has stopped.
+    private static func monitorTransferStatus(at destination: URL) async {
+        var previousSize: UInt64 = 0
+        var lastGrowth = ContinuousClock.now
+        var isWaiting = false
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            guard !Task.isCancelled else { return }
+            let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.uint64Value ?? 0
+            if size > previousSize {
+                lastGrowth = .now
+                if isWaiting { await reportStatus("当前源已继续传输，正在下载") }
+                isWaiting = false
+            } else if size < previousSize {
+                // Switching from native to curl replaces the staged file.
+                lastGrowth = .now
+                isWaiting = false
+            } else if lastGrowth.duration(to: .now) >= .seconds(4) {
+                isWaiting = true
+                await reportStatus("当前源响应较慢，仍在等待下载")
+            }
+            previousSize = size
         }
     }
 

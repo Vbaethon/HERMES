@@ -6,7 +6,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let preferredWindowSize = NSSize(width: 1440, height: 1080)
     private static let minimumWindowSize = NSSize(width: 920, height: 620)
 
-    let model = ImporterModel()
+    let model: ImporterModel
     var canComposeCurrentPage: Bool { model.canComposeCurrentPage }
     private let splitViewController = NSSplitViewController()
     private let sidebarController: FinderStyleSidebarController
@@ -14,8 +14,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let toolbarController: NativeWindowToolbarController
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
+    private var terminationProgressSheet: NSPanel?
+    var requestTermination: () -> Void = { NSApp.terminate(nil) }
 
-    init() {
+    init(model: ImporterModel = ImporterModel()) {
+        self.model = model
         sidebarController = FinderStyleSidebarController(
             sections: SidebarSection.allCases,
             selection: model.selection,
@@ -80,19 +83,85 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard model.hasActiveWork else { return true }
-        showActiveWorkNotice()
+        requestTermination()
         return false
     }
 
-    func showActiveWorkNotice() {
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+    var terminationConfirmationMessage: String {
+        let hasDownloads = model.isDownloading || model.downloadQueueCount > 0
+        let hasProcessing = model.isProcessing || model.isProcessingDownloads
+            || model.isImportingCompleted || model.isImportingDownloadMedia
+        if hasDownloads && hasProcessing { return "将停止下载并清理临时文件，当前处理结束后退出。" }
+        if hasDownloads { return "将停止下载并清理临时文件。" }
+        if hasProcessing { return "当前处理结束后退出。" }
+        return "将结束当前任务并退出。"
+    }
+
+    static func makeTerminationConfirmationAlert(message: String = "将停止下载并清理临时文件。") -> NSAlert {
         let alert = NSAlert()
-        alert.messageText = "HERMES 仍有任务正在进行"
-        alert.informativeText = "下载、合成、导入或刷新尚未结束，等待队列也会继续执行。请等待任务结束后再关闭或退出；现在可以最小化窗口。"
+        alert.messageText = "退出 HERMES？"
+        alert.informativeText = message
         alert.addButton(withTitle: "继续运行")
-        if let window, window.attachedSheet == nil { alert.beginSheetModal(for: window) }
+        alert.addButton(withTitle: "退出")
+        alert.buttons[0].keyEquivalent = "\u{1b}"
+        alert.buttons[1].hasDestructiveAction = true
+        return alert
+    }
+
+    func confirmTermination(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        showWindow(nil)
+        window?.deminiaturize(nil)
+        window?.makeKeyAndOrderFront(nil)
+        guard let window else { completion(false); return }
+        presentAfterDismissingCurrentSheet {
+            let alert = Self.makeTerminationConfirmationAlert(message: self.terminationConfirmationMessage)
+            alert.beginSheetModal(for: window) { response in
+                completion(response == .alertSecondButtonReturn)
+            }
+        }
+    }
+
+    func showTerminationProgress() {
+        guard terminationProgressSheet == nil, let window else { return }
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.startAnimation(nil)
+        let label = NSTextField(labelWithString: "正在结束任务…")
+        let content = NSStackView(views: [spinner, label])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 12
+        content.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 88),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = "HERMES"
+        panel.isReleasedWhenClosed = false
+        panel.contentView = content
+        terminationProgressSheet = panel
+        presentAfterDismissingCurrentSheet { [weak self] in
+            guard self?.terminationProgressSheet === panel else { return }
+            window.beginSheet(panel)
+        }
+    }
+
+    func hideTerminationProgress() {
+        guard let panel = terminationProgressSheet else { return }
+        terminationProgressSheet = nil
+        if panel.sheetParent != nil { panel.sheetParent?.endSheet(panel) }
+        panel.orderOut(nil)
+    }
+
+    private func presentAfterDismissingCurrentSheet(_ presentation: @escaping @MainActor @Sendable () -> Void) {
+        guard let window else { return }
+        if let sheet = window.attachedSheet {
+            window.endSheet(sheet, returnCode: .cancel)
+            DispatchQueue.main.async(execute: presentation)
+        } else {
+            // applicationShouldTerminate must return terminateLater before a reply.
+            DispatchQueue.main.async(execute: presentation)
+        }
     }
 
     private func configureSplitView() {

@@ -3,6 +3,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 import sys
+import signal
+import time
+
+signal.pthread_sigmask(signal.SIG_SETMASK, [])
 
 root = Path(sys.argv[1])
 image = (root / "valid.png").read_bytes()
@@ -18,7 +22,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        if self.path.startswith("/waiting-"):
+            time.sleep(6)
+        elif self.path.startswith("/stall-"):
+            time.sleep(30)
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, *args):
         pass

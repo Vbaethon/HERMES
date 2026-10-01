@@ -1001,14 +1001,32 @@ enum XHSNativeDownloader {
         guard !tasks.isEmpty else { return [] }
         let limit = max(1, requestedMaxConcurrentDownloads ?? maxConcurrentDownloads)
         let progressAggregator = DownloaderInfra.DownloadProgressAggregator(totalCount: tasks.count, handler: progress)
+        let reportsStatus = DownloaderInfra.statusHandler != nil
+        var imageNumber = 0
+        let labels = tasks.map { task -> String in
+            if task.isImage {
+                imageNumber += 1
+                return "第 \(task.displayOrder?.index ?? imageNumber) 张图片"
+            }
+            if task.isLivePhoto { return "第 \(task.displayOrder?.index ?? 1) 张实况视频" }
+            return "视频"
+        }
         return try await withThrowingTaskGroup(of: DownloadResult.self) { group in
             var results: [DownloadResult] = []
             var iter = Array(tasks.enumerated()).makeIterator()
             for _ in 0..<min(limit, tasks.count) {
                 guard let t = iter.next() else { break }
                 group.addTask {
-                    let result = try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { message in
+                            await progressAggregator.updateStatus(index: t.offset, message: "\(labels[t.offset])：\(message)")
+                        }
+                    } else { scopedStatus = nil }
+                    let result = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                     return result
@@ -1018,8 +1036,16 @@ enum XHSNativeDownloader {
                 results.append(result)
                 guard let t = iter.next() else { continue }
                 group.addTask {
-                    let result = try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { message in
+                            await progressAggregator.updateStatus(index: t.offset, message: "\(labels[t.offset])：\(message)")
+                        }
+                    } else { scopedStatus = nil }
+                    let result = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                     return result
@@ -1043,10 +1069,20 @@ enum XHSNativeDownloader {
         for attempt in 0...retries {
             do {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                for sourceURL in task.urls {
+                for (sourceIndex, sourceURL) in task.urls.enumerated() {
                     do {
+                        if sourceIndex == 0 {
+                            await DownloaderInfra.reportStatus(task.isImage ? "正在下载首选原图" : "正在下载首选视频")
+                        } else {
+                            await DownloaderInfra.reportStatus("正在切换备用源")
+                            let isWebPSource = sourceURL.absoluteString.lowercased().contains("webp")
+                            await DownloaderInfra.reportStatus(task.isImage
+                                ? (isWebPSource ? "正在下载备用图片（WebP 源）" : "正在下载备用图片")
+                                : "正在下载备用视频")
+                        }
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent,
                                                     progress: progress, transferPolicy: transferPolicy)
+                        await DownloaderInfra.reportStatus(task.isImage ? "正在校验图片" : "正在校验视频")
                         try await MediaFileUtilities.validateMedia(temporaryURL,
                             expectedSuffix: task.isImage ? "jpg" : task.destination.pathExtension)
                         let hasAudio = task.isLivePhoto ? try await livePhotoHasAudio(at: temporaryURL) : false
@@ -1054,6 +1090,7 @@ enum XHSNativeDownloader {
                             throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "客户端有声实况源未返回音轨，尝试备用素材。"])
                         }
                         try Task.checkCancellation()
+                        await DownloaderInfra.reportStatus(task.isImage ? "图片校验完成，正在整理文件" : "视频校验完成，正在整理文件")
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
@@ -1069,6 +1106,11 @@ enum XHSNativeDownloader {
                         if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                         lastError = error
                         try? FileManager.default.removeItem(at: temporaryURL)
+                        if sourceIndex + 1 < task.urls.count {
+                            await DownloaderInfra.reportStatus(sourceIndex == 0
+                                ? (task.isImage ? "首选原图失败，准备切换备用源" : "首选视频失败，准备切换备用源")
+                                : "备用源失败，准备尝试下一个备用源")
+                        }
                     }
                 }
             } catch {
@@ -1079,6 +1121,7 @@ enum XHSNativeDownloader {
             }
             try Task.checkCancellation()
             if attempt < retries {
+                await DownloaderInfra.reportStatus(task.isImage ? "图片源下载失败，正在重试" : "视频源下载失败，正在重试")
                 try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
             }
         }

@@ -18,6 +18,50 @@ import Foundation
         var checks = 0
         func pass(_ message: String) { checks += 1; print("PASS: \(message)") }
 
+        func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            expect(condition(), "asynchronous UI operation timed out")
+        }
+        let terminationModel = ImporterModel(refreshOnInit: false)
+        let terminationWindow = MainWindowController(model: terminationModel)
+        var windowQuitRequests = 0
+        terminationWindow.requestTermination = { windowQuitRequests += 1 }
+        expect(!terminationWindow.windowShouldClose(terminationWindow.window!), "window close must defer to the application termination flow")
+        terminationModel.isDownloading = true
+        expect(!terminationWindow.windowShouldClose(terminationWindow.window!) && windowQuitRequests == 2, "idle and busy window closes must request the same application termination flow")
+        expect(terminationWindow.terminationConfirmationMessage == "将停止下载并清理临时文件。", "download confirmation must describe cancellation and partial-file cleanup")
+        terminationModel.isDownloading = false
+        terminationModel.isProcessing = true
+        expect(terminationWindow.terminationConfirmationMessage == "当前处理结束后退出。", "processing confirmation must describe waiting for its safe completion")
+        let terminationAlert = MainWindowController.makeTerminationConfirmationAlert(message: terminationWindow.terminationConfirmationMessage)
+        expect(terminationAlert.messageText == "退出 HERMES？" && terminationAlert.buttons.map(\.title) == ["继续运行", "退出"], "termination confirmation must expose the short message and both choices")
+        expect(terminationAlert.buttons[0].keyEquivalent == "\u{1b}" && terminationAlert.buttons[1].hasDestructiveAction, "continue must support Escape and exit must be visibly distinct")
+        let terminationDelegate = HermesAppDelegate(mainWindowController: terminationWindow)
+        var terminationReplies: [Bool] = []
+        terminationDelegate.terminationReplyHandler = { terminationReplies.append($0) }
+        expect(terminationDelegate.applicationShouldTerminate(NSApp) == .terminateLater, "busy termination must defer its application reply")
+        expect(terminationDelegate.applicationShouldTerminate(NSApp) == .terminateLater, "a repeated quit must join the pending confirmation")
+        try await waitUntil { terminationWindow.window?.attachedSheet != nil }
+        let cancelSheet = terminationWindow.window!.attachedSheet!
+        terminationWindow.window!.endSheet(cancelSheet, returnCode: .alertFirstButtonReturn)
+        try await waitUntil { terminationReplies == [false] }
+        expect(!terminationModel.isPreparingToQuit && terminationModel.isProcessing, "continue must keep the existing operation running")
+        expect(terminationDelegate.applicationShouldTerminate(NSApp) == .terminateLater, "a new quit after Continue must present confirmation again")
+        try await waitUntil { terminationWindow.window?.attachedSheet != nil }
+        terminationWindow.window!.endSheet(terminationWindow.window!.attachedSheet!, returnCode: .alertSecondButtonReturn)
+        try await waitUntil { terminationModel.isPreparingToQuit && terminationWindow.window?.attachedSheet != nil }
+        let finishingSheet = terminationWindow.window!.attachedSheet!
+        expect(descendants(finishingSheet.contentView!).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "正在结束任务…" }, "pending cleanup must display its concise progress state")
+        expect(descendants(finishingSheet.contentView!).compactMap { $0 as? NSProgressIndicator }.count == 1, "pending cleanup must remain responsive with native progress")
+        expect(terminationReplies == [false], "Exit must not terminate before the ongoing processing boundary")
+        expect(terminationDelegate.applicationShouldTerminate(NSApp) == .terminateLater && terminationWindow.window!.attachedSheet === finishingSheet, "another quit during cleanup must retain the same progress sheet")
+        terminationModel.isProcessing = false
+        try await waitUntil { terminationReplies == [false, true] }
+        expect(terminationWindow.window!.attachedSheet == nil, "the progress sheet must finish before the application termination reply")
+        terminationWindow.window?.orderOut(nil)
+        pass("window close and Cmd-Q share one asynchronous confirmation; Continue preserves work and Exit waits for safe cleanup")
+
         let settings = SettingsWindowController(model: model)
         expect(settings.window!.contentViewController is NSSplitViewController, "settings must use AppKit split-view containment")
         expect(settings.window!.styleMask.contains(.resizable), "settings must support resizing")

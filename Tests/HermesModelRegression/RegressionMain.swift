@@ -404,6 +404,232 @@ import Foundation
         try await waitUntil { !queuedIsolation.isDownloading && queuedIsolation.downloadQueueCount == 0 }
         pass("queued downloads retain captured folders and protect changing files until each task settles")
 
+        actor DownloadShutdownProbe {
+            var entries: [String] = []
+            var childStarted = false
+            var childCancelled = false
+            var workerFinished = false
+            var progress: DownloaderInfra.ProgressHandler?
+            var status: DownloaderInfra.StatusHandler?
+            func begin(_ entry: String, progress: DownloaderInfra.ProgressHandler?, status: DownloaderInfra.StatusHandler?) {
+                entries.append(entry)
+                self.progress = progress
+                self.status = status
+            }
+            func startedChild() { childStarted = true }
+            func cancelledChild() { childCancelled = true }
+            func finishedWorker() { workerFinished = true }
+            func sendLateCallbacks() async { await status?("已停止任务的迟到状态"); await progress?(1) }
+        }
+        let downloadShutdown = try model("download-shutdown")
+        let retainedDownload = downloadShutdown.downloadOutputFolder.appendingPathComponent("retained.jpg")
+        let newlyFinishedDownload = downloadShutdown.downloadOutputFolder.appendingPathComponent("finished-before-quit.jpg")
+        let activePartial = downloadShutdown.downloadOutputFolder.appendingPathComponent("unfinished.jpg.part")
+        let unrelatedPartial = downloadShutdown.downloadOutputFolder.appendingPathComponent("unrelated.bin.part")
+        let retainedBytes = Data("existing completed media".utf8)
+        let finishedBytes = Data("new media completed before cancellation".utf8)
+        let unrelatedBytes = Data("preexisting unrelated partial".utf8)
+        try retainedBytes.write(to: retainedDownload)
+        try unrelatedBytes.write(to: unrelatedPartial)
+        downloadShutdown.refreshDownloads()
+        try await waitUntil { downloadShutdown.completed.count == 1 }
+        let shutdownProbe = DownloadShutdownProbe()
+        downloadShutdown.shareDownloader = { entry, _, progress in
+            await shutdownProbe.begin(entry, progress: progress, status: DownloaderInfra.statusHandler)
+            do {
+                try finishedBytes.write(to: newlyFinishedDownload)
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        try Data("partial start".utf8).write(to: activePartial)
+                        let handle = try FileHandle(forWritingTo: activePartial)
+                        defer { try? handle.close(); try? FileManager.default.removeItem(at: activePartial) }
+                        await shutdownProbe.startedChild()
+                        do {
+                            while true {
+                                try Task.checkCancellation()
+                                try handle.seekToEnd()
+                                try handle.write(contentsOf: Data(repeating: 120, count: 1024))
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                        } catch {
+                            if error is CancellationError { await shutdownProbe.cancelledChild() }
+                            throw error
+                        }
+                    }
+                    try await group.waitForAll()
+                }
+                await shutdownProbe.finishedWorker()
+                return .success("fixture completed")
+            } catch {
+                await shutdownProbe.finishedWorker()
+                return .failure(error.localizedDescription)
+            }
+        }
+        downloadShutdown.downloadShareText = "https://v.douyin.com/shutdown-first/\nhttps://v.douyin.com/shutdown-second/"
+        await downloadShutdown.downloadShare()
+        try await waitUntilAsync { await shutdownProbe.childStarted }
+        downloadShutdown.downloadShareText = "https://v.douyin.com/shutdown-pending/"
+        await downloadShutdown.downloadShare()
+        expect(downloadShutdown.downloadQueueCount == 2 && fm.fileExists(atPath: activePartial.path), "fixture must contain a writing child and a waiting task")
+        async let firstShutdown: Void = downloadShutdown.prepareForTermination()
+        async let duplicateShutdown: Void = downloadShutdown.prepareForTermination()
+        _ = await (firstShutdown, duplicateShutdown)
+        let childSawCancellation = await shutdownProbe.childCancelled
+        let workerFinished = await shutdownProbe.workerFinished
+        let shutdownEntries = await shutdownProbe.entries
+        expect(childSawCancellation && workerFinished && !fm.fileExists(atPath: activePartial.path), "termination must cancel and await the owned parent/child before returning with partial cleanup")
+        expect(shutdownEntries.count == 1 && shutdownEntries[0].contains("shutdown-first"), "termination must not start another entry or waiting task")
+        expect(downloadShutdown.isPreparingToQuit && !downloadShutdown.isDownloading && downloadShutdown.downloadQueueCount == 0 && downloadShutdown.downloadProgressItems.isEmpty, "termination must leave the queue stopped")
+        let retainedAfterQuit = try Data(contentsOf: retainedDownload)
+        let finishedAfterQuit = try Data(contentsOf: newlyFinishedDownload)
+        let unrelatedAfterQuit = try Data(contentsOf: unrelatedPartial)
+        expect(retainedAfterQuit == retainedBytes && finishedAfterQuit == finishedBytes && unrelatedAfterQuit == unrelatedBytes, "termination must retain completed files and an unrelated preexisting partial byte-for-byte")
+        let stoppedStatus = downloadShutdown.downloadStatusText
+        await shutdownProbe.sendLateCallbacks()
+        downloadShutdown.downloadShareText = "https://v.douyin.com/shutdown-after-quit/"
+        await downloadShutdown.downloadShare()
+        await downloadShutdown.prepareForTermination()
+        expect(downloadShutdown.downloadStatusText == stoppedStatus && downloadShutdown.downloadProgressItems.isEmpty && downloadShutdown.downloadQueueCount == 0, "late callbacks and new requests must not restart a stopped queue")
+        pass("termination cancels and awaits writing download children, clears pending work and preserves settled files")
+
+        actor DownloadPhaseGate {
+            struct Call: Sendable {
+                let progress: DownloaderInfra.ProgressHandler?
+                let status: DownloaderInfra.StatusHandler?
+            }
+            var calls: [Call] = []
+            var continuations: [CheckedContinuation<ToolRunResult, Never>] = []
+            func suspend(progress: DownloaderInfra.ProgressHandler?, status: DownloaderInfra.StatusHandler?) async -> ToolRunResult {
+                calls.append(Call(progress: progress, status: status))
+                return await withCheckedContinuation { continuations.append($0) }
+            }
+            func call(_ index: Int) -> Call { calls[index] }
+            func releaseFirst() { continuations.removeFirst().resume(returning: .success("phase fixture completed")) }
+        }
+        let phases = try model("download-stage-detail")
+        let phaseGate = DownloadPhaseGate()
+        let firstStage = "正在读取第一条链接的本机缓存记录"
+        let secondStage = "正在等待第二条链接的图片源响应"
+        phases.shareDownloader = { entry, _, progress in
+            await DownloaderInfra.reportStatus(entry.contains("stage-first") ? firstStage : secondStage)
+            await progress?(0.65)
+            await progress?(0.2)
+            return await phaseGate.suspend(progress: progress, status: DownloaderInfra.statusHandler)
+        }
+        phases.downloadShareText = "https://v.douyin.com/stage-first/\nhttps://v.douyin.com/stage-second/"
+        await phases.downloadShare()
+        try await waitUntilAsync { await phaseGate.calls.count == 1 }
+        let firstPhaseCall = await phaseGate.call(0)
+        expect(firstPhaseCall.status != nil && phases.downloadProgressItems.first?.detail == firstStage, "TaskLocal status must reach the detached worker and survive later fraction callbacks")
+        let firstPhaseProgress = phases.downloadProgressItems[0].currentUnitProgress
+        await firstPhaseCall.progress?(0.1)
+        expect(phases.downloadProgressItems[0].detail == firstStage && phases.downloadProgressItems[0].currentUnitProgress == firstPhaseProgress, "backward fractions must keep specific stage text and monotonic progress")
+        await firstPhaseCall.status?("正在校验第一张图片")
+        expect(phases.downloadProgressItems[0].detail == "正在校验第一张图片", "a real stage change must update the visible detail")
+        await phaseGate.releaseFirst()
+        try await waitUntilAsync { await phaseGate.calls.count == 2 }
+        let secondPhaseProgress = phases.downloadProgressItems[0].currentUnitProgress
+        expect(phases.downloadProgressItems[0].detail == secondStage, "the next entry must replace the old stage")
+        await firstPhaseCall.status?("上一条链接的迟到阶段")
+        await firstPhaseCall.progress?(0.99)
+        expect(phases.downloadProgressItems[0].detail == secondStage && phases.downloadProgressItems[0].currentUnitProgress == secondPhaseProgress, "late callbacks from an earlier entry must not overwrite the current entry")
+        await phaseGate.releaseFirst()
+        try await waitUntil { !phases.isDownloading }
+        pass("specific download stages survive fraction changes and reject stale callbacks from an earlier entry")
+
+        let importShutdown = try model("photos-import-shutdown")
+        let shutdownInput = try pair(root.appendingPathComponent("photos-import-shutdown-input"), "live")
+        let shutdownOutput = try pair(importShutdown.outputFolder, "live")
+        let shutdownResult = "HERMES_RESULT:" + String(decoding: try JSONEncoder().encode(["imagePath": shutdownOutput.imageURL.path, "moviePath": shutdownOutput.videoURL.path]), as: UTF8.self)
+        await importShutdown.addFiles([shutdownInput.imageURL, shutdownInput.videoURL])
+        importShutdown.importToPhotos = true
+        importShutdown.compositionRunner = { _, _ in .success(shutdownResult) }
+        var shutdownImportContinuation: CheckedContinuation<PhotoImportResult, Never>?
+        importShutdown.photoPairImporter = { _, _ in await withCheckedContinuation { shutdownImportContinuation = $0 } }
+        let importingAtShutdown = Task { await importShutdown.processPairs() }
+        try await waitUntil { shutdownImportContinuation != nil }
+        var importQuitReturned = false
+        let importQuit = Task { await importShutdown.prepareForTermination(); importQuitReturned = true }
+        try await waitUntil { importShutdown.isPreparingToQuit }
+        expect(!importQuitReturned && importShutdown.isProcessing, "termination must wait for an already started Photos transaction")
+        shutdownImportContinuation?.resume(returning: .success(1))
+        await importingAtShutdown.value
+        await importQuit.value
+        expect(importQuitReturned && importShutdown.completed.first?.importedToPhotos == true && importShutdown.completed.first?.outputIsCurrent == true, "successful import must retain its local result and imported flag before termination returns")
+        pass("termination waits for an already started Photos import to save its result and imported flag")
+
+        actor CompositionShutdownGate {
+            var ids: [String] = []
+            var released = false
+            var continuations: [CheckedContinuation<Void, Never>] = []
+            func suspend(_ id: String) async {
+                ids.append(id)
+                guard !released else { return }
+                await withCheckedContinuation { continuations.append($0) }
+            }
+            func releaseAll() { released = true; for continuation in continuations { continuation.resume() }; continuations.removeAll() }
+        }
+        let compositionShutdown = try model("composition-shutdown")
+        let shutdownSources = try (0..<5).map { try pair(root.appendingPathComponent("composition-shutdown-input"), "pair-\($0)") }
+        var shutdownExports: [String: PairItem] = [:]
+        for source in shutdownSources { shutdownExports[source.id] = try pair(compositionShutdown.outputFolder, source.imageURL.deletingPathExtension().lastPathComponent) }
+        let shutdownExportsByID = shutdownExports
+        let compositionGate = CompositionShutdownGate()
+        compositionShutdown.compositionRunner = { source, _ in
+            await compositionGate.suspend(source.id)
+            let output = shutdownExportsByID[source.id]!
+            return .success("HERMES_RESULT:" + String(decoding: try! JSONEncoder().encode(["imagePath": output.imageURL.path, "moviePath": output.videoURL.path]), as: UTF8.self))
+        }
+        var unwantedImportCalls = 0
+        compositionShutdown.importToPhotos = true
+        compositionShutdown.photoPairImporter = { _, _ in unwantedImportCalls += 1; return .success(1) }
+        await compositionShutdown.addFiles(shutdownSources.flatMap { [$0.imageURL, $0.videoURL] })
+        let composingAtShutdown = Task { await compositionShutdown.processPairs() }
+        try await waitUntilAsync { await compositionGate.ids.count >= 2 }
+        var compositionQuitReturned = false
+        let compositionQuit = Task { await compositionShutdown.prepareForTermination(); compositionQuitReturned = true }
+        try await waitUntil { compositionShutdown.isPreparingToQuit }
+        expect(!compositionQuitReturned && compositionShutdown.isProcessing, "termination must wait for started composition work to publish its output")
+        await compositionGate.releaseAll()
+        await composingAtShutdown.value
+        await compositionQuit.value
+        let startedCompositionIDs = await compositionGate.ids
+        expect(startedCompositionIDs.count < shutdownSources.count && compositionShutdown.completed.count == startedCompositionIDs.count, "termination must retain started composition results without launching the remaining queue")
+        expect(compositionQuitReturned && unwantedImportCalls == 0 && compositionShutdown.completed.allSatisfy { $0.outputIsCurrent && !$0.importedToPhotos }, "shutdown must not start new Photos transactions after local composition finishes")
+        pass("termination drains started compositions but does not launch waiting pairs or new Photos imports")
+
+        actor FinalDownloadScanGate {
+            var continuation: CheckedContinuation<DownloadScanResult, Never>?
+            var started = false
+            var returned = false
+            func suspend() async -> DownloadScanResult {
+                started = true
+                let result = await withCheckedContinuation { continuation = $0 }
+                returned = true
+                return result
+            }
+            func release(_ result: DownloadScanResult) { continuation?.resume(returning: result); continuation = nil }
+        }
+        let scanShutdown = try model("final-readonly-scan-shutdown")
+        let settledBeforeScanQuit = scanShutdown.downloadOutputFolder.appendingPathComponent("settled.jpg")
+        try Data("settled media before final directory scan".utf8).write(to: settledBeforeScanQuit)
+        let finalScanGate = FinalDownloadScanGate()
+        scanShutdown.downloadScanner = { _, _ in await finalScanGate.suspend() }
+        scanShutdown.shareDownloader = { _, _, _ in .success("completed transfer") }
+        scanShutdown.downloadShareText = "https://v.douyin.com/shutdown-final-scan/"
+        await scanShutdown.downloadShare()
+        try await waitUntilAsync { await finalScanGate.started }
+        var scanQuitReturned = false
+        let scanQuit = Task { await scanShutdown.prepareForTermination(); scanQuitReturned = true }
+        try await waitUntil { scanQuitReturned }
+        expect(scanShutdown.isPreparingToQuit && !scanShutdown.isDownloading && fm.fileExists(atPath: settledBeforeScanQuit.path), "a read-only final scan must not delay termination or remove settled media")
+        await finalScanGate.release(DownloadScanResult(pairs: [], photos: [settledBeforeScanQuit], videos: []))
+        try await waitUntilAsync { await finalScanGate.returned }
+        try await Task.sleep(for: .milliseconds(25))
+        await scanQuit.value
+        expect(scanShutdown.completed.isEmpty && scanShutdown.downloadProgressItems.isEmpty, "a cancelled late scan must not write history or restart progress after shutdown")
+        pass("termination bypasses a suspended final directory scan and rejects its late history result")
+
         let missingSingles = try model("missing-standalone-refresh")
         let removedPhoto = missingSingles.downloadOutputFolder.appendingPathComponent("photo.jpg")
         let removedVideo = missingSingles.downloadOutputFolder.appendingPathComponent("video.mp4")

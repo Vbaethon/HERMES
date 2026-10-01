@@ -17,6 +17,15 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
     private var aboutWindowController: NSWindowController?
+    private var terminationIsPending = false
+    var terminationReplyHandler: ((Bool) -> Void)?
+
+    override init() { super.init() }
+
+    init(mainWindowController: MainWindowController) {
+        self.mainWindowController = mainWindowController
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Remove the obsolete manual login value without reading or transmitting it.
@@ -29,9 +38,39 @@ final class HermesAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValida
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard mainWindowController?.model.hasActiveWork == true else { return .terminateNow }
-        mainWindowController?.showActiveWorkNotice()
-        return .terminateCancel
+        guard let controller = mainWindowController else { return .terminateNow }
+        guard !terminationIsPending else { return .terminateLater }
+        guard controller.model.hasActiveWork || controller.model.isPreparingToQuit else { return .terminateNow }
+        terminationIsPending = true
+        if controller.model.isPreparingToQuit {
+            finishTermination(controller: controller, application: sender)
+        } else {
+            controller.confirmTermination { [weak self, weak sender] shouldQuit in
+                guard let self, let sender else { return }
+                if shouldQuit {
+                    self.finishTermination(controller: controller, application: sender)
+                } else {
+                    self.terminationIsPending = false
+                    self.replyToTermination(false, application: sender)
+                }
+            }
+        }
+        return .terminateLater
+    }
+
+    private func finishTermination(controller: MainWindowController, application: NSApplication) {
+        controller.showTerminationProgress()
+        Task { @MainActor [weak self, weak application] in
+            await controller.model.prepareForTermination()
+            controller.hideTerminationProgress()
+            self?.terminationIsPending = false
+            if let self, let application { self.replyToTermination(true, application: application) }
+        }
+    }
+
+    private func replyToTermination(_ shouldTerminate: Bool, application: NSApplication) {
+        if let terminationReplyHandler { terminationReplyHandler(shouldTerminate) }
+        else { application.reply(toApplicationShouldTerminate: shouldTerminate) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

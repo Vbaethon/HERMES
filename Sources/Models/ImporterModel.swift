@@ -218,6 +218,12 @@ final class ImporterModel: ObservableObject {
     private var completedDownloadPairIDsCache = Set<PairItem.ID>()
     private var pendingDownloadTasks: [DownloadQueueTask] = []
     private var activeDownloadTask: DownloadQueueTask?
+    private var activeDownloadRunnerTask: Task<Void, Never>?
+    private var activeDownloadWorkerTask: Task<ToolRunResult, Never>?
+    private var terminationPreparationTask: Task<Void, Never>?
+    @Published private(set) var isPreparingToQuit = false
+    private var activeDownloadEntryIndex: Int?
+    private var activeDownloadStatusDetail: String?
     private var activeDownloadFileRevisions: [String: MediaFileRevision] = [:]
     var activeDownloadOutputRoot: URL? { activeDownloadTask?.outputRoot }
     private var activeDownloadProgressState: DownloadProgressState?
@@ -254,6 +260,49 @@ final class ImporterModel: ObservableObject {
             || pendingImportScans > 0 || isRefreshingCompleted || isRefreshingDownloads
     }
     var canMoveOutputFolder: Bool { !hasActiveWork }
+
+    /// Stop the owned download worker before exiting so its cancellation defers
+    /// can remove partial files. Completed media and client caches are retained.
+    func prepareForTermination() async {
+        if let preparation = terminationPreparationTask {
+            await preparation.value
+            return
+        }
+        isPreparingToQuit = true
+        pendingDownloadTasks.removeAll()
+        needsAnotherDownloadRefresh = false
+        needsAnotherCompletedRefresh = false
+        importScanGeneration += 1
+        stopMonitoringLocalFiles()
+
+        let runner = activeDownloadRunnerTask
+        let worker = activeDownloadWorkerTask
+        runner?.cancel()
+        worker?.cancel()
+        let preparation = Task { @MainActor in
+            _ = await worker?.value
+            // Once transfer has finished, the runner may only be awaiting a
+            // read-only directory scan. Do not hold exit on that scan.
+            if worker != nil { await runner?.value }
+            self.activeDownloadRunnerTask = nil
+            self.activeDownloadWorkerTask = nil
+            self.activeDownloadTask = nil
+            self.activeDownloadEntryIndex = nil
+            self.activeDownloadStatusDetail = nil
+            self.activeDownloadFileRevisions = [:]
+            self.activeDownloadProgressState = nil
+            self.isDownloading = false
+            self.rebuildDownloadProgressItems()
+
+            // A Photos transaction or a running composition cannot safely be
+            // abandoned halfway through publishing its result and import flag.
+            while self.fileOperationsBusy {
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
+        terminationPreparationTask = preparation
+        await preparation.value
+    }
     var downloadQueueCount: Int { pendingDownloadTasks.count + (activeDownloadTask == nil ? 0 : 1) }
     var downloadQueueSummary: String {
         var lines: [String] = []
@@ -268,7 +317,7 @@ final class ImporterModel: ObservableObject {
             && selectedCompletedItems.allSatisfy { downloadFilesAvailableForAction([$0.imageURL] + ($0.movieURL.map { [$0] } ?? [])) }
     }
     var canClearQueue: Bool {
-        guard !fileOperationsBusy else { return false }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return false }
         if !selectedPairIDs.isEmpty {
             return selectedPairs.contains { downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
         }
@@ -413,7 +462,7 @@ final class ImporterModel: ObservableObject {
             + downloadVideos.filter { selectedVideoPaths.contains($0.standardizedFileURL.path) }
     }
     var canProcessDownloadPairs: Bool {
-        guard !fileOperationsBusy else { return false }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return false }
         let processablePairIDs = processableVisibleDownloadPairIDs
         if selectedDownloadItemIDs.isEmpty {
             return !processablePairIDs.isEmpty
@@ -507,6 +556,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func startMonitoringLocalFiles() {
+        guard !isPreparingToQuit else { return }
         localFileMonitoringStarted = true
         refreshLocalFileMonitoring()
     }
@@ -555,6 +605,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func addFiles(_ urls: [URL]) async {
+        guard !isPreparingToQuit else { return }
         let generation = importScanGeneration
         pendingImportScans += 1
         defer { pendingImportScans -= 1 }
@@ -572,7 +623,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func clear(deleteFiles: Bool = false) {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         let selectedIDs = selectedPairIDs
         if selectedIDs.isEmpty { importScanGeneration += 1 }
         let targets = selectedIDs.isEmpty ? pairs : pairs.filter { selectedIDs.contains($0.id) }
@@ -775,7 +826,7 @@ final class ImporterModel: ObservableObject {
 
     private func moveOutputFolder(to parentFolder: URL) {
         let page = selection ?? .queue
-        guard !fileOperationsBusy, !isDownloading, activeDownloadTask == nil, pendingDownloadTasks.isEmpty,
+        guard !isPreparingToQuit, !fileOperationsBusy, !isDownloading, activeDownloadTask == nil, pendingDownloadTasks.isEmpty,
               !isRefreshingCompleted, !isRefreshingDownloads, pendingImportScans == 0 else {
             statusText = "请等待下载、合成、导入和刷新结束后，再移动导出文件夹。"
             operationNotices[page] = statusText
@@ -952,7 +1003,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func selectDownloadOutputFolder(_ folder: URL) {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         let standardizedFolder = folder.standardizedFileURL
         downloadOutputFolder = standardizedFolder
         Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
@@ -961,12 +1012,14 @@ final class ImporterModel: ObservableObject {
     }
 
     func downloadShare() async {
+        guard !isPreparingToQuit else { return }
         let shareText = downloadShareText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shareText.isEmpty else { return }
         await enqueueDownloadShare(shareText: shareText)
     }
 
     private func enqueueDownloadShare(shareText: String) async {
+        guard !isPreparingToQuit else { return }
         let entries = Self.downloadShareEntries(from: shareText)
         guard !entries.isEmpty else {
             downloadStatusText = "没有识别到支持的分享链接。请粘贴抖音、小红书或得物的完整分享链接。"
@@ -998,6 +1051,7 @@ final class ImporterModel: ObservableObject {
     }
 
     private func startNextDownloadTaskIfNeeded() {
+        guard !isPreparingToQuit else { return }
         guard activeDownloadTask == nil else { return }
         guard !pendingDownloadTasks.isEmpty else {
             isDownloading = false
@@ -1012,7 +1066,7 @@ final class ImporterModel: ObservableObject {
         refreshLocalFileMonitoring()
         isDownloading = true
         rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: "解析分享链接", activeUnitProgress: 0)
-        Task { await performQueuedDownloadTask(task) }
+        activeDownloadRunnerTask = Task { await performQueuedDownloadTask(task) }
     }
 
     private func performQueuedDownloadTask(_ task: DownloadQueueTask) async {
@@ -1021,27 +1075,50 @@ final class ImporterModel: ObservableObject {
         let downloader = shareDownloader
 
         for (index, entry) in task.entries.enumerated() {
+            guard !Task.isCancelled, !isPreparingToQuit else { return }
+            activeDownloadEntryIndex = index
+            activeDownloadStatusDetail = nil
             rebuildDownloadProgressItems(
                 activeCompletedCount: index,
                 activeDetail: Self.downloadProgressDetail(for: entry, fraction: 0),
                 activeUnitProgress: 0
             )
-            let result = await Task.detached(priority: .userInitiated) {
-                await Self.withSecurityScopedAccess(to: task.outputRoot) {
-                    await downloader(entry, task.outputRoot) { fraction in
-                        let clampedFraction = min(max(fraction, 0), 1)
-                        let unitProgress = clampedFraction * DownloadProgressMilestone.downloadEnd
-                        let detail = Self.downloadProgressDetail(for: entry, fraction: clampedFraction)
-                        await MainActor.run {
-                            self.rebuildDownloadProgressItems(
-                                activeCompletedCount: index,
-                                activeDetail: detail,
-                                activeUnitProgress: unitProgress
-                            )
+            let worker = Task.detached(priority: .userInitiated) {
+                let status: DownloaderInfra.StatusHandler = { detail in
+                    await MainActor.run {
+                        guard !self.isPreparingToQuit, self.activeDownloadTask?.id == task.id,
+                              self.activeDownloadEntryIndex == index else { return }
+                        self.activeDownloadStatusDetail = detail
+                        self.rebuildDownloadProgressItems(activeCompletedCount: index, activeDetail: detail)
+                    }
+                }
+                return await DownloaderInfra.$statusHandler.withValue(status) {
+                    await Self.withSecurityScopedAccess(to: task.outputRoot) {
+                        await downloader(entry, task.outputRoot) { fraction in
+                            let clampedFraction = min(max(fraction, 0), 1)
+                            let unitProgress = clampedFraction * DownloadProgressMilestone.downloadEnd
+                            let detail = Self.downloadProgressDetail(for: entry, fraction: clampedFraction)
+                            await MainActor.run {
+                                guard !self.isPreparingToQuit, self.activeDownloadTask?.id == task.id,
+                                      self.activeDownloadEntryIndex == index else { return }
+                                self.rebuildDownloadProgressItems(
+                                    activeCompletedCount: index,
+                                    activeDetail: self.activeDownloadStatusDetail ?? detail,
+                                    activeUnitProgress: unitProgress
+                                )
+                            }
                         }
                     }
                 }
-            }.value
+            }
+            activeDownloadWorkerTask = worker
+            let result = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            activeDownloadWorkerTask = nil
+            guard !Task.isCancelled, !isPreparingToQuit else { return }
             switch result {
             case .success(let message):
                 if !message.isEmpty {
@@ -1054,6 +1131,7 @@ final class ImporterModel: ObservableObject {
         }
 
         await holdCompletedDownloadProgress(for: task)
+        guard !Task.isCancelled, !isPreparingToQuit else { return }
 
         recordDownloadFailures(failures)
         if messages.isEmpty {
@@ -1066,8 +1144,12 @@ final class ImporterModel: ObservableObject {
         }
 
         await refreshSettledDownloadHistory(in: task.outputRoot)
+        guard !Task.isCancelled, !isPreparingToQuit else { return }
         if activeDownloadTask?.id == task.id {
             activeDownloadTask = nil
+            activeDownloadRunnerTask = nil
+            activeDownloadEntryIndex = nil
+            activeDownloadStatusDetail = nil
             activeDownloadFileRevisions = [:]
         }
         startNextDownloadTaskIfNeeded()
@@ -1155,7 +1237,8 @@ final class ImporterModel: ObservableObject {
     }
 
     func refreshDownloads() {
-        guard !fileOperationsBusy else { needsAnotherDownloadRefresh = true; return }
+        guard !isPreparingToQuit else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { needsAnotherDownloadRefresh = true; return }
         guard !isRefreshingDownloads else {
             needsAnotherDownloadRefresh = true
             return
@@ -1168,6 +1251,7 @@ final class ImporterModel: ObservableObject {
                 guard let folder = self.authorizedDownloadOutputFolderForUserAction() else { break }
                 let mutationVersion = self.downloadMutationVersion
                 let scannedItems = await self.downloadScanner(folder, self.downloadComposedFolder)
+                guard !self.isPreparingToQuit else { break }
                 guard self.downloadOutputFolder == folder else {
                     self.needsAnotherDownloadRefresh = true
                     continue
@@ -1185,7 +1269,7 @@ final class ImporterModel: ObservableObject {
                     self.operationNotices.removeValue(forKey: .downloads)
                 }
                 self.applyDownloadedItems(scannedItems)
-            } while self.needsAnotherDownloadRefresh
+            } while self.needsAnotherDownloadRefresh && !self.isPreparingToQuit
             self.isRefreshingDownloads = false
         }
     }
@@ -1241,8 +1325,9 @@ final class ImporterModel: ObservableObject {
     /// A task may finish in the folder selected when it was queued, after the user
     /// has selected a different download folder for subsequent tasks.
     func refreshSettledDownloadHistory(in folder: URL) async {
+        guard !isPreparingToQuit, !Task.isCancelled else { return }
         let scanned = await downloadScanner(folder, folder.appendingPathComponent("已合成", isDirectory: true))
-        guard !scanned.directoryUnavailable else { return }
+        guard !isPreparingToQuit, !Task.isCancelled, !scanned.directoryUnavailable else { return }
         var records = completed
         for url in scanned.photos + scanned.videos {
             guard let revision = MediaFileRevision(url) else { continue }
@@ -1261,7 +1346,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func processDownloadPairs(selection explicitSelection: Set<DownloadGridItem.ID>? = nil) async {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         rebuildVisibleDownloadItems() // Revalidate files at the action boundary.
         let visibleIDs = processableVisibleDownloadPairIDs
         let selection = explicitSelection ?? selectedDownloadItemIDs
@@ -1277,7 +1362,7 @@ final class ImporterModel: ObservableObject {
 
     func importSelectedDownloadMediaToPhotos(addToAlbum: Bool) async {
         let mediaURLs = selectedDownloadMediaURLs
-        guard !fileOperationsBusy, !mediaURLs.isEmpty, downloadFilesAvailableForAction(mediaURLs) else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy, !mediaURLs.isEmpty, downloadFilesAvailableForAction(mediaURLs) else { return }
         guard mediaURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
             downloadStatusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
             appendOperationNotice(downloadStatusText, for: .downloads)
@@ -1309,7 +1394,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func clearVisibleDownloads(deleteFiles: Bool) {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         downloadMutationVersion += 1
         let selectedIDs = selectedDownloadItemIDs
         let targets = selectedIDs.isEmpty ? visibleDownloadItems : visibleDownloadItems.filter { selectedIDs.contains($0.id) }
@@ -1369,7 +1454,7 @@ final class ImporterModel: ObservableObject {
 
     func importCompletedToPhotos(addToAlbum targetAddToAlbum: Bool? = nil) async {
         let selectedItems = selectedCompletedItems
-        guard !fileOperationsBusy, !selectedItems.isEmpty,
+        guard !isPreparingToQuit, !fileOperationsBusy, !selectedItems.isEmpty,
               selectedItems.allSatisfy({ downloadFilesAvailableForAction([$0.imageURL] + ($0.movieURL.map { [$0] } ?? [])) }) else { return }
         guard selectedItems.allSatisfy(\.sourceExists) else {
             statusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
@@ -1384,6 +1469,7 @@ final class ImporterModel: ObservableObject {
         var count = 0
         var failures: [String] = []
         for items in [liveItems, plainItems] where !items.isEmpty {
+            guard !isPreparingToQuit else { break }
             let result: PhotoImportResult
             if items[0].movieURL != nil {
                 result = await livePhotoPairsImporter(items.compactMap { item in
@@ -1418,7 +1504,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func processPairs(selection explicitSelection: Set<PairItem.ID>? = nil) async {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         let selection = explicitSelection ?? selectedPairIDs
         let targetIDs = explicitSelection == nil && selection.isEmpty ? Set(pairs.map(\.id)) : selection
         let targets = pairs.filter { targetIDs.contains($0.id) && downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
@@ -1465,7 +1551,7 @@ final class ImporterModel: ObservableObject {
                 // Record the valid local result even if Photos import fails.
                 mergeCompletedItem(item)
                 if fromDownloads { mergeDownloadCompletedItem(item) }
-                if shouldImport {
+                if shouldImport && !isPreparingToQuit {
                     switch await photoPairImporter(item, album) {
                     case .success:
                         guard item.outputIsCurrent else {
@@ -1546,8 +1632,8 @@ final class ImporterModel: ObservableObject {
         await withTaskGroup(of: LivePhotoCompositionResult.self) { group in
             var nextIndex = 0
 
-            func enqueueNextTask() {
-                guard nextIndex < targetPairs.count else { return }
+            @MainActor func enqueueNextTask() {
+                guard !isPreparingToQuit, nextIndex < targetPairs.count else { return }
                 let pair = targetPairs[nextIndex]
                 nextIndex += 1
                 group.addTask(priority: .userInitiated) {
@@ -1708,7 +1794,8 @@ final class ImporterModel: ObservableObject {
     }
 
     func refreshCompleted() {
-        guard !fileOperationsBusy else { needsAnotherCompletedRefresh = true; return }
+        guard !isPreparingToQuit else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { needsAnotherCompletedRefresh = true; return }
         guard !isRefreshingCompleted else { needsAnotherCompletedRefresh = true; return }
         guard let folder = authorizedOutputFolderForUserAction() else { return }
         isRefreshingCompleted = true
@@ -1726,6 +1813,7 @@ final class ImporterModel: ObservableObject {
                 return
             }
             self.isRefreshingCompleted = false
+            guard !self.isPreparingToQuit else { return }
             guard self.outputFolder == folder, self.completedMutationVersion == mutationVersion, !self.fileOperationsBusy else {
                 self.needsAnotherCompletedRefresh = true
                 if !self.fileOperationsBusy { self.resumeCompletedRefreshIfNeeded() }
@@ -1803,7 +1891,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func clearVisibleCompleted(deleteFiles: Bool) {
-        guard !fileOperationsBusy else { return }
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
         completedMutationVersion += 1
         let selectedIDs = selectedCompletedIDs
         let targets = selectedIDs.isEmpty ? visibleCompleted : visibleCompleted.filter { selectedIDs.contains($0.id) }
