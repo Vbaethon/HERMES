@@ -55,7 +55,7 @@ enum XHSAppCache {
     }
 
     @MainActor static func openNote(_ noteID: String, shareURL: URL) async -> Bool {
-        guard isNoteID(noteID),
+        guard !Task.isCancelled, isNoteID(noteID),
               let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.xingin.discover") else { return false }
         var components = URLComponents()
         components.scheme = "xhsdiscover"
@@ -103,6 +103,7 @@ enum XHSNativeDownloader {
         var index: Int
         var imageURL: URL
         var imageURLs: [URL] = []
+        var appOriginalURLs: [URL] = []
         var liveURL: URL?
         var liveURLs: [URL]
         var fileID: String
@@ -366,18 +367,21 @@ enum XHSNativeDownloader {
                 bestNote = preferredNote(notes + cached)
             }
             mergeCache()
-            // Refresh the client's own record when web Live Photos have no audio source.
-            // A bounded wait leaves the original web download available if the app is absent.
-            if bestNote == nil || bestNote!.items.contains(where: { ($0.livePhotoDeclared || $0.liveURL != nil) && !$0.liveHasAudio }) {
+            // Refresh once when exact client originals or Live Photo audio are missing.
+            // A bounded wait leaves the bare original available if the app is absent.
+            if shouldRefreshClientCache(for: bestNote) {
+                try Task.checkCancellation()
+                await DownloaderInfra.reportStatus("正在读取客户端原图来源")
+                try Task.checkCancellation()
                 if !roots.isEmpty, await XHSAppCache.openNote(identity, shareURL: url) {
                     for _ in 0..<8 {
                         try Task.checkCancellation()
                         try await Task.sleep(for: .seconds(1))
                         mergeCache()
-                        if let bestNote, !bestNote.items.isEmpty,
-                           bestNote.items.allSatisfy({ !($0.livePhotoDeclared || $0.liveURL != nil) || $0.liveHasAudio }) { break }
+                        if !shouldRefreshClientCache(for: bestNote) { break }
                     }
                 }
+                try Task.checkCancellation()
             }
         }
         if let bestNote { return bestNote }
@@ -492,16 +496,31 @@ enum XHSNativeDownloader {
         normalized["noteId"] = expectedID
         normalized["imageList"] = images.map { image -> [String: Any] in
             var result: [String: Any] = ["fileId": image["fileid"]!, "livePhoto": image["live_photo"] is [String: Any]]
-            // Only image fields may participate in image selection; motion URLs cannot be images.
-            result["url"] = image["original"] ?? image["url_size_large"] ?? image["url"]
+            // Reconstruct the bare cover by identity. Display URLs are never originals.
+            result["url"] = "https://sns-img-bd.xhscdn.com/\(image["fileid"]!)"
             result["stream"] = deepGet(image, keys: ["live_photo", "media", "stream"])
             return result
         }
         guard var parsed = try? parseNote(normalized, fallbackURL: fallbackURL), parsed.hasMedia else { return nil }
         parsed.usedAppCache = true
-        // Retain the existing web original-image selection whenever it is available.
-        for i in parsed.items.indices { parsed.items[i].imageQuality = -1 }
+        // Keep the identity-derived cover and motion metadata even without an original.
+        // Only this exact image's original field supplies a client fallback.
+        for i in parsed.items.indices {
+            parsed.items[i].imageQuality = -1
+            guard let image = images.first(where: { $0["fileid"] as? String == parsed.items[i].fileID }) else { continue }
+            parsed.items[i].appOriginalURLs = appOriginalURL(from: image, fileID: parsed.items[i].fileID).map { [$0] } ?? []
+            parsed.items[i].imageURLs = orderedUniqueURLs([parsed.items[i].imageURL]
+                + parsed.items[i].appOriginalURLs)
+        }
         return parsed
+    }
+
+    static func shouldRefreshClientCache(for note: NoteInfo?) -> Bool {
+        guard let note else { return true }
+        guard note.type != "video" else { return false }
+        return note.items.isEmpty || note.items.contains {
+            $0.appOriginalURLs.isEmpty || (($0.livePhotoDeclared || $0.liveURL != nil) && !$0.liveHasAudio)
+        }
     }
 
     private static func extractInitialState(from html: String) throws -> [String: Any] {
@@ -581,7 +600,7 @@ enum XHSNativeDownloader {
     }
 
     private static func bestImageURL(from item: [String: Any]) -> ImageCandidate? {
-        let candidates = nestedImageCandidates(in: item)
+        let candidates = nestedImageCandidates(in: item).filter { isUnprocessedImageURL($0.url) }
         return candidates.max { lhs, rhs in
             imageScore(lhs) < imageScore(rhs)
         }
@@ -608,6 +627,8 @@ enum XHSNativeDownloader {
         let webNotes = matching.filter { !$0.usedAppCache }
         guard var result = (webNotes.isEmpty ? matching : webNotes).max(by: noteIsLessComplete) else { return nil }
         guard !identity.isEmpty, result.type != "video" else { return result }
+        // Cache records arrive newest first; collect their originals in that order.
+        for i in result.items.indices { result.items[i].appOriginalURLs = [] }
         for note in matching where note.type == result.type {
             for item in note.items where !item.fileID.isEmpty {
                 guard note.items.filter({ $0.fileID == item.fileID }).count == 1 else { continue }
@@ -615,16 +636,20 @@ enum XHSNativeDownloader {
                 if indices.count == 1, let i = indices.first {
                     let existingImageURLs = result.items[i].imageURLs.isEmpty
                         ? [result.items[i].imageURL] : result.items[i].imageURLs
-                    let additionalImageURLs = item.imageURLs.isEmpty ? [item.imageURL] : item.imageURLs
+                    let additionalImageURLs = note.usedAppCache ? []
+                        : (item.imageURLs.isEmpty ? [item.imageURL] : item.imageURLs)
                     if item.imageQuality > result.items[i].imageQuality {
                         result.items[i].imageURL = item.imageURL
                         result.items[i].imageQuality = item.imageQuality
                         result.items[i].imageUserAgent = item.imageUserAgent ?? note.requestUserAgent
                     }
-                    // Keep the preferred original first. The client's exact-ID original
-                    // is a full-size fallback ahead of web display-size transformations.
+                    result.items[i].appOriginalURLs = orderedUniqueURLs(result.items[i].appOriginalURLs
+                        + item.appOriginalURLs)
+                    // Keep the bare original first and newer exact-ID client originals
+                    // ahead of older snapshots. Web display variants never participate.
                     result.items[i].imageURLs = orderedUniqueURLs([result.items[i].imageURL]
-                        + (note.usedAppCache ? additionalImageURLs + existingImageURLs : existingImageURLs + additionalImageURLs))
+                        + result.items[i].appOriginalURLs
+                        + (existingImageURLs + additionalImageURLs).filter(isUnprocessedImageURL))
                     if note.usedAppCache, result.items[i].imageURLs != existingImageURLs {
                         result.usedAppCache = true
                     }
@@ -758,10 +783,40 @@ enum XHSNativeDownloader {
             let left = imageScore(lhs), right = imageScore(rhs)
             return left == right ? lhs.sourceText < rhs.sourceText : left > right
         }
-        let originalSource = URL(string: preferred.sourceText).map { [$0] } ?? []
-        return orderedUniqueURLs([preferred.url] + originalSource + candidates.flatMap { candidate in
-            [candidate.url] + (URL(string: candidate.sourceText).map { [$0] } ?? [])
-        })
+        // Only the reconstructed, unprocessed paths from web metadata are usable.
+        // Its signed H5/style/display URLs may have a platform watermark baked in.
+        return orderedUniqueURLs(([preferred.url] + candidates.map(\.url)).filter(isUnprocessedImageURL))
+    }
+
+    private static func isDisplayImageURL(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        if ["!h5", "!style", "!web-display", "!display", "!preview", "/display/", "/preview/"].contains(where: path.contains) {
+            return true
+        }
+        return (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).contains { item in
+            let key = item.name.lowercased()
+            if key == "sc" { return item.value?.uppercased() != "ORIGINAL" }
+            return ["preview", "display", "thumbnail", "style", "h5"].contains(where: key.contains)
+        }
+    }
+
+    private static func isUnprocessedImageURL(_ url: URL) -> Bool {
+        guard !isDisplayImageURL(url), !url.path.contains("!") else { return false }
+        return !(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).contains { item in
+            let key = item.name.lowercased()
+            return ["imageview", "imagemogr", "resize"].contains(where: key.contains)
+        }
+    }
+
+    private static func appOriginalURL(from image: [String: Any], fileID: String) -> URL? {
+        guard let source = JSONValueUtilities.nonEmptyString(image["original"]),
+              let url = URL(string: MediaFileUtilities.formatURL(source)),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased(), host == "xhscdn.com" || host.hasSuffix(".xhscdn.com"),
+              extractImageToken(source) == fileID, !url.path.contains("!"), !isDisplayImageURL(url) else { return nil }
+        // The client's ORIGINAL field may include its own 5000-pixel WebP transform.
+        // Preserve its signed URL verbatim; never borrow a DETAIL/PREVIEW field.
+        return url
     }
 
     private static func streamURL(_ item: [String: Any]) -> URL? {

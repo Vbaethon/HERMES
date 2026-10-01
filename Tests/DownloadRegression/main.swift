@@ -136,7 +136,7 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
             URL(string: "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/notes_pre_post/still-\(number)!web-display")!
         }
         let signedClientURLs = (1...4).map { number in
-            URL(string: "https://sns-na-i6.xhscdn.com/notes_pre_post/still-\(number)?imageView2/2/w/5000/h/5000/format/webp/q/90&sign=fixture")!
+            URL(string: "https://sns-na-i6.xhscdn.com/notes_pre_post/still-\(number)?imageView2/2/w/5000/h/5000/format/webp/q/90&ap=1&sc=ORIGINAL&sign=fixture")!
         }
         let stillWeb = try X.parseNote(["noteId": noteID, "type": "normal", "imageList": (1...4).map { number in
             ["fileId": "notes_pre_post/still-\(number)", "url": signedWebURLs[number - 1].absoluteString,
@@ -149,11 +149,113 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         precondition(stillCombined.items.count == 4 && stillCombined.usedAppCache)
         for (offset, media) in stillCombined.items.enumerated() {
             precondition(media.imageURL == stillWeb.items[offset].imageURL, "The preferred original must remain first")
-            precondition(media.imageURLs.first == media.imageURL && media.imageURLs[1] == signedClientURLs[offset], "Full-size exact-ID cache originals must precede web display fallbacks")
-            precondition(media.imageURLs.contains(signedWebURLs[offset]), "Signed web URLs must remain available")
+            precondition(media.imageURLs == [media.imageURL, signedClientURLs[offset]], "Only the preferred bare original and exact-ID client ORIGINAL may be attempted")
+            precondition(media.appOriginalURLs == [signedClientURLs[offset]])
+            precondition(!media.imageURLs.contains(signedWebURLs[offset]), "A signed web display image must not be silently delivered as an original")
             precondition(Set(media.imageURLs).count == media.imageURLs.count)
             precondition(media.imageURLs.allSatisfy { !$0.host!.contains("sns-video") }, "Motion streams cannot be image fallback sources")
         }
+        // A successful web page can advertise only display variants. Their
+        // canonical bare originals remain usable, but the signed H5/style/
+        // preview representations must never enter the download fallback list.
+        let ordinaryImages: [[String: Any]] = (1...4).map { number in
+            let fileID = "notes_pre_post/still-\(number)"
+            return ["fileId": fileID,
+                "url": "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/\(fileID)!h5_1080jpg",
+                "infoList": [
+                    ["imageScene": "H5_DTL", "url": signedWebURLs[number - 1].absoluteString],
+                    ["imageScene": "H5_PRV", "url": "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/\(fileID)!style_fixture"]],
+                "preview": "https://sns-na-i6.xhscdn.com/\(fileID)?imageView2/2/w/576/format/webp&sc=PREVIEW&sign=preview"]
+        }
+        let ordinaryWeb = try X.parseNote(["noteId": noteID, "type": "normal", "imageList": ordinaryImages], fallbackURL: fallback)
+        let expectedBareURLs = (1...4).map { URL(string: "https://sns-img-bd.xhscdn.com/notes_pre_post/still-\($0)")! }
+        let unavailableCache = X.preferredNote([ordinaryWeb])!
+        precondition(unavailableCache.items.map(\.imageURL) == expectedBareURLs)
+        for (offset, media) in unavailableCache.items.enumerated() {
+            precondition(media.imageURLs == [expectedBareURLs[offset]] && media.appOriginalURLs.isEmpty,
+                "Missing or unavailable client cache must preserve the bare source without adding a display-sized substitute")
+        }
+        precondition(X.shouldRefreshClientCache(for: nil))
+        precondition(X.shouldRefreshClientCache(for: ordinaryWeb), "Ordinary stills missing client originals require the same bounded cache refresh as Live Photos")
+        precondition(!X.shouldRefreshClientCache(for: videoDesktop), "Video notes must not trigger still-image cache refresh")
+        let originalsReady = X.preferredNote([ordinaryWeb, stillClient])!
+        precondition(!X.shouldRefreshClientCache(for: originalsReady), "All exact client originals satisfy an ordinary still-image refresh")
+        precondition(X.shouldRefreshClientCache(for: stillCombined), "Having image originals must not bypass the existing Live Photo audio refresh")
+        let oneOriginal = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [
+            ["fileid": "notes_pre_post/still-3", "original": signedClientURLs[2].absoluteString]
+        ]], expectedID: noteID, fallbackURL: fallback)!
+        let partialOriginals = X.preferredNote([ordinaryWeb, oneOriginal])!
+        precondition(X.shouldRefreshClientCache(for: partialOriginals))
+        precondition(partialOriginals.items[2].appOriginalURLs == [signedClientURLs[2]] && partialOriginals.items[1].appOriginalURLs.isEmpty,
+            "A sparse client cache must bind each original by fileID rather than array position")
+        let cancelledCacheOpen = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            precondition(Task.isCancelled)
+            return await XHSAppCache.openNote(noteID, shareURL: fallback)
+        }
+        let cancelledCacheOpened = await cancelledCacheOpen.value
+        precondition(!cancelledCacheOpened, "An already cancelled client refresh must return before opening an external app")
+
+        var previewOnlyImage = appImage(2)
+        previewOnlyImage.removeValue(forKey: "original")
+        let largePreview = "https://sns-na-i6.xhscdn.com/image-2?imageView2/2/w/1440/format/webp&sc=DETAIL&sign=large"
+        let smallPreview = "https://sns-na-i6.xhscdn.com/image-2?imageView2/2/w/576/format/webp&sc=PREVIEW&sign=small"
+        previewOnlyImage["url_size_large"] = largePreview
+        previewOnlyImage["url"] = smallPreview
+        let previewOnlyClient = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [previewOnlyImage]], expectedID: noteID, fallbackURL: fallback)!
+        let previewCombined = X.preferredNote([web, previewOnlyClient])!
+        precondition(previewCombined.items[1].liveHasAudio, "Rejecting display stills must preserve exact-ID client motion/audio recovery")
+        precondition(previewCombined.items.allSatisfy { $0.appOriginalURLs.isEmpty })
+        precondition(previewCombined.items[1].imageURL == web.items[1].imageURL)
+        precondition(!previewCombined.items[1].imageURLs.contains(URL(string: largePreview)!) && !previewCombined.items[1].imageURLs.contains(URL(string: smallPreview)!))
+        precondition(X.shouldRefreshClientCache(for: previewCombined), "A preview-only client snapshot must not be considered an original-image cache hit")
+        previewOnlyImage.removeValue(forKey: "url_size_large")
+        let smallOnlyClient = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [previewOnlyImage]], expectedID: noteID, fallbackURL: fallback)!
+        let smallOnlyCombined = X.preferredNote([web, smallOnlyClient])!
+        precondition(smallOnlyCombined.items[1].liveHasAudio && smallOnlyCombined.items[1].appOriginalURLs.isEmpty)
+        precondition(!smallOnlyCombined.items[1].imageURLs.contains(URL(string: smallPreview)!))
+        let mismatchedOriginal = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [
+            ["fileid": "notes_pre_post/still-2", "original": signedClientURLs[3].absoluteString]
+        ]], expectedID: noteID, fallbackURL: fallback)!
+        let mismatchCombined = X.preferredNote([ordinaryWeb, mismatchedOriginal])!
+        precondition(mismatchCombined.items[1].appOriginalURLs.isEmpty && !mismatchCombined.items[1].imageURLs.contains(signedClientURLs[3]),
+            "A client's original URL for a different fileID must not be bound to this image")
+        for transformation in ["!nc_n_webp_mw1", "!unrecognized_transform"] {
+            let styledOriginal = "https://sns-na-i6.xhscdn.com/notes_pre_post/still-2" + transformation + "?sc=ORIGINAL&sign=fixture"
+            let styledClient = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [
+                ["fileid": "notes_pre_post/still-2", "original": styledOriginal]
+            ]], expectedID: noteID, fallbackURL: fallback)!
+            let styledCombined = X.preferredNote([ordinaryWeb, styledClient])!
+            precondition(styledCombined.items[1].appOriginalURLs.isEmpty && styledCombined.items[1].imageURLs == [expectedBareURLs[1]],
+                "An original field with a path style, including an unknown style, must not become an original fallback")
+        }
+
+        let qualityCacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent("XHSOriginalSourceRegression-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: qualityCacheRoot) }
+        func writeOriginalSnapshot(_ session: String, date: TimeInterval, signature: String) throws {
+            let images: [[String: Any]] = (1...4).reversed().map { number in
+                ["fileid": "notes_pre_post/still-\(number)", "original": signedClientURLs[number - 1].absoluteString.replacingOccurrences(of: "sign=fixture", with: "sign=" + signature)]
+            }
+            let body = String(decoding: try JSONSerialization.data(withJSONObject: [["note_list": [["id": noteID, "type": "normal", "images_list": images]]]]), as: UTF8.self)
+            let file = qualityCacheRoot.appendingPathComponent(session + "/extra/extraFile")
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: ["note_detail_response": body]).write(to: file)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: date)], ofItemAtPath: file.path)
+        }
+        try writeOriginalSnapshot("old-session", date: 100, signature: "older")
+        try writeOriginalSnapshot("new-session", date: 300, signature: "newest")
+        let orderedSnapshots = XHSAppCache.notes(noteID: noteID, roots: [qualityCacheRoot])
+        precondition(orderedSnapshots.count == 2)
+        let orderedClientNotes = orderedSnapshots.compactMap { X.parseAppNote($0, expectedID: noteID, fallbackURL: fallback) }
+        let newestOriginals = X.preferredNote([ordinaryWeb] + orderedClientNotes)!
+        for (offset, media) in newestOriginals.items.enumerated() {
+            let newest = URL(string: signedClientURLs[offset].absoluteString.replacingOccurrences(of: "sign=fixture", with: "sign=newest"))!
+            let older = URL(string: signedClientURLs[offset].absoluteString.replacingOccurrences(of: "sign=fixture", with: "sign=older"))!
+            precondition(media.imageURL == expectedBareURLs[offset])
+            precondition(media.appOriginalURLs == [newest, older] && media.imageURLs == [expectedBareURLs[offset], newest, older],
+                "Multiple snapshots must keep the latest exact-ID original first without older-cache order reversal")
+        }
+        print("PASS: XHS originals reject signed display fallbacks, refresh missing still originals and prefer newest exact-ID client cache")
         actor ShortLinkCounter {
             var requests = 0
             func resolved() { requests += 1 }
@@ -165,7 +267,7 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         }
         let shortRequests = await shortLinkCounter.requests
         precondition(shortLinks == [fallback] && shortRequests == 1, "Bare short links must resolve only once")
-        print("PASS: XHS signed web and exact-ID full-size cache image alternatives retain all four originals; one short-link resolution")
+        print("PASS: XHS bare and exact-ID full-size cache image alternatives retain all four originals; one short-link resolution")
         let body = String(data: try JSONSerialization.data(withJSONObject:[["note_list":[appNote]]]),encoding:.utf8)!
         let envelope = try JSONSerialization.data(withJSONObject:["noteId":"another-visible-note","note_detail_response":body])
         precondition(XHSAppCache.notes(in:envelope,noteID:noteID).count == 1)
