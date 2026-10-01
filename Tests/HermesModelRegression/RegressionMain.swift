@@ -45,6 +45,12 @@ import Foundation
             while !predicate() && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
             expect(predicate(), "asynchronous test timed out")
         }
+        func waitUntilAsync(_ predicate: @MainActor () async -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(5)
+            while !(await predicate()) && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            let satisfied = await predicate()
+            expect(satisfied, "asynchronous actor test timed out")
+        }
         let singles = try model("standalone-completion")
         let still = singles.downloadOutputFolder.appendingPathComponent("photo.jpg")
         let video = singles.downloadOutputFolder.appendingPathComponent("video.mp4")
@@ -209,6 +215,230 @@ import Foundation
         await downloadWork.value
         expect(asyncDownload.completed.count == 1 && asyncDownload.downloadStatusText.contains("1 组失败"), "valid output retained; no stale-index crash")
         pass("failed import after list removal does not access a stale index")
+
+        // Settings describe the next operation. An operation that has already
+        // suspended in its runner must keep the settings it captured at start.
+        actor CompositionSettingsGate {
+            var released = false
+            var continuations: [CheckedContinuation<Void, Never>] = []
+            func suspend() async {
+                guard !released else { return }
+                await withCheckedContinuation { continuations.append($0) }
+            }
+            func release() {
+                released = true
+                for continuation in continuations { continuation.resume() }
+                continuations.removeAll()
+            }
+        }
+        for initiallyImport in [false, true] {
+            let preferences = try model("operation-settings-\(initiallyImport)")
+            let preferenceSources = try (0..<2).map { index in
+                try pair(root.appendingPathComponent("operation-settings-input-\(initiallyImport)"), "current-\(index)")
+            }
+            let nextPreferenceSource = try pair(preferenceSources[0].imageURL.deletingLastPathComponent(), "next")
+            var preferenceExports: [String: PairItem] = [:]
+            for source in preferenceSources + [nextPreferenceSource] {
+                preferenceExports[source.id] = try pair(preferences.outputFolder, source.imageURL.deletingPathExtension().lastPathComponent)
+            }
+            let preferenceExportsByID = preferenceExports
+            let settingsGate = CompositionSettingsGate()
+            preferences.compositionRunner = { source, _ in
+                await settingsGate.suspend()
+                let target = preferenceExportsByID[source.id]!
+                let result = ["imagePath": target.imageURL.path, "moviePath": target.videoURL.path]
+                return .success("HERMES_RESULT:" + String(decoding: try! JSONEncoder().encode(result), as: UTF8.self))
+            }
+            var importedAlbums: [String?] = []
+            preferences.photoPairImporter = { _, album in importedAlbums.append(album); return .success(1) }
+            preferences.importToPhotos = initiallyImport
+            preferences.addToAlbum = initiallyImport
+            await preferences.addFiles(preferenceSources.flatMap { [$0.imageURL, $0.videoURL] })
+            let preferenceWork = Task { await preferences.processPairs() }
+            try await waitUntil { preferences.isProcessing }
+            preferences.importToPhotos = !initiallyImport
+            preferences.addToAlbum = !initiallyImport
+            await settingsGate.release()
+            await preferenceWork.value
+            expect(preferences.completed.count == 2 && preferences.completed.allSatisfy { $0.importedToPhotos == initiallyImport }, "current batch must retain import preference captured before its await")
+            expect(importedAlbums.count == (initiallyImport ? 2 : 0) && importedAlbums.allSatisfy { $0 == "HERMES" }, "current batch must retain its original album preference")
+            await preferences.addFiles([nextPreferenceSource.imageURL, nextPreferenceSource.videoURL])
+            await preferences.processPairs()
+            expect(preferences.completed.first { $0.sourceImagePath == nextPreferenceSource.imageURL.path }?.importedToPhotos == !initiallyImport, "next operation must use changed import preference")
+            expect(importedAlbums.count == (initiallyImport ? 2 : 1) && importedAlbums.allSatisfy { $0 == "HERMES" }, "next operation must use changed album preference")
+        }
+        pass("composition keeps current import and album settings across awaits; next operation uses changed settings")
+
+        let albumSnapshot = try model("completed-album-settings")
+        let albumSnapshotPair = try pair(albumSnapshot.outputFolder, "live")
+        let albumSnapshotPhoto = albumSnapshot.downloadOutputFolder.appendingPathComponent("plain.jpg")
+        try Data("plain downloaded photo".utf8).write(to: albumSnapshotPhoto)
+        let albumSnapshotSingle = CompletedItem(imagePath: albumSnapshotPhoto.path,
+            modifiedTime: MediaFileRevision(albumSnapshotPhoto)!.modified,
+            standaloneRevision: MediaFileRevision(albumSnapshotPhoto))
+        albumSnapshot.completed = [record(albumSnapshotPair), albumSnapshotSingle]
+        albumSnapshot.selectedCompletedIDs = Set(albumSnapshot.completed.map(\.id))
+        albumSnapshot.completedAddToAlbum = true
+        var completedAlbumContinuation: CheckedContinuation<PhotoImportResult, Never>?
+        var completedImportAlbums: [String?] = []
+        albumSnapshot.livePhotoPairsImporter = { _, album in
+            completedImportAlbums.append(album)
+            return await withCheckedContinuation { completedAlbumContinuation = $0 }
+        }
+        albumSnapshot.mediaFilesImporter = { urls, album in completedImportAlbums.append(album); return .success(urls.count) }
+        let completedAlbumWork = Task { await albumSnapshot.importCompletedToPhotos() }
+        try await waitUntil { completedAlbumContinuation != nil }
+        albumSnapshot.completedAddToAlbum = false
+        completedAlbumContinuation?.resume(returning: .success(1))
+        await completedAlbumWork.value
+        expect(completedImportAlbums == ["HERMES", "HERMES"], "plain media after a live-photo await must use the same operation album")
+        albumSnapshot.livePhotoPairsImporter = { urls, album in completedImportAlbums.append(album); return .success(urls.count) }
+        await albumSnapshot.importCompletedToPhotos()
+        expect(completedImportAlbums.count == 4 && completedImportAlbums.suffix(2).allSatisfy { $0 == nil }, "next completed import must use the changed album setting")
+        pass("completed mixed-media import captures its album for the entire operation")
+
+        let usableDuringDownload = try model("actions-during-download")
+        let usableSource = try pair(usableDuringDownload.downloadOutputFolder, "settled")
+        let usableExport = try pair(usableDuringDownload.outputFolder, "settled-export")
+        let usablePhoto = usableDuringDownload.downloadOutputFolder.appendingPathComponent("settled-photo.jpg")
+        try Data("already downloaded photo".utf8).write(to: usablePhoto)
+        usableDuringDownload.refreshDownloads()
+        try await waitUntil { usableDuringDownload.downloadPairs.count == 1 && usableDuringDownload.completed.count == 1 }
+        usableDuringDownload.isDownloading = true
+        usableDuringDownload.selectedDownloadItemIDs = ["photo:" + usablePhoto.path]
+        usableDuringDownload.selectedCompletedIDs = [usablePhoto.path]
+        expect(usableDuringDownload.canImportSelectedDownloadMedia && usableDuringDownload.canClearVisibleDownloads, "downloading must keep settled media import and deletion available")
+        expect(usableDuringDownload.canImportCompleted && usableDuringDownload.canClearVisibleCompleted, "downloading must keep completed-page actions available")
+        var importedDuringDownload: [URL] = []
+        usableDuringDownload.mediaFilesImporter = { urls, _ in importedDuringDownload += urls; return .success(urls.count) }
+        await usableDuringDownload.importSelectedDownloadMediaToPhotos(addToAlbum: false)
+        expect(importedDuringDownload == [usablePhoto] && usableDuringDownload.isDownloading, "settled media import must run without ending the active download")
+        usableDuringDownload.selectedDownloadItemIDs = ["pair:" + usableSource.id]
+        expect(usableDuringDownload.canProcessDownloadPairs, "downloading must keep settled pair composition available")
+        usableDuringDownload.compositionRunner = { _, _ in
+            let result = ["imagePath": usableExport.imageURL.path, "moviePath": usableExport.videoURL.path]
+            return .success("HERMES_RESULT:" + String(decoding: try! JSONEncoder().encode(result), as: UTF8.self))
+        }
+        await usableDuringDownload.processDownloadPairs()
+        expect(usableDuringDownload.completed.contains { $0.imageURL == usableExport.imageURL } && usableDuringDownload.isDownloading, "settled composition must run alongside download")
+        usableDuringDownload.selectedDownloadItemIDs = ["photo:" + usablePhoto.path]
+        usableDuringDownload.trashFiles = { urls in
+            for url in urls { try! fm.removeItem(at: url) }
+            return nil
+        }
+        usableDuringDownload.clearVisibleDownloads(deleteFiles: true)
+        expect(!fm.fileExists(atPath: usablePhoto.path) && !usableDuringDownload.completed.contains { $0.imageURL == usablePhoto }, "download-page deletion must also remove the completed standalone card")
+        expect(usableDuringDownload.completed.contains { $0.imageURL == usableExport.imageURL } && usableDuringDownload.isDownloading, "deletion must retain composed exports and active download state")
+        usableDuringDownload.isDownloading = false
+        pass("settled download assets remain composable, importable and deletable during another download")
+
+        actor DownloadRequestGate {
+            var roots: [URL] = []
+            var continuations: [CheckedContinuation<ToolRunResult, Never>] = []
+            func run(_ folder: URL) async -> ToolRunResult {
+                roots.append(folder)
+                return await withCheckedContinuation { continuations.append($0) }
+            }
+            func releaseFirst() { continuations.removeFirst().resume(returning: .success("fixture download completed")) }
+        }
+        let queuedIsolation = try model("queued-download-isolation")
+        let firstDownloadRoot = queuedIsolation.downloadOutputFolder
+        let settledDuringTask = firstDownloadRoot.appendingPathComponent("settled.jpg")
+        let revisedDuringTask = firstDownloadRoot.appendingPathComponent("revised.jpg")
+        try Data("existing settled photo".utf8).write(to: settledDuringTask)
+        try Data("existing revision".utf8).write(to: revisedDuringTask)
+        queuedIsolation.refreshDownloads()
+        try await waitUntil { queuedIsolation.completed.count == 2 && queuedIsolation.downloadPhotos.count == 2 }
+        let recordedActiveRevision = queuedIsolation.completed.first { $0.imageURL == revisedDuringTask }!.standaloneRevision
+        let requestGate = DownloadRequestGate()
+        queuedIsolation.shareDownloader = { _, folder, _ in await requestGate.run(folder) }
+        queuedIsolation.downloadShareText = "https://v.douyin.com/fixture-first/"
+        await queuedIsolation.downloadShare()
+        try await waitUntilAsync { await requestGate.roots.count == 1 }
+        expect(queuedIsolation.downloadFilesAvailableForAction([settledDuringTask]), "settled original must remain available during a real queued task")
+        let pendingFile = firstDownloadRoot.appendingPathComponent("new.jpg")
+        try Data("currently downloading new photo".utf8).write(to: pendingFile)
+        try Data("new revision while downloader is suspended".utf8).write(to: revisedDuringTask)
+        let partialMarker = settledDuringTask.appendingPathExtension("part")
+        try Data("download in progress".utf8).write(to: partialMarker)
+        expect(!queuedIsolation.downloadFilesAvailableForAction([pendingFile])
+            && !queuedIsolation.downloadFilesAvailableForAction([revisedDuringTask])
+            && !queuedIsolation.downloadFilesAvailableForAction([settledDuringTask]), "new, revised and partial download files must remain protected")
+        let activeDownloadAlias = root.appendingPathComponent("queued-active-root-alias")
+        try fm.createSymbolicLink(at: activeDownloadAlias, withDestinationURL: firstDownloadRoot)
+        expect(!queuedIsolation.downloadFilesAvailableForAction([activeDownloadAlias.appendingPathComponent("new.jpg")])
+            && !queuedIsolation.downloadFilesAvailableForAction([activeDownloadAlias.appendingPathComponent("revised.jpg")]), "symlink aliases must not bypass active-file protection")
+        try fm.removeItem(at: partialMarker)
+        expect(queuedIsolation.downloadFilesAvailableForAction([settledDuringTask]), "removing a partial marker restores unchanged baseline availability")
+        queuedIsolation.downloadPhotos.append(pendingFile)
+        queuedIsolation.selectedDownloadItemIDs = ["photo:" + pendingFile.path]
+        expect(!queuedIsolation.canImportSelectedDownloadMedia, "new active-download file must not become importable")
+        var protectedTrashCalls = 0
+        queuedIsolation.trashFiles = { _ in protectedTrashCalls += 1; return nil }
+        queuedIsolation.clearVisibleDownloads(deleteFiles: true)
+        expect(protectedTrashCalls == 0 && fm.fileExists(atPath: pendingFile.path), "delete must leave active-download files untouched")
+        queuedIsolation.selectedCompletedIDs = [revisedDuringTask.path]
+        expect(!queuedIsolation.canImportCompleted, "a rewritten active-download file must not import through completion history")
+        let secondDownloadRoot = root.appendingPathComponent("queued-download-next", isDirectory: true)
+        try fm.createDirectory(at: secondDownloadRoot, withIntermediateDirectories: true)
+        queuedIsolation.selectDownloadOutputFolder(secondDownloadRoot)
+        expect(queuedIsolation.downloadOutputFolder == secondDownloadRoot, "download folder setting may change while the captured task continues")
+        let unrelatedDuringTask = secondDownloadRoot.appendingPathComponent("unrelated.jpg")
+        try Data("settled photo in another selected folder".utf8).write(to: unrelatedDuringTask)
+        queuedIsolation.refreshDownloads()
+        try await waitUntil { queuedIsolation.completed.contains { $0.imageURL == unrelatedDuringTask } }
+        expect(queuedIsolation.isDownloading && !queuedIsolation.completed.contains { $0.imageURL == pendingFile }, "unrelated settled files must enter completion history while unfinished active files stay excluded")
+        expect(queuedIsolation.completed.first { $0.imageURL == revisedDuringTask }?.standaloneRevision == recordedActiveRevision, "an unrelated refresh must not record the active file's unfinished revision")
+        queuedIsolation.selectedDownloadItemIDs = ["photo:" + unrelatedDuringTask.path]
+        expect(queuedIsolation.canImportSelectedDownloadMedia, "settled files in another folder must remain importable while the original task downloads")
+        queuedIsolation.downloadShareText = "https://v.douyin.com/fixture-next/"
+        await queuedIsolation.downloadShare()
+        expect(queuedIsolation.downloadQueueCount == 2, "new task must queue behind the suspended task")
+        await requestGate.releaseFirst()
+        try await waitUntilAsync { await requestGate.roots.count == 2 }
+        let requestedRoots = await requestGate.roots
+        expect(requestedRoots == [firstDownloadRoot, secondDownloadRoot], "current task must retain its original folder and next task must use changed folder")
+        try await waitUntil { queuedIsolation.completed.contains { $0.imageURL == pendingFile } }
+        expect(queuedIsolation.downloadFilesAvailableForAction([pendingFile, revisedDuringTask]), "settled task files become available even while the next task downloads elsewhere")
+        await requestGate.releaseFirst()
+        try await waitUntil { !queuedIsolation.isDownloading && queuedIsolation.downloadQueueCount == 0 }
+        pass("queued downloads retain captured folders and protect changing files until each task settles")
+
+        let missingSingles = try model("missing-standalone-refresh")
+        let removedPhoto = missingSingles.downloadOutputFolder.appendingPathComponent("photo.jpg")
+        let removedVideo = missingSingles.downloadOutputFolder.appendingPathComponent("video.mp4")
+        try Data("photo".utf8).write(to: removedPhoto)
+        try Data("video".utf8).write(to: removedVideo)
+        missingSingles.refreshDownloads()
+        try await waitUntil { missingSingles.completed.count == 2 }
+        try fm.removeItem(at: removedPhoto)
+        missingSingles.refreshCompleted()
+        try await waitUntil { !missingSingles.completed.contains { $0.imageURL == removedPhoto } }
+        expect(missingSingles.completed.first?.imageURL == removedVideo, "completed refresh must retain the existing standalone video")
+        missingSingles.refreshDownloads()
+        try await waitUntil { missingSingles.downloadPhotos.isEmpty && missingSingles.downloadVideos == [removedVideo] }
+        try fm.removeItem(at: removedVideo)
+        missingSingles.refreshDownloads()
+        try await waitUntil { missingSingles.completed.isEmpty && missingSingles.visibleDownloadItems.isEmpty }
+        pass("local deletion prunes standalone completion history and download thumbnails on refresh")
+
+        for removeImage in [false, true] {
+            let degraded = try model("live-photo-member-deletion-\(removeImage)")
+            let originalLivePhoto = try pair(degraded.outputFolder, "live")
+            var importedLivePhoto = record(originalLivePhoto)
+            importedLivePhoto.importedToPhotos = true
+            degraded.completed = [importedLivePhoto]
+            try fm.removeItem(at: removeImage ? originalLivePhoto.imageURL : originalLivePhoto.videoURL)
+            degraded.refreshCompleted()
+            let remainingURL = removeImage ? originalLivePhoto.videoURL : originalLivePhoto.imageURL
+            try await waitUntil { degraded.completed.count == 1 && degraded.completed.first?.imageURL == remainingURL && degraded.completed.first?.movieURL == nil }
+            let remaining = degraded.completed[0]
+            expect(remaining.mediaKind == (removeImage ? .video : .photo) && remaining.sourceExists && remaining.outputIsCurrent, "surviving live-photo member must become an available standalone asset")
+            expect(remaining.importedToPhotos, "unchanged surviving resource must retain its imported state")
+            expect(remaining.mediaKind.showsDuration == removeImage, "only the surviving movie uses video duration")
+            expect(remaining.mediaKind.formatBadgeText(for: remaining.imageURL) == (removeImage ? nil : "JPG"), "surviving cover must display its file format instead of a live-photo badge")
+        }
+        pass("deleting either live-photo member keeps the surviving asset with correct format or video metadata")
 
         let retainedHistory = try model("retained-history")
         let historicalPair = try pair(root.appendingPathComponent("historical-output"), "older")
@@ -634,6 +864,22 @@ import Foundation
             await commandCalls.add(input.id)
             return .failure("isolated command routing test")
         }
+        // A context menu captures its targets before its asynchronous action runs.
+        // If that selection vanishes, it must not turn into a compose-all command
+        // or pick up a different selection that is valid by the time the Task runs.
+        let vanishedMenuPair = PairItem(imageURL: root.appendingPathComponent("vanished/photo.jpg"),
+            videoURL: root.appendingPathComponent("vanished/photo.mov"))
+        commands.selectedPairIDs = [queueInput.id]
+        commands.selectedDownloadItemIDs = ["pair:" + downloadInput.id]
+        await commands.processPairs(selection: [])
+        await commands.processPairs(selection: [vanishedMenuPair.id])
+        await commands.processDownloadPairs(selection: [])
+        await commands.processDownloadPairs(selection: ["pair:" + vanishedMenuPair.id])
+        let staleSelectionCalls = await commandCalls.ids
+        expect(staleSelectionCalls.isEmpty && commands.pairs.count == 1 && commands.downloadPairs.count == 1, "empty or stale captured selections must not compose another available pair")
+        commands.selectedPairIDs = []
+        commands.selectedDownloadItemIDs = []
+        pass("captured empty or stale menu selections cannot fall back to composing all remaining pairs")
         commands.selection = .completed
         expect(!commands.canComposeCurrentPage, "completed page cannot compose hidden queue")
         await commands.composeCurrentPage()
@@ -662,6 +908,31 @@ import Foundation
         expect(Set(trashedURLs) == Set([deleteSource.imageURL, deleteSource.videoURL]), "delete action must target sources only")
         expect(deleteScope.completed == [keptRecord] && fm.fileExists(atPath: keptOutput.imageURL.path) && fm.fileExists(atPath: keptOutput.videoURL.path), "export and completed record must remain")
         pass("download deletion targets only sources and retains composed exports and completed history")
+
+        // Start the same recursive monitor used by the app, on fixture folders.
+        // No refresh call follows these deletions: both pages must update from
+        // filesystem notifications, including changes below the download root.
+        do {
+            let watched = try model("automatic-local-deletion")
+            let watchedOutput = try pair(watched.outputFolder, "export")
+            let watchedDownload = try pair(watched.downloadOutputFolder.appendingPathComponent("post/nested"), "source")
+            watched.refreshCompleted()
+            watched.refreshDownloads()
+            try await waitUntil { watched.completed.count == 1 && watched.downloadPairs.count == 1 }
+            watched.startMonitoringLocalFiles()
+            defer { watched.stopMonitoringLocalFiles() }
+            try fm.removeItem(at: watchedOutput.videoURL)
+            try fm.removeItem(at: watchedDownload.videoURL)
+            try await waitUntil {
+                watched.completed.count == 2 && watched.completed.allSatisfy { $0.mediaKind == .photo }
+                    && watched.downloadPairs.isEmpty && watched.visibleDownloadItems.first?.mediaKind == .photo
+            }
+            expect(watched.visibleDownloadItems.first?.imageURL == watchedDownload.imageURL, "automatic download refresh must keep the available cover")
+            try fm.removeItem(at: watchedOutput.imageURL)
+            try fm.removeItem(at: watchedDownload.imageURL)
+            try await waitUntil { watched.completed.isEmpty && watched.visibleDownloadItems.isEmpty }
+        }
+        pass("recursive filesystem monitoring refreshes both pages after local member deletion and complete removal")
 
         print("PASS: \(checks) model safety scenarios; no real downloads or Photos writes")
     }

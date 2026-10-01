@@ -5,6 +5,20 @@ import Foundation
 /// Provides curl-based fallback with DNS-over-HTTPS resolution for domains
 /// affected by DNS poisoning. Used by all platform downloaders (XHS, Douyin, Dewu).
 enum DownloaderHTTPCompatibility {
+    /// Opt-in limits for bounded media sources. Large-video callers retain the
+    /// existing limits when no policy is supplied.
+    struct TransferPolicy: Sendable {
+        let maximumDuration: TimeInterval
+        let idleTimeout: Int
+        let curlRetries: Int
+
+        init(maximumDuration: TimeInterval, idleTimeout: Int, curlRetries: Int = 0) {
+            self.maximumDuration = max(maximumDuration, 0.01)
+            self.idleTimeout = max(idleTimeout, 1)
+            self.curlRetries = max(curlRetries, 0)
+        }
+    }
+
     static func downloadConcurrencyLimit() -> Int {
         if let value = boundedEnvironmentInt("HERMES_DOWNLOAD_CONCURRENCY", range: 1...64) {
             return value
@@ -193,7 +207,11 @@ enum DownloaderHTTPCompatibility {
         return (data, effectiveURL)
     }
 
-    static func downloadAsync(_ request: URLRequest, to destination: URL) async throws {
+    static func downloadAsync(
+        _ request: URLRequest,
+        to destination: URL,
+        transferPolicy: TransferPolicy? = nil
+    ) async throws {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -204,7 +222,8 @@ enum DownloaderHTTPCompatibility {
         defer {
             if !completed { try? FileManager.default.removeItem(at: destination) }
         }
-        _ = try await runCurl(request: request, outputURL: destination, reportsEffectiveURL: false)
+        _ = try await runCurl(request: request, outputURL: destination, reportsEffectiveURL: false,
+            transferPolicy: transferPolicy)
         try Task.checkCancellation()
         completed = true
     }
@@ -212,7 +231,8 @@ enum DownloaderHTTPCompatibility {
     private static func runCurl(
         request: URLRequest,
         outputURL: URL,
-        reportsEffectiveURL: Bool
+        reportsEffectiveURL: Bool,
+        transferPolicy: TransferPolicy? = nil
     ) async throws -> URL? {
         try Task.checkCancellation()
         guard let url = request.url else {
@@ -220,7 +240,8 @@ enum DownloaderHTTPCompatibility {
         }
 
         // Metadata stays short-lived; full high-bitrate videos can be several GB.
-        let transferLimit = reportsEffectiveURL ? 60 : 14_400
+        let transferLimit = reportsEffectiveURL ? 60 : (transferPolicy?.maximumDuration ?? 14_400)
+        let retries = reportsEffectiveURL ? 2 : (transferPolicy?.curlRetries ?? 2)
         var arguments = DownloaderNetworkPolicy.directCurlArguments + [
             "--silent",
             "--show-error",
@@ -228,10 +249,15 @@ enum DownloaderHTTPCompatibility {
             "--fail-with-body",
             "--connect-timeout", "5",
             "--max-time", String(transferLimit),
-            "--retry", "2",
+            "--retry", String(retries),
             "--retry-all-errors",
             "--output", outputURL.path
         ]
+        if !reportsEffectiveURL, let transferPolicy {
+            // One byte per second detects a stopped connection while allowing
+            // valid low-bandwidth transfers to keep making progress.
+            arguments.append(contentsOf: ["--speed-limit", "1", "--speed-time", String(transferPolicy.idleTimeout)])
+        }
 
         // --resolve to bypass DNS poisoning for XHS domains
         if let host = url.host, DownloaderNetworkPolicy.hostNeedsDNSOverride(host) {
@@ -256,7 +282,7 @@ enum DownloaderHTTPCompatibility {
         let captured = try await SubprocessRunner.runAsync(
             executable: URL(fileURLWithPath: "/usr/bin/curl"),
             arguments: arguments,
-            timeout: TimeInterval(transferLimit * 3 + 20)
+            timeout: transferLimit * TimeInterval(retries + 1) + 20
         )
         let output = String(data: captured.stdout, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

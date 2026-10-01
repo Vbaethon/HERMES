@@ -80,7 +80,7 @@ enum PairCollectionView {
                 symbolName: AppSymbol.composeLivePhoto.normal,
                 target: self,
                 action: #selector(composeFromContextMenu(_:)),
-                isEnabled: selectedCount > 0 && !model.isProcessing
+                isEnabled: selectedCount > 0 && model.canProcessSelectedPairs
             ))
             menu.addItem(.separator())
             menu.addItem(ThumbnailCollectionContextMenu.item(
@@ -110,7 +110,9 @@ enum PairCollectionView {
         }
 
         @objc private func composeFromContextMenu(_ sender: NSMenuItem) {
-            Task { await model?.processPairs() }
+            guard let model else { return }
+            let selection = model.selectedPairIDs
+            Task { await model.processPairs(selection: selection) }
         }
 
         @objc private func openLocationsFromContextMenu(_ sender: NSMenuItem) {

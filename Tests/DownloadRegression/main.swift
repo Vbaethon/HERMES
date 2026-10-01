@@ -110,6 +110,40 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         precondition(!sparseCombined.items[0].liveHasAudio && sparseCombined.items[1].liveHasAudio)
         web.items[0].liveScore = Int64.max / 4
         precondition(X.preferredNote([web,client])!.items[0].liveHasAudio)
+        let signedWebURLs = (1...4).map { number in
+            URL(string: "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/notes_pre_post/still-\(number)!web-display")!
+        }
+        let signedClientURLs = (1...4).map { number in
+            URL(string: "https://sns-na-i6.xhscdn.com/notes_pre_post/still-\(number)?imageView2/2/w/5000/h/5000/format/webp/q/90&sign=fixture")!
+        }
+        let stillWeb = try X.parseNote(["noteId": noteID, "type": "normal", "imageList": (1...4).map { number in
+            ["fileId": "notes_pre_post/still-\(number)", "url": signedWebURLs[number - 1].absoluteString,
+             "stream": ["h264": [["master_url": "https://sns-video.xhscdn.com/motion-\(number).mp4"]]]]
+        }], fallbackURL: fallback)
+        let stillClient = X.parseAppNote(["id": noteID, "type": "normal", "images_list": (1...4).map { number in
+            ["fileid": "notes_pre_post/still-\(number)", "original": signedClientURLs[number - 1].absoluteString]
+        }], expectedID: noteID, fallbackURL: fallback)!
+        let stillCombined = X.preferredNote([stillWeb, stillClient])!
+        precondition(stillCombined.items.count == 4 && stillCombined.usedAppCache)
+        for (offset, media) in stillCombined.items.enumerated() {
+            precondition(media.imageURL == stillWeb.items[offset].imageURL, "The preferred original must remain first")
+            precondition(media.imageURLs.first == media.imageURL && media.imageURLs[1] == signedClientURLs[offset], "Full-size exact-ID cache originals must precede web display fallbacks")
+            precondition(media.imageURLs.contains(signedWebURLs[offset]), "Signed web URLs must remain available")
+            precondition(Set(media.imageURLs).count == media.imageURLs.count)
+            precondition(media.imageURLs.allSatisfy { !$0.host!.contains("sns-video") }, "Motion streams cannot be image fallback sources")
+        }
+        actor ShortLinkCounter {
+            var requests = 0
+            func resolved() { requests += 1 }
+        }
+        let shortLinkCounter = ShortLinkCounter()
+        let shortLinks = try await X.extractLinks(from: "https://xhslink.cn/o/fixture") { _ in
+            await shortLinkCounter.resolved()
+            return fallback
+        }
+        let shortRequests = await shortLinkCounter.requests
+        precondition(shortLinks == [fallback] && shortRequests == 1, "Bare short links must resolve only once")
+        print("PASS: XHS signed web and exact-ID full-size cache image alternatives retain all four originals; one short-link resolution")
         let body = String(data: try JSONSerialization.data(withJSONObject:[["note_list":[appNote]]]),encoding:.utf8)!
         let envelope = try JSONSerialization.data(withJSONObject:["noteId":"another-visible-note","note_detail_response":body])
         precondition(XHSAppCache.notes(in:envelope,noteID:noteID).count == 1)
@@ -231,6 +265,41 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"png") } catch { throw NSError(domain:"REGRESSION valid PNG rejected",code:1,userInfo:[NSUnderlyingErrorKey:error]) }
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"mp4"); fatalError("accepted image as video") } catch { }
         let validPNG = try Data(contentsOf: part)
+        let imageFixture = dir.appendingPathComponent("image-fixture", isDirectory: true)
+        try FileManager.default.createDirectory(at: imageFixture, withIntermediateDirectories: true)
+        try validPNG.write(to: imageFixture.appendingPathComponent("valid.png"))
+        let imageServer = Process()
+        imageServer.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        imageServer.arguments = ["python3", URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("xhs_image_fixture_server.py").path, imageFixture.path]
+        imageServer.standardOutput = FileHandle.nullDevice
+        imageServer.standardError = FileHandle.nullDevice
+        try imageServer.run()
+        defer {
+            if imageServer.isRunning { imageServer.terminate() }
+            imageServer.waitUntilExit()
+        }
+        let imagePortFile = imageFixture.appendingPathComponent("port")
+        for _ in 0..<300 where !FileManager.default.fileExists(atPath: imagePortFile.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let imagePort = try String(contentsOf: imagePortFile, encoding: .utf8)
+        let imageBase = URL(string: "http://127.0.0.1:\(imagePort)")!
+        let imageTasks = (1...4).map { number in
+            let good = imageBase.appendingPathComponent("original-\(number)")
+            return X.DownloadTask(urls: [2, 3].contains(number) ? [imageBase.appendingPathComponent("invalid-\(number)"), good] : [good],
+                destination: imageFixture.appendingPathComponent("photo-\(number).bin"), requestUserAgent: X.mobileUserAgent,
+                videoHDRHint: nil, isImage: true)
+        }
+        let imageResults = try await X.download(imageTasks, maxConcurrentDownloads: 4)
+        precondition(imageResults.count == 4)
+        for number in 1...4 {
+            let saved = imageFixture.appendingPathComponent("photo-\(number).png")
+            let savedBytes = try Data(contentsOf: saved)
+            precondition(savedBytes == validPNG && !FileManager.default.fileExists(atPath: imageFixture.appendingPathComponent("photo-\(number).bin.part").path))
+        }
+        let imageRequests = try String(contentsOf: imageFixture.appendingPathComponent("requests.txt"), encoding: .utf8)
+        precondition(imageRequests.split(separator: "\n").filter { $0.hasPrefix("/invalid-") }.count == 2, "Failed first image sources must advance to alternatives without redownloading completed stills")
+        print("PASS: four-photo XHS batch completes with valid image alternatives after two first-source media failures")
         try validPNG.prefix(33).write(to: part)
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"png"); fatalError("accepted PNG headers without pixel data") } catch { }
         let jpegBitmap = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:64,pixelsHigh:64,bitsPerSample:8,samplesPerPixel:3,hasAlpha:false,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:192,bitsPerPixel:24)!

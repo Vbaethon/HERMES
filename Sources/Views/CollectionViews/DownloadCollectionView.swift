@@ -139,7 +139,9 @@ enum DownloadCollectionView {
         }
 
         @objc private func composeFromContextMenu(_ sender: NSMenuItem) {
-            Task { await model?.processDownloadPairs() }
+            guard let model else { return }
+            let selection = model.selectedDownloadItemIDs
+            Task { await model.processDownloadPairs(selection: selection) }
         }
 
         @objc private func openLocationsFromContextMenu(_ sender: NSMenuItem) {

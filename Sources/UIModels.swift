@@ -218,6 +218,7 @@ struct DownloadScanResult: Hashable {
     var videos: [URL]
     var modifiedTimesByPath: [String: TimeInterval] = [:]
     var displayOrdersByPath: [String: MediaDisplayOrder] = [:]
+    var directoryUnavailable = false
 }
 
 enum ToolRunResult: Sendable {

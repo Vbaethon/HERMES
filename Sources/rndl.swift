@@ -102,6 +102,7 @@ enum XHSNativeDownloader {
     struct MediaItem {
         var index: Int
         var imageURL: URL
+        var imageURLs: [URL] = []
         var liveURL: URL?
         var liveURLs: [URL]
         var fileID: String
@@ -120,6 +121,7 @@ enum XHSNativeDownloader {
         var requestUserAgent: String
         var videoHDRHint: VideoHDRHint?
         var isLivePhoto = false
+        var isImage = false
         var displayOrder: MediaDisplayOrder? = nil
         var audioURLs: Set<URL> = []
     }
@@ -189,10 +191,10 @@ enum XHSNativeDownloader {
                     let order = MediaDisplayOrder(postID: "xhs:" + note.noteID, downloadedAt: downloadedAt, index: item.index)
                     let baseName = originalFileIDBasename(item.fileID, defaultName: String(format: "%02d", item.index))
                     tasks.append(DownloadTask(
-                        urls: [item.imageURL],
+                        urls: item.imageURLs.isEmpty ? [item.imageURL] : item.imageURLs,
                         destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).bin", usedNames: &usedNames),
                         requestUserAgent: item.imageUserAgent ?? note.requestUserAgent,
-                        videoHDRHint: nil, displayOrder: order
+                        videoHDRHint: nil, isImage: true, displayOrder: order
                     ))
                     if item.liveURL != nil {
                         let destination = FileNaming.uniqueDestination(in: outputFolder, name: "\(baseName).mp4", usedNames: &usedNames)
@@ -252,7 +254,10 @@ enum XHSNativeDownloader {
         }
     }
 
-    private static func extractLinks(from text: String) async throws -> [URL] {
+    static func extractLinks(
+        from text: String,
+        resolveShortLink: @Sendable (URL) async throws -> URL = { try await resolveURL($0) }
+    ) async throws -> [URL] {
         let patterns = [
             #"(?:https?://)?(?:www\.)?xiaohongshu\.com/explore/[^\s"<>\\^`{|}，。；！？、【】《》]+"#,
             #"(?:https?://)?(?:www\.)?xiaohongshu\.com/discovery/item/[^\s"<>\\^`{|}，。；！？、【】《》]+"#,
@@ -261,11 +266,13 @@ enum XHSNativeDownloader {
         ]
         var links: [URL] = []
         var seen = Set<String>()
+        var seenSources = Set<URL>()
         for pattern in patterns {
             for rawValue in RegexUtilities.allMatches(pattern, in: text) {
                 let cleaned = MediaFileUtilities.trimURLPunctuation(rawValue)
                 guard let sourceURL = normalizedShareURL(cleaned) else { continue }
-                let resolvedURL = DownloaderNetworkPolicy.isXHSShortLinkHost(sourceURL.host) ? (try? await resolveURL(sourceURL)) ?? sourceURL : sourceURL
+                guard seenSources.insert(sourceURL).inserted else { continue }
+                let resolvedURL = DownloaderNetworkPolicy.isXHSShortLinkHost(sourceURL.host) ? (try? await resolveShortLink(sourceURL)) ?? sourceURL : sourceURL
                 guard seen.insert(resolvedURL.absoluteString).inserted else { continue }
                 links.append(resolvedURL)
             }
@@ -274,7 +281,8 @@ enum XHSNativeDownloader {
         if trimmedText.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
            let directURL = normalizedShareURL(trimmedText),
            DownloaderNetworkPolicy.isXHSShortLinkHost(directURL.host) || directURL.host?.contains("xiaohongshu.com") == true {
-            let resolvedURL = DownloaderNetworkPolicy.isXHSShortLinkHost(directURL.host) ? (try? await resolveURL(directURL)) ?? directURL : directURL
+            guard seenSources.insert(directURL).inserted else { return links }
+            let resolvedURL = DownloaderNetworkPolicy.isXHSShortLinkHost(directURL.host) ? (try? await resolveShortLink(directURL)) ?? directURL : directURL
             if seen.insert(resolvedURL.absoluteString).inserted {
                 links.append(resolvedURL)
             }
@@ -349,8 +357,7 @@ enum XHSNativeDownloader {
         if let expectedID { notes = notes.filter { $0.noteID == expectedID } }
         var bestNote = preferredNote(notes)
         let identity = expectedID ?? bestNote?.noteID
-        if let identity, XHSAppCache.isNoteID(identity), bestNote?.type != "video",
-           bestNote == nil || bestNote!.items.contains(where: { $0.livePhotoDeclared || $0.liveURL != nil }) {
+        if let identity, XHSAppCache.isNoteID(identity), bestNote?.type != "video" {
             let roots = XHSAppCache.cacheRoots()
             func mergeCache() {
                 let cached = XHSAppCache.notes(noteID: identity, roots: roots).compactMap {
@@ -448,6 +455,7 @@ enum XHSNativeDownloader {
                 info.items.append(MediaItem(
                     index: offset + 1,
                     imageURL: imageCandidate.url,
+                    imageURLs: imageSourceURLs(from: item, preferred: imageCandidate),
                     liveURL: liveURLs.first,
                     liveURLs: liveURLs,
                     fileID: JSONValueUtilities.nonEmptyString(item["fileId"]) ?? imageCandidate.token,
@@ -605,10 +613,20 @@ enum XHSNativeDownloader {
                 guard note.items.filter({ $0.fileID == item.fileID }).count == 1 else { continue }
                 let indices = result.items.indices.filter { result.items[$0].fileID == item.fileID }
                 if indices.count == 1, let i = indices.first {
+                    let existingImageURLs = result.items[i].imageURLs.isEmpty
+                        ? [result.items[i].imageURL] : result.items[i].imageURLs
+                    let additionalImageURLs = item.imageURLs.isEmpty ? [item.imageURL] : item.imageURLs
                     if item.imageQuality > result.items[i].imageQuality {
                         result.items[i].imageURL = item.imageURL
                         result.items[i].imageQuality = item.imageQuality
                         result.items[i].imageUserAgent = item.imageUserAgent ?? note.requestUserAgent
+                    }
+                    // Keep the preferred original first. The client's exact-ID original
+                    // is a full-size fallback ahead of web display-size transformations.
+                    result.items[i].imageURLs = orderedUniqueURLs([result.items[i].imageURL]
+                        + (note.usedAppCache ? additionalImageURLs + existingImageURLs : existingImageURLs + additionalImageURLs))
+                    if note.usedAppCache, result.items[i].imageURLs != existingImageURLs {
+                        result.usedAppCache = true
                     }
                     if item.liveURL != nil,
                        result.items[i].liveURL == nil || (item.liveHasAudio && !result.items[i].liveHasAudio)
@@ -724,9 +742,26 @@ enum XHSNativeDownloader {
         guard let dictionary = value as? [String: Any] else {
             return []
         }
-        return dictionary.flatMap { key, nestedValue in
-            nestedImageCandidates(in: nestedValue, keyHint: key, depth: depth + 1)
+        return dictionary.flatMap { key, nestedValue -> [ImageCandidate] in
+            guard !["stream", "video", "live_photo", "livephoto"].contains(key.lowercased()) else { return [] }
+            return nestedImageCandidates(in: nestedValue, keyHint: key, depth: depth + 1)
         }
+    }
+
+    private static func orderedUniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<URL>()
+        return urls.filter { seen.insert($0).inserted }
+    }
+
+    private static func imageSourceURLs(from item: [String: Any], preferred: ImageCandidate) -> [URL] {
+        let candidates = nestedImageCandidates(in: item).sorted { lhs, rhs in
+            let left = imageScore(lhs), right = imageScore(rhs)
+            return left == right ? lhs.sourceText < rhs.sourceText : left > right
+        }
+        let originalSource = URL(string: preferred.sourceText).map { [$0] } ?? []
+        return orderedUniqueURLs([preferred.url] + originalSource + candidates.flatMap { candidate in
+            [candidate.url] + (URL(string: candidate.sourceText).map { [$0] } ?? [])
+        })
     }
 
     private static func streamURL(_ item: [String: Any]) -> URL? {
@@ -958,7 +993,7 @@ enum XHSNativeDownloader {
                             videoHDRHint: nil, isLivePhoto: true, audioURLs: item.audioURLs)
     }
 
-    private static func download(
+    static func download(
         _ tasks: [DownloadTask],
         maxConcurrentDownloads requestedMaxConcurrentDownloads: Int? = nil,
         progress: DownloaderInfra.ProgressHandler? = nil
@@ -1000,6 +1035,8 @@ enum XHSNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws -> DownloadResult {
         try Task.checkCancellation()
+        let transferPolicy = task.isImage
+            ? DownloaderHTTPCompatibility.TransferPolicy(maximumDuration: 90, idleTimeout: 12) : nil
         let temporaryURL = task.destination.appendingPathExtension("part")
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
         var lastError: Error?
@@ -1008,8 +1045,10 @@ enum XHSNativeDownloader {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 for sourceURL in task.urls {
                     do {
-                        try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, progress: progress)
-                        try await MediaFileUtilities.validateMedia(temporaryURL, expectedSuffix: task.destination.pathExtension)
+                        try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent,
+                                                    progress: progress, transferPolicy: transferPolicy)
+                        try await MediaFileUtilities.validateMedia(temporaryURL,
+                            expectedSuffix: task.isImage ? "jpg" : task.destination.pathExtension)
                         let hasAudio = task.isLivePhoto ? try await livePhotoHasAudio(at: temporaryURL) : false
                         if task.audioURLs.contains(sourceURL), !hasAudio {
                             throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "客户端有声实况源未返回音轨，尝试备用素材。"])
@@ -1079,29 +1118,25 @@ enum XHSNativeDownloader {
         _ url: URL,
         to destination: URL,
         requestUserAgent: String,
-        progress: DownloaderInfra.ProgressHandler? = nil
+        progress: DownloaderInfra.ProgressHandler? = nil,
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil
     ) async throws {
         let requestURL = secureXHSURL(url)
         var request = URLRequest(url: requestURL)
-        request.timeoutInterval = 30
+        request.timeoutInterval = transferPolicy.map { TimeInterval($0.idleTimeout) } ?? 30
         request.assumesHTTP3Capable = false
         request.setValue(requestUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
         if shouldUseDirectly(request) {
             await progress?(0)
-            try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination)
+            try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
             return
         }
-        do {
-            try await DownloaderInfra.downloadOnceAsync(requestURL, to: destination, userAgent: requestUserAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress)
-        } catch {
-            try Task.checkCancellation()
-            guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else { throw error }
-            await progress?(0)
-            try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination)
-            await progress?(1)
-        }
+        // DownloaderInfra already owns the native-to-curl fallback for this request.
+        try await DownloaderInfra.downloadOnceAsync(requestURL, to: destination, userAgent: requestUserAgent,
+            session: networkSession, shouldUseDirectly: shouldUseDirectly,
+            extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress, transferPolicy: transferPolicy)
     }
 
     private static func secureXHSURL(_ url: URL) -> URL {

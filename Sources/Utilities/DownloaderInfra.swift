@@ -81,11 +81,12 @@ enum DownloaderInfra {
         session: URLSession,
         shouldUseDirectly: (URLRequest) -> Bool,
         extraHeaders: [String: String] = [:],
-        progress: ProgressHandler? = nil
+        progress: ProgressHandler? = nil,
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil
     ) async throws {
         try Task.checkCancellation()
         var req = URLRequest(url: url)
-        req.timeoutInterval = 30
+        req.timeoutInterval = transferPolicy.map { TimeInterval($0.idleTimeout) } ?? 30
         req.assumesHTTP3Capable = false
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         for (key, value) in extraHeaders {
@@ -93,17 +94,32 @@ enum DownloaderInfra {
         }
         if shouldUseDirectly(req) {
             await progress?(0)
-            try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination)
+            try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
             return
         }
         do {
-            try await streamDownload(req, to: destination, session: session, progress: progress)
+            if let transferPolicy {
+                let request = req
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        try await streamDownload(request, to: destination, session: session, progress: progress)
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(transferPolicy.maximumDuration))
+                        throw URLError(.timedOut)
+                    }
+                    defer { group.cancelAll() }
+                    _ = try await group.next()
+                }
+            } else {
+                try await streamDownload(req, to: destination, session: session, progress: progress)
+            }
         } catch {
             try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
             await progress?(0)
-            try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination)
+            try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
         }
     }

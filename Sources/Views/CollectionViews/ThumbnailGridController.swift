@@ -120,10 +120,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func applySelection(_ ids: Set<String>) {
-        selectedIDs = ids
-        let indexPaths = Set(items.enumerated().compactMap { index, item in
-            ids.contains(item.id) ? IndexPath(item: index, section: 0) : nil
-        })
+        selectedIDs = ids.intersection(itemByID.keys)
+        let indexPaths = Set(selectedIDs.compactMap { dataSource.indexPath(for: $0) })
         guard collectionView.selectionIndexPaths != indexPaths else {
             updateVisibleSelectionAppearance()
             return
@@ -156,7 +154,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private func syncSelectionFromCollectionView() {
         guard !isApplyingSelection else { return }
         let ids = Set(collectionView.selectionIndexPaths.compactMap { indexPath in
-            items.indices.contains(indexPath.item) ? items[indexPath.item].id : nil
+            dataSource.itemIdentifier(for: indexPath).flatMap { itemByID[$0] == nil ? nil : $0 }
         })
         selectedIDs = ids
         onSelectionChange?(ids)
@@ -166,26 +164,32 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private func contextMenu(for event: NSEvent) -> NSMenu? {
         let point = collectionView.convert(event.locationInWindow, from: nil)
         guard let clickedIndexPath = collectionView.indexPathForItem(at: point),
-              items.indices.contains(clickedIndexPath.item) else {
+              let clickedID = dataSource.itemIdentifier(for: clickedIndexPath),
+              itemByID[clickedID] != nil else {
             return nil
         }
 
         if !collectionView.selectionIndexPaths.contains(clickedIndexPath) {
+            isApplyingSelection = true
             collectionView.deselectItems(at: collectionView.selectionIndexPaths)
             collectionView.selectItems(at: [clickedIndexPath], scrollPosition: [])
-            syncSelectionFromCollectionView()
+            isApplyingSelection = false
         }
+        // Opening a menu must publish the current selection even when AppKit
+        // already selected the clicked item. A download refresh can have
+        // changed model selection since the last collection-view callback.
+        syncSelectionFromCollectionView()
         return makeContextMenu?()
     }
 
     private func updateVisibleSelectionAppearance() {
         for visibleItem in collectionView.visibleItems() {
             guard let indexPath = collectionView.indexPath(for: visibleItem),
-                  items.indices.contains(indexPath.item),
+                  let id = dataSource.itemIdentifier(for: indexPath),
                   let item = visibleItem as? ThumbnailCollectionItem else {
                 continue
             }
-            item.setSelectedAppearance(selectedIDs.contains(items[indexPath.item].id))
+            item.setSelectedAppearance(selectedIDs.contains(id))
         }
     }
 

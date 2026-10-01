@@ -116,6 +116,78 @@ import Foundation
         expect(!model.hasActiveWork, "idle state must allow exit")
         pass("missing sources visible on both pages; busy guards protect operations")
 
+        let menuModel = ImporterModel(refreshOnInit: false)
+        let menuPhoto = root.appendingPathComponent("menu-photo.png")
+        let menuCover = root.appendingPathComponent("menu-cover.png")
+        let menuVideo = root.appendingPathComponent("menu-video.mov")
+        for url in [menuPhoto, menuCover, menuVideo] { try Data([0]).write(to: url) }
+        let menuPair = PairItem(imageURL: menuCover, videoURL: menuVideo)
+        menuModel.downloadPairs = [menuPair]
+        menuModel.downloadPhotos = [menuPhoto]
+        menuModel.downloadFilter = .notComposed
+        menuModel.isDownloading = true
+        let menuItems = menuModel.visibleDownloadItems
+        let (menuScroll, menuCoordinator) = DownloadCollectionView.make(
+            items: menuItems, filter: .notComposed, model: menuModel, bottomContentInset: 0
+        )
+        let menuWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        menuWindow.contentView = menuScroll
+        menuScroll.layoutSubtreeIfNeeded()
+        menuCoordinator.collectionView!.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        func rightClickMenu(_ collection: NSCollectionView, at index: Int) -> NSMenu {
+            let frame = collection.collectionViewLayout!.layoutAttributesForItem(at: IndexPath(item: index, section: 0))!.frame
+            let point = collection.convert(NSPoint(x: frame.midX, y: frame.midY), to: nil)
+            let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],
+                timestamp: 0, windowNumber: collection.window!.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1)!
+            return collection.menu(for: event)!
+        }
+        let photoID = "photo:\(menuPhoto.standardizedFileURL.path)"
+        let pairID = "pair:\(menuPair.id)"
+        let pairIndex = menuItems.firstIndex { $0.id == pairID }!
+        let photoIndex = menuItems.firstIndex { $0.id == photoID }!
+        var menuSelections: [Set<String>] = []
+        menuCoordinator.gridController!.setSelectionHandler { ids in
+            menuSelections.append(ids)
+            menuModel.selectedDownloadItemIDs = ids
+        }
+        menuCoordinator.gridController!.applySelection([pairID, photoID])
+        menuModel.selectedDownloadItemIDs = []
+        let selectedMenu = rightClickMenu(menuCoordinator.collectionView!, at: pairIndex)
+        expect(menuModel.selectedDownloadItemIDs == [pairID, photoID], "right click must restore the current multi-selection before building its menu")
+        expect(menuSelections == [[pairID, photoID]], "opening the menu must publish selection exactly once")
+        expect(selectedMenu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled), "download must leave eligible composition, Finder, import and deletion menu actions available")
+        menuCoordinator.gridController!.applySelection([pairID])
+        menuSelections = []
+        let photoMenu = rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
+        expect(menuModel.selectedDownloadItemIDs == [photoID] && menuSelections == [[photoID]], "right-clicking another item must atomically select it without publishing an empty selection")
+        let photoActions = photoMenu.items.filter { !$0.isSeparatorItem }
+        expect(!photoActions[0].isEnabled && photoActions.dropFirst().allSatisfy(\.isEnabled), "a standalone photo must retain Finder, Photos, album and deletion actions while downloading")
+        menuModel.isProcessingDownloads = true
+        let composingMenu = rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
+        expect(composingMenu.items.first { $0.title.contains("访达") }!.isEnabled, "Finder must remain available during composition")
+        expect(!composingMenu.items.first { $0.title.contains("导入“照片”") }!.isEnabled, "conflicting media import must remain guarded during composition")
+        menuModel.isProcessingDownloads = false
+        menuModel.files = [menuCover, menuVideo]
+        menuModel.pairs = [menuPair]
+        let (pairMenuScroll, pairMenuCoordinator) = PairCollectionView.make(items: [menuPair], model: menuModel)
+        menuWindow.contentView = pairMenuScroll
+        pairMenuScroll.layoutSubtreeIfNeeded()
+        pairMenuCoordinator.collectionView!.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        let pairMenu = rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
+        expect(pairMenu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled), "queue actions must remain available for settled sources during download")
+        menuModel.isProcessingDownloads = true
+        let guardedPairMenu = rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
+        expect(!guardedPairMenu.items[0].isEnabled, "queue menu composition must follow model eligibility when another composition is running")
+        expect(guardedPairMenu.items.first { $0.title.contains("访达") }!.isEnabled, "queue Finder action must remain available during another composition")
+        menuModel.isProcessingDownloads = false
+        menuModel.isDownloading = false
+        withExtendedLifetime(menuWindow) {}
+        pass("right-click selection and eligible menu actions remain usable during downloads")
+
         var selected: SidebarSection?
         let sidebar = FinderStyleSidebarController(sections: SidebarSection.allCases, selection: .queue, count: { _ in nil }, onSelect: { selected = $0 })
         let table = descendants(sidebar.view).compactMap { $0 as? NSTableView }.first!

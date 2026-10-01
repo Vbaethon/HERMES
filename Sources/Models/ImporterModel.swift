@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import AVFoundation
 import Combine
+import CoreServices
 import CoreGraphics
 import CryptoKit
 import ImageIO
@@ -13,6 +14,55 @@ extension Array {
         let element = remove(at: sourceIndex)
         let adjustedDestination = destinationOffset > sourceIndex ? destinationOffset - 1 : destinationOffset
         insert(element, at: Swift.max(0, Swift.min(adjustedDestination, count)))
+    }
+}
+
+/// FSEvents covers descendant folders, including removal of an entire downloaded post.
+/// The stream owns its queue; callbacks only request a debounced model refresh.
+private final class LocalMediaFolderMonitor: @unchecked Sendable {
+    private final class CallbackBox: @unchecked Sendable {
+        let onChange: @Sendable () -> Void
+        init(_ onChange: @escaping @Sendable () -> Void) { self.onChange = onChange }
+    }
+    private var stream: FSEventStreamRef?
+    private let queue = DispatchQueue(label: "com.codex.hermes.local-media-events", qos: .utility)
+    private let callbackBox: CallbackBox
+    private let accessedFolders: [URL]
+
+    init?(folders: [URL], onChange: @escaping @Sendable () -> Void) {
+        callbackBox = CallbackBox(onChange)
+        accessedFolders = folders.filter { $0.startAccessingSecurityScopedResource() }
+        var context = FSEventStreamContext(version: 0,
+            info: Unmanaged.passUnretained(callbackBox).toOpaque(),
+            retain: { info in
+                guard let info else { return nil }
+                return UnsafeRawPointer(Unmanaged<CallbackBox>.fromOpaque(info).retain().toOpaque())
+            },
+            release: { info in
+                guard let info else { return }
+                Unmanaged<CallbackBox>.fromOpaque(info).release()
+            }, copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+            guard let info else { return }
+            Unmanaged<CallbackBox>.fromOpaque(info).takeUnretainedValue().onChange()
+        }
+        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
+        guard let stream = FSEventStreamCreate(nil, callback, &context,
+            folders.map(\.path) as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.2, flags) else {
+            return nil
+        }
+        self.stream = stream
+        FSEventStreamSetDispatchQueue(stream, queue)
+        guard FSEventStreamStart(stream) else { return nil }
+    }
+
+    deinit {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
+        accessedFolders.forEach { $0.stopAccessingSecurityScopedResource() }
     }
 }
 
@@ -49,7 +99,7 @@ final class ImporterModel: ObservableObject {
     @Published var files: [URL] = []
     @Published var pairs: [PairItem] = []
     @Published var selectedPairIDs = Set<PairItem.ID>()
-    @Published var completed: [CompletedItem] = []
+    @Published var completed: [CompletedItem] = [] { didSet { refreshLocalFileMonitoring() } }
     @Published var selectedCompletedIDs = Set<CompletedItem.ID>()
     @Published var completedFilter: CompletedFilter = .all {
         didSet {
@@ -59,6 +109,7 @@ final class ImporterModel: ObservableObject {
     @Published var outputFolder: URL {
         didSet {
             UserDefaults.standard.set(outputFolder.path, forKey: Self.outputFolderDefaultsKey)
+            refreshLocalFileMonitoring()
         }
     }
     @Published var importToPhotos = true {
@@ -87,12 +138,15 @@ final class ImporterModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(downloadOutputFolder.path, forKey: Self.downloadOutputFolderDefaultsKey)
             downloadPresentationIsDirty = true
+            refreshLocalFileMonitoring()
         }
     }
     @Published var downloadPairs: [PairItem] = [] { didSet { downloadPresentationIsDirty = true } }
     @Published var downloadPhotos: [URL] = [] { didSet { downloadPresentationIsDirty = true } }
     @Published var downloadVideos: [URL] = [] { didSet { downloadPresentationIsDirty = true } }
-    @Published var downloadCompleted: [CompletedItem] = [] { didSet { downloadPresentationIsDirty = true } }
+    @Published var downloadCompleted: [CompletedItem] = [] {
+        didSet { downloadPresentationIsDirty = true; refreshLocalFileMonitoring() }
+    }
     @Published private(set) var visibleDownloadItemsCache: [DownloadGridItem] = []
     @Published var selectedDownloadItemIDs = Set<DownloadGridItem.ID>()
     @Published var downloadFilter: DownloadFilter = .all {
@@ -142,6 +196,9 @@ final class ImporterModel: ObservableObject {
     var trashFiles: ([URL]) -> String? = { FileSystemUtilities.trashGroup($0) }
     var completedScanner: @Sendable (URL) async throws -> [CompletedItem] = { try await ImporterModel.completedItems(in: $0) }
     var downloadScanner: @Sendable (URL, URL) async -> DownloadScanResult = { await ImporterModel.downloadItems(in: $0, excluding: $1) }
+    var shareDownloader: @Sendable (String, URL, DownloaderInfra.ProgressHandler?) async -> ToolRunResult = {
+        await ImporterModel.runSingleDownloader(shareText: $0, destinationRoot: $1, progress: $2)
+    }
     var moveFile: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }
     private var fileOperationsBusy: Bool { isProcessing || isProcessingDownloads || isImportingCompleted || isImportingDownloadMedia }
     private var completedMutationVersion = 0
@@ -149,6 +206,11 @@ final class ImporterModel: ObservableObject {
     private var isRefreshingCompleted = false
     private var isRefreshingDownloads = false
     private var needsAnotherDownloadRefresh = false
+    private var downloadMutationVersion = 0
+    private var localFileMonitoringStarted = false
+    private var localFileMonitor: LocalMediaFolderMonitor?
+    private var monitoredLocalFolderPaths = Set<String>()
+    private var localFileRefreshTask: Task<Void, Never>?
     private var downloadModifiedTimesByPath: [String: TimeInterval] = [:] { didSet { downloadPresentationIsDirty = true } }
     private var downloadPresentationIsDirty = true
     private var downloadDisplayOrdersByPath: [String: MediaDisplayOrder] = [:]
@@ -156,6 +218,8 @@ final class ImporterModel: ObservableObject {
     private var completedDownloadPairIDsCache = Set<PairItem.ID>()
     private var pendingDownloadTasks: [DownloadQueueTask] = []
     private var activeDownloadTask: DownloadQueueTask?
+    private var activeDownloadFileRevisions: [String: MediaFileRevision] = [:]
+    var activeDownloadOutputRoot: URL? { activeDownloadTask?.outputRoot }
     private var activeDownloadProgressState: DownloadProgressState?
     private var activeDownloadProgressTaskID: UUID?
 
@@ -199,9 +263,22 @@ final class ImporterModel: ObservableObject {
         }
         return lines.joined(separator: "\n")
     }
-    var canImportCompleted: Bool { !fileOperationsBusy && !selectedCompletedItems.isEmpty }
-    var canClearQueue: Bool { !fileOperationsBusy && (!files.isEmpty || !pairs.isEmpty) }
-    var canProcessSelectedPairs: Bool { !fileOperationsBusy && !pairs.isEmpty }
+    var canImportCompleted: Bool {
+        !fileOperationsBusy && !selectedCompletedItems.isEmpty
+            && selectedCompletedItems.allSatisfy { downloadFilesAvailableForAction([$0.imageURL] + ($0.movieURL.map { [$0] } ?? [])) }
+    }
+    var canClearQueue: Bool {
+        guard !fileOperationsBusy else { return false }
+        if !selectedPairIDs.isEmpty {
+            return selectedPairs.contains { downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
+        }
+        return files.contains { downloadFilesAvailableForAction([$0]) }
+            || pairs.contains { downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
+    }
+    var canProcessSelectedPairs: Bool {
+        !fileOperationsBusy && (selectedPairIDs.isEmpty ? pairs : selectedPairs)
+            .contains { downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
+    }
     var canComposeCurrentPage: Bool {
         switch selection ?? .queue {
         case .queue: canProcessSelectedPairs
@@ -236,7 +313,10 @@ final class ImporterModel: ObservableObject {
     var selectedPairs: [PairItem] {
         pairs.filter { selectedPairIDs.contains($0.id) }
     }
-    var canClearVisibleCompleted: Bool { !fileOperationsBusy && !visibleCompleted.isEmpty }
+    var canClearVisibleCompleted: Bool {
+        !fileOperationsBusy && (selectedCompletedIDs.isEmpty ? visibleCompleted : selectedCompletedItems)
+            .contains { downloadFilesAvailableForAction([$0.imageURL] + ($0.movieURL.map { [$0] } ?? [])) }
+    }
     var queueSubtitle: String {
         "已识别 \(imageCount) 张照片，\(videoCount) 个视频，已配对 \(pairs.count) 组。"
     }
@@ -333,7 +413,7 @@ final class ImporterModel: ObservableObject {
             + downloadVideos.filter { selectedVideoPaths.contains($0.standardizedFileURL.path) }
     }
     var canProcessDownloadPairs: Bool {
-        guard !fileOperationsBusy, !isDownloading else { return false }
+        guard !fileOperationsBusy else { return false }
         let processablePairIDs = processableVisibleDownloadPairIDs
         if selectedDownloadItemIDs.isEmpty {
             return !processablePairIDs.isEmpty
@@ -343,14 +423,50 @@ final class ImporterModel: ObservableObject {
             .contains { processablePairIDs.contains($0) }
     }
     var canImportSelectedDownloadMedia: Bool {
-        !isDownloading && !isProcessingDownloads && !isImportingDownloadMedia && !selectedDownloadMediaURLs.isEmpty
+        !fileOperationsBusy && !selectedDownloadMediaURLs.isEmpty
+            && downloadFilesAvailableForAction(selectedDownloadMediaURLs)
     }
-    var canClearVisibleDownloads: Bool { !fileOperationsBusy && !isDownloading && !visibleDownloadItems.isEmpty }
+    var canClearVisibleDownloads: Bool {
+        !fileOperationsBusy && visibleDownloadItems.contains { item in
+            guard selectedDownloadItemIDs.isEmpty || selectedDownloadItemIDs.contains(item.id) else { return false }
+            if case .pair(let id) = item.kind, let pair = downloadPairs.first(where: { $0.id == id }) {
+                return downloadFilesAvailableForAction([pair.imageURL, pair.videoURL])
+            }
+            return downloadFilesAvailableForAction([item.imageURL])
+        }
+    }
     var downloadSubtitle: String { downloadOutputFolder.path }
     private var processableVisibleDownloadPairIDs: Set<PairItem.ID> {
         guard downloadFilter != .composed else { return [] }
         let completedIDs = completedDownloadPairIDs()
-        return Set(downloadPairs.compactMap { completedIDs.contains($0.id) ? nil : $0.id })
+        return Set(downloadPairs.compactMap {
+            completedIDs.contains($0.id) || !downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) ? nil : $0.id
+        })
+    }
+
+    // An unrelated download does not lock the library. Files being written or
+    // produced by the active task remain untouched until that task settles.
+    func downloadFilesAvailableForAction(_ urls: [URL]) -> Bool {
+        urls.allSatisfy { url in
+            let file = url.standardizedFileURL
+            if isDownloading && FileManager.default.fileExists(atPath: file.appendingPathExtension("part").path) {
+                return false
+            }
+            let physicalFile = file.resolvingSymlinksInPath()
+            guard let root = activeDownloadOutputRoot,
+                  Self.contains(physicalFile, in: root.resolvingSymlinksInPath()) else { return true }
+            return activeDownloadFileRevisions[physicalFile.path] == MediaFileRevision(file)
+                && activeDownloadFileRevisions[physicalFile.path] != nil
+        }
+    }
+
+    private func captureDownloadFileRevisions() {
+        let urls = files + downloadPairs.flatMap { [$0.imageURL, $0.videoURL] }
+            + downloadPhotos + downloadVideos
+            + (completed + downloadCompleted).flatMap { [$0.imageURL] + ($0.movieURL.map { [$0] } ?? []) }
+        activeDownloadFileRevisions = Dictionary(urls.compactMap { url in
+            MediaFileRevision(url).map { (url.resolvingSymlinksInPath().standardizedFileURL.path, $0) }
+        }, uniquingKeysWith: { first, _ in first })
     }
     init(refreshOnInit: Bool = true) {
         let defaults = UserDefaults.standard
@@ -384,8 +500,49 @@ final class ImporterModel: ObservableObject {
         // Legacy source links cannot be inferred safely from a filename.
         downloadCompleted = downloadCompleted.map(Self.validateLegacyRecord)
         if refreshOnInit {
+            startMonitoringLocalFiles()
             refreshCompleted()
             refreshDownloads()
+        }
+    }
+
+    func startMonitoringLocalFiles() {
+        localFileMonitoringStarted = true
+        refreshLocalFileMonitoring()
+    }
+
+    func stopMonitoringLocalFiles() {
+        localFileMonitoringStarted = false
+        localFileMonitor = nil
+        monitoredLocalFolderPaths.removeAll()
+        localFileRefreshTask?.cancel()
+        localFileRefreshTask = nil
+    }
+
+    func refreshLocalFileMonitoring() {
+        guard localFileMonitoringStarted else { return }
+        let folders = [outputFolder, downloadOutputFolder]
+            + (activeDownloadOutputRoot.map { [$0] } ?? [])
+            + (completed + downloadCompleted).flatMap { item in
+                [item.imageURL.deletingLastPathComponent()]
+                    + (item.movieURL.map { [$0.deletingLastPathComponent()] } ?? [])
+            }
+        let paths = Set(folders.map { $0.resolvingSymlinksInPath().standardizedFileURL.path })
+        guard paths != monitoredLocalFolderPaths else { return }
+        monitoredLocalFolderPaths = paths
+        localFileMonitor = LocalMediaFolderMonitor(folders: paths.sorted().map { URL(fileURLWithPath: $0) }) { [weak self] in
+            Task { @MainActor [weak self] in self?.scheduleLocalFileRefresh() }
+        }
+    }
+
+    private func scheduleLocalFileRefresh() {
+        guard localFileRefreshTask == nil else { return }
+        localFileRefreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            guard let self, !Task.isCancelled, self.localFileMonitoringStarted else { return }
+            self.localFileRefreshTask = nil
+            self.refreshDownloads()
+            self.refreshCompleted()
         }
     }
 
@@ -424,6 +581,7 @@ final class ImporterModel: ObservableObject {
         var errors: [String] = []
         for pair in targets {
             let urls = [pair.imageURL, pair.videoURL]
+            guard downloadFilesAvailableForAction(urls) else { errors.append("正在下载的文件会保留，请在下载完成后重试。"); continue }
             if deleteFiles, let error = trashManagedFiles(urls) { errors.append(error); continue }
             removedIDs.insert(pair.id)
             removedURLs.formUnion(urls.map(\.standardizedFileURL))
@@ -432,6 +590,7 @@ final class ImporterModel: ObservableObject {
         if selectedIDs.isEmpty {
             let pairedURLs = Set(pairs.flatMap { [$0.imageURL, $0.videoURL] }.map(\.standardizedFileURL))
             for url in files where !pairedURLs.contains(url.standardizedFileURL) {
+                guard downloadFilesAvailableForAction([url]) else { errors.append("正在下载的文件会保留，请在下载完成后重试。"); continue }
                 if deleteFiles, let error = trashManagedFiles([url]) { errors.append(error); continue }
                 removedURLs.insert(url.standardizedFileURL)
             }
@@ -793,7 +952,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func selectDownloadOutputFolder(_ folder: URL) {
-        guard !isDownloading, !isProcessingDownloads else { return }
+        guard !fileOperationsBusy else { return }
         let standardizedFolder = folder.standardizedFileURL
         downloadOutputFolder = standardizedFolder
         Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
@@ -842,12 +1001,15 @@ final class ImporterModel: ObservableObject {
         guard activeDownloadTask == nil else { return }
         guard !pendingDownloadTasks.isEmpty else {
             isDownloading = false
+            activeDownloadFileRevisions = [:]
             activeDownloadProgressState = nil
             rebuildDownloadProgressItems()
             return
         }
         let task = pendingDownloadTasks.removeFirst()
+        captureDownloadFileRevisions()
         activeDownloadTask = task
+        refreshLocalFileMonitoring()
         isDownloading = true
         rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: "解析分享链接", activeUnitProgress: 0)
         Task { await performQueuedDownloadTask(task) }
@@ -856,6 +1018,7 @@ final class ImporterModel: ObservableObject {
     private func performQueuedDownloadTask(_ task: DownloadQueueTask) async {
         var messages: [String] = []
         var failures: [String] = []
+        let downloader = shareDownloader
 
         for (index, entry) in task.entries.enumerated() {
             rebuildDownloadProgressItems(
@@ -865,7 +1028,7 @@ final class ImporterModel: ObservableObject {
             )
             let result = await Task.detached(priority: .userInitiated) {
                 await Self.withSecurityScopedAccess(to: task.outputRoot) {
-                    await Self.runSingleDownloader(shareText: entry, destinationRoot: task.outputRoot) { fraction in
+                    await downloader(entry, task.outputRoot) { fraction in
                         let clampedFraction = min(max(fraction, 0), 1)
                         let unitProgress = clampedFraction * DownloadProgressMilestone.downloadEnd
                         let detail = Self.downloadProgressDetail(for: entry, fraction: clampedFraction)
@@ -902,11 +1065,15 @@ final class ImporterModel: ObservableObject {
             downloadStatusText = messages.joined(separator: "\n\n")
         }
 
-        refreshDownloads()
+        await refreshSettledDownloadHistory(in: task.outputRoot)
         if activeDownloadTask?.id == task.id {
             activeDownloadTask = nil
+            activeDownloadFileRevisions = [:]
         }
         startNextDownloadTaskIfNeeded()
+        refreshLocalFileMonitoring()
+        refreshDownloads()
+        refreshCompleted()
     }
 
     private func holdCompletedDownloadProgress(for task: DownloadQueueTask) async {
@@ -988,6 +1155,7 @@ final class ImporterModel: ObservableObject {
     }
 
     func refreshDownloads() {
+        guard !fileOperationsBusy else { needsAnotherDownloadRefresh = true; return }
         guard !isRefreshingDownloads else {
             needsAnotherDownloadRefresh = true
             return
@@ -998,10 +1166,23 @@ final class ImporterModel: ObservableObject {
             repeat {
                 self.needsAnotherDownloadRefresh = false
                 guard let folder = self.authorizedDownloadOutputFolderForUserAction() else { break }
+                let mutationVersion = self.downloadMutationVersion
                 let scannedItems = await self.downloadScanner(folder, self.downloadComposedFolder)
                 guard self.downloadOutputFolder == folder else {
                     self.needsAnotherDownloadRefresh = true
                     continue
+                }
+                guard !self.fileOperationsBusy else {
+                    self.needsAnotherDownloadRefresh = true
+                    break
+                }
+                guard self.downloadMutationVersion == mutationVersion else { continue }
+                guard !scannedItems.directoryUnavailable else {
+                    self.operationNotices[.downloads] = "下载文件夹暂时不可访问，已保留现有列表及记录。"
+                    continue
+                }
+                if self.operationNotices[.downloads] == "下载文件夹暂时不可访问，已保留现有列表及记录。" {
+                    self.operationNotices.removeValue(forKey: .downloads)
                 }
                 self.applyDownloadedItems(scannedItems)
             } while self.needsAnotherDownloadRefresh
@@ -1010,6 +1191,10 @@ final class ImporterModel: ObservableObject {
     }
 
     private func applyDownloadedItems(_ scannedItems: DownloadScanResult) {
+        var scannedItems = scannedItems
+        scannedItems.pairs.removeAll { !downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
+        scannedItems.photos.removeAll { !downloadFilesAvailableForAction([$0]) }
+        scannedItems.videos.removeAll { !downloadFilesAvailableForAction([$0]) }
         let oldPairs = Dictionary(downloadPairs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         downloadPairs = scannedItems.pairs.map { pair in
             var updated = pair
@@ -1019,28 +1204,27 @@ final class ImporterModel: ObservableObject {
             }
             return updated
         }
-        // Only settled scans become completion history; active downloads can contain
-        // one half of a Live Photo whose second resource has not arrived yet.
-        if !isDownloading {
-            var records = completed
-            for url in scannedItems.photos + scannedItems.videos {
-                guard let revision = MediaFileRevision(url) else { continue }
-                let item = CompletedItem(imagePath: url.standardizedFileURL.path,
-                    modifiedTime: revision.modified, displayOrder: scannedItems.displayOrdersByPath[url.path],
-                    standaloneRevision: revision)
-                records = Self.merging(item, into: records)
-            }
-            if records != completed {
-                completedMutationVersion += 1
-                completed = records
-                saveCompletedRecords()
-                retainVisibleCompletedSelection()
-            }
+        // Active-task resources were filtered above; unrelated settled media can
+        // enter completion history even while another download is still running.
+        var records = completed
+        for url in scannedItems.photos + scannedItems.videos {
+            guard let revision = MediaFileRevision(url) else { continue }
+            let item = CompletedItem(imagePath: url.standardizedFileURL.path,
+                modifiedTime: revision.modified, displayOrder: scannedItems.displayOrdersByPath[url.path],
+                standaloneRevision: revision)
+            records = Self.merging(item, into: records)
+        }
+        if records != completed {
+            completedMutationVersion += 1
+            completed = records
+            saveCompletedRecords()
+            retainVisibleCompletedSelection()
         }
         downloadPhotos = scannedItems.photos
         downloadVideos = scannedItems.videos
         downloadModifiedTimesByPath = scannedItems.modifiedTimesByPath
         downloadDisplayOrdersByPath = scannedItems.displayOrdersByPath
+        reconcileCompletedHistoryWithLocalFiles()
         // A scan describes what is currently available, not the lifetime of a record.
         // Retain legacy, temporarily missing and other-directory records; only validated
         // current source/output revisions contribute to the composed filter.
@@ -1054,12 +1238,35 @@ final class ImporterModel: ObservableObject {
         downloadStatusText = lastDownloadFailure.map { "下载存在失败：\($0)\n\(summary)" } ?? (summary + unpairedNotice)
     }
 
-    func processDownloadPairs() async {
-        guard !fileOperationsBusy, !isDownloading else { return }
+    /// A task may finish in the folder selected when it was queued, after the user
+    /// has selected a different download folder for subsequent tasks.
+    func refreshSettledDownloadHistory(in folder: URL) async {
+        let scanned = await downloadScanner(folder, folder.appendingPathComponent("已合成", isDirectory: true))
+        guard !scanned.directoryUnavailable else { return }
+        var records = completed
+        for url in scanned.photos + scanned.videos {
+            guard let revision = MediaFileRevision(url) else { continue }
+            let item = CompletedItem(imagePath: url.standardizedFileURL.path,
+                modifiedTime: revision.modified, displayOrder: scanned.displayOrdersByPath[url.standardizedFileURL.path],
+                standaloneRevision: revision)
+            records = Self.merging(item, into: records)
+        }
+        if records != completed {
+            completedMutationVersion += 1
+            completed = records
+            saveCompletedRecords()
+            retainVisibleCompletedSelection()
+        }
+        reconcileCompletedHistoryWithLocalFiles()
+    }
+
+    func processDownloadPairs(selection explicitSelection: Set<DownloadGridItem.ID>? = nil) async {
+        guard !fileOperationsBusy else { return }
         rebuildVisibleDownloadItems() // Revalidate files at the action boundary.
         let visibleIDs = processableVisibleDownloadPairIDs
-        let selectedIDs = Set(selectedDownloadItemIDs.compactMap(Self.downloadPairID))
-        let targetIDs = selectedDownloadItemIDs.isEmpty ? visibleIDs : selectedIDs.intersection(visibleIDs)
+        let selection = explicitSelection ?? selectedDownloadItemIDs
+        let selectedIDs = Set(selection.compactMap(Self.downloadPairID))
+        let targetIDs = explicitSelection == nil && selection.isEmpty ? visibleIDs : selectedIDs.intersection(visibleIDs)
         let targets = downloadPairs.filter { targetIDs.contains($0.id) }
         guard !targets.isEmpty else { return }
         isProcessingDownloads = true
@@ -1070,7 +1277,7 @@ final class ImporterModel: ObservableObject {
 
     func importSelectedDownloadMediaToPhotos(addToAlbum: Bool) async {
         let mediaURLs = selectedDownloadMediaURLs
-        guard !isImportingDownloadMedia, !mediaURLs.isEmpty else { return }
+        guard !fileOperationsBusy, !mediaURLs.isEmpty, downloadFilesAvailableForAction(mediaURLs) else { return }
         guard mediaURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
             downloadStatusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
             appendOperationNotice(downloadStatusText, for: .downloads)
@@ -1102,11 +1309,13 @@ final class ImporterModel: ObservableObject {
     }
 
     func clearVisibleDownloads(deleteFiles: Bool) {
-        guard !fileOperationsBusy, !isDownloading else { return }
+        guard !fileOperationsBusy else { return }
+        downloadMutationVersion += 1
         let selectedIDs = selectedDownloadItemIDs
         let targets = selectedIDs.isEmpty ? visibleDownloadItems : visibleDownloadItems.filter { selectedIDs.contains($0.id) }
         var removedIDs = Set<DownloadGridItem.ID>()
         var removedPairIDs = Set<PairItem.ID>()
+        var removedPaths = Set<String>()
         var errors: [String] = []
         for item in targets {
             let urls: [URL]
@@ -1116,8 +1325,13 @@ final class ImporterModel: ObservableObject {
                 urls = [pair.imageURL, pair.videoURL]
             case .photo, .video: urls = [item.imageURL]
             }
+            guard downloadFilesAvailableForAction(urls) else {
+                errors.append("\(item.imageURL.lastPathComponent)：正在下载，已保留文件。")
+                continue
+            }
             if deleteFiles, let error = trashManagedFiles(urls) { errors.append(error); continue }
             removedIDs.insert(item.id)
+            removedPaths.formUnion(urls.map { $0.standardizedFileURL.path })
             if case .pair(let id) = item.kind { removedPairIDs.insert(id) }
         }
         let removedPairs = downloadPairs.filter { removedPairIDs.contains($0.id) }
@@ -1131,6 +1345,10 @@ final class ImporterModel: ObservableObject {
             downloadPhotos.removeAll { removedIDs.contains("photo:\($0.standardizedFileURL.path)") }
             downloadVideos.removeAll { removedIDs.contains("video:\($0.standardizedFileURL.path)") }
             downloadCompleted.removeAll { recordIDs.contains($0.id) }
+            if deleteFiles {
+                completedMutationVersion += 1
+                completed.removeAll { $0.moviePath == nil && removedPaths.contains($0.imageURL.standardizedFileURL.path) }
+            }
         }
         for item in targets where removedIDs.contains(item.id) {
             downloadModifiedTimesByPath.removeValue(forKey: item.imageURL.standardizedFileURL.path)
@@ -1138,13 +1356,21 @@ final class ImporterModel: ObservableObject {
         rebuildVisibleDownloadItems()
         selectedDownloadItemIDs.subtract(removedIDs)
         saveDownloadCompletedRecords()
+        if deleteFiles {
+            saveCompletedRecords()
+            retainVisibleCompletedSelection()
+            reconcileCompletedHistoryWithLocalFiles()
+            refreshCompleted()
+            refreshDownloads()
+        }
         downloadStatusText = Self.clearMessage(count: removedIDs.count, deleteFiles: deleteFiles, errors: errors)
         if !errors.isEmpty { operationNotices[.downloads] = downloadStatusText }
     }
 
     func importCompletedToPhotos(addToAlbum targetAddToAlbum: Bool? = nil) async {
         let selectedItems = selectedCompletedItems
-        guard !fileOperationsBusy, !selectedItems.isEmpty else { return }
+        guard !fileOperationsBusy, !selectedItems.isEmpty,
+              selectedItems.allSatisfy({ downloadFilesAvailableForAction([$0.imageURL] + ($0.movieURL.map { [$0] } ?? [])) }) else { return }
         guard selectedItems.allSatisfy(\.sourceExists) else {
             statusText = "未找到源文件。请刷新列表并确认本地文件仍在原位置。"
             appendOperationNotice(statusText, for: .completed)
@@ -1191,10 +1417,11 @@ final class ImporterModel: ObservableObject {
         retainVisibleCompletedSelection()
     }
 
-    func processPairs() async {
+    func processPairs(selection explicitSelection: Set<PairItem.ID>? = nil) async {
         guard !fileOperationsBusy else { return }
-        let targetIDs = selectedPairIDs.isEmpty ? Set(pairs.map(\.id)) : selectedPairIDs
-        let targets = pairs.filter { targetIDs.contains($0.id) }
+        let selection = explicitSelection ?? selectedPairIDs
+        let targetIDs = explicitSelection == nil && selection.isEmpty ? Set(pairs.map(\.id)) : selection
+        let targets = pairs.filter { targetIDs.contains($0.id) && downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
         guard !targets.isEmpty else { return }
         isProcessing = true
         defer { isProcessing = false; resumeCompletedRefreshIfNeeded() }
@@ -1393,6 +1620,91 @@ final class ImporterModel: ObservableObject {
 
     private func resumeCompletedRefreshIfNeeded() {
         if needsAnotherCompletedRefresh { needsAnotherCompletedRefresh = false; refreshCompleted() }
+        if needsAnotherDownloadRefresh { needsAnotherDownloadRefresh = false; refreshDownloads() }
+    }
+
+    private func availableLocalMediaRoots() -> [URL] {
+        ([outputFolder, downloadOutputFolder] + (activeDownloadOutputRoot.map { [$0] } ?? [])).filter { folder in
+            Self.withSecurityScopedAccess(to: folder) {
+                (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) != nil
+            }
+        }
+    }
+
+    /// An absent file in a readable folder is a deletion. A missing or inaccessible
+    /// managed root can be an offline disk, so it is not evidence to discard history.
+    private static func isConfirmedMissing(_ url: URL, availableRoots: [URL]) -> Bool {
+        let file = url.resolvingSymlinksInPath().standardizedFileURL
+        guard !FileManager.default.fileExists(atPath: file.path) else { return false }
+        let roots = availableRoots.map { $0.resolvingSymlinksInPath().standardizedFileURL }
+        let managedRoot = roots.first { contains(file, in: $0) }
+        var child = file
+        while true {
+            let parent = child.deletingLastPathComponent()
+            do {
+                let names = try FileManager.default.contentsOfDirectory(atPath: parent.path)
+                return !names.contains(child.lastPathComponent)
+            } catch {
+                let code = (error as NSError).code
+                guard let managedRoot, contains(parent, in: managedRoot), parent != managedRoot,
+                      code == CocoaError.Code.fileNoSuchFile.rawValue || code == CocoaError.Code.fileReadNoSuchFile.rawValue else { return false }
+                child = parent
+            }
+        }
+    }
+
+    private func reconciledLocalRecord(_ original: CompletedItem, availableRoots: [URL]) -> CompletedItem? {
+        let urls = [original.imageURL] + (original.movieURL.map { [$0] } ?? [])
+        // Download writes must not replace import revisions or degrade a pair while
+        // its resources are still being written. Confirmed deletions remain removable.
+        let existingURLs = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard downloadFilesAvailableForAction(existingURLs) else { return original }
+        let imageRevision = MediaFileRevision(original.imageURL)
+        guard let movieURL = original.movieURL else {
+            if imageRevision != nil {
+                return original.standaloneRevision == nil ? original : Self.validateLegacyRecord(original)
+            }
+            return Self.isConfirmedMissing(original.imageURL, availableRoots: availableRoots) ? nil : original
+        }
+        let movieRevision = MediaFileRevision(movieURL)
+        if imageRevision != nil && movieRevision != nil {
+            return original.revision == nil ? original : Self.validateLegacyRecord(original)
+        }
+        let imageMissing = imageRevision == nil && Self.isConfirmedMissing(original.imageURL, availableRoots: availableRoots)
+        let movieMissing = movieRevision == nil && Self.isConfirmedMissing(movieURL, availableRoots: availableRoots)
+        if imageMissing && movieMissing { return nil }
+        let survivor: (url: URL, revision: MediaFileRevision, recorded: MediaFileRevision?)
+        if movieMissing, let imageRevision {
+            survivor = (original.imageURL, imageRevision, original.revision?.image)
+        } else if imageMissing, let movieRevision {
+            survivor = (movieURL, movieRevision, original.revision?.movie)
+        } else { return original }
+        var item = original
+        item.imagePath = survivor.url.path
+        item.moviePath = nil
+        item.revision = nil
+        item.standaloneRevision = survivor.revision
+        item.modifiedTime = survivor.revision.modified
+        item.importedToPhotos = original.importedToPhotos && survivor.recorded == survivor.revision
+        // A surviving standalone output no longer represents a composed source pair.
+        item.sourceRevision = nil
+        return item
+    }
+
+    private func reconcileCompletedHistoryWithLocalFiles() {
+        let roots = availableLocalMediaRoots()
+        let records = Self.sortedCompletedItems(completed.compactMap { reconciledLocalRecord($0, availableRoots: roots) })
+        let downloadRecords = Self.sortedCompletedItems(downloadCompleted.compactMap { reconciledLocalRecord($0, availableRoots: roots) })
+        if records != completed {
+            completedMutationVersion += 1
+            ThumbnailCollectionAnimation.perform { completed = records }
+            saveCompletedRecords()
+            retainVisibleCompletedSelection()
+        }
+        if downloadRecords != downloadCompleted {
+            ThumbnailCollectionAnimation.perform { downloadCompleted = downloadRecords }
+            saveDownloadCompletedRecords()
+        }
     }
 
     func refreshCompleted() {
@@ -1428,13 +1740,20 @@ final class ImporterModel: ObservableObject {
             func historyKey(_ item: CompletedItem) -> String {
                 item.imageURL.resolvingSymlinksInPath().standardizedFileURL.path
             }
-            let existingByID = Dictionary(self.completed.map { (historyKey($0), $0) },
+            let roots = self.availableLocalMediaRoots()
+            let reconciledHistory = self.completed.compactMap { self.reconciledLocalRecord($0, availableRoots: roots) }
+            let existingByID = Dictionary(reconciledHistory.map { (historyKey($0), $0) },
                                           uniquingKeysWith: { first, _ in first })
-            let scannedPaths = Set(scannedItems.map(historyKey))
-            let standaloneHistory = self.completed.filter {
-                $0.standaloneRevision != nil && !scannedPaths.contains(historyKey($0))
-            }.map(Self.validateLegacyRecord)
-            let refreshedItems = Self.sortedCompletedItems(standaloneHistory + scannedItems.map { scannedItem in
+            let scannedFolder = folder.resolvingSymlinksInPath().standardizedFileURL
+            let retainedHistory = reconciledHistory.filter { item in
+                let directParent = item.imageURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+                return directParent != scannedFolder
+                    || !self.downloadFilesAvailableForAction([item.imageURL] + (item.movieURL.map { [$0] } ?? []))
+            }
+            let settledItems = scannedItems.filter { item in
+                self.downloadFilesAvailableForAction([item.imageURL] + (item.movieURL.map { [$0] } ?? []))
+            }
+            let refreshedItems = Self.sortedCompletedItems(retainedHistory + settledItems.map { scannedItem in
                 var mergedItem = scannedItem
                 if let existingItem = existingByID[historyKey(scannedItem)], scannedItem.hasSameRevision(as: existingItem) {
                     mergedItem.importedToPhotos = existingItem.importedToPhotos
@@ -1449,17 +1768,19 @@ final class ImporterModel: ObservableObject {
                                 ?? .legacy(for: sourceURL, downloadedAt: existingItem.sourceRevision?.image.modified ?? existingItem.modifiedTime)
                         }
                     }
-                    mergedItem.displayOrder?.write(to: mergedItem.imageURL)
-                    if let movie = mergedItem.movieURL { mergedItem.displayOrder?.write(to: movie) }
                 }
                 return mergedItem
             })
 
             if refreshedItems != self.completed {
-                self.completed = refreshedItems
+                self.completedMutationVersion += 1
+                ThumbnailCollectionAnimation.perform { self.completed = refreshedItems }
                 self.saveCompletedRecords()
                 self.retainVisibleCompletedSelection()
             }
+            self.reconcileCompletedHistoryWithLocalFiles()
+            self.rebuildVisibleDownloadItems()
+            self.refreshDownloads()
             self.resumeCompletedRefreshIfNeeded()
         }
     }
@@ -1487,11 +1808,17 @@ final class ImporterModel: ObservableObject {
         let selectedIDs = selectedCompletedIDs
         let targets = selectedIDs.isEmpty ? visibleCompleted : visibleCompleted.filter { selectedIDs.contains($0.id) }
         var removedIDs = Set<CompletedItem.ID>()
+        var removedPaths = Set<String>()
         var errors: [String] = []
         for item in targets {
             let urls = [item.imageURL] + (item.movieURL.map { [$0] } ?? [])
+            guard downloadFilesAvailableForAction(urls) else {
+                errors.append("\(item.imageURL.lastPathComponent)：正在下载，已保留文件。")
+                continue
+            }
             if deleteFiles, let error = trashManagedFiles(urls) { errors.append(error); continue }
             removedIDs.insert(item.id)
+            removedPaths.formUnion(urls.map { $0.standardizedFileURL.path })
         }
         ThumbnailCollectionAnimation.perform {
             completed.removeAll { removedIDs.contains($0.id) }
@@ -1500,12 +1827,41 @@ final class ImporterModel: ObservableObject {
         selectedCompletedIDs.subtract(removedIDs)
         saveCompletedRecords()
         if deleteFiles {
+            downloadMutationVersion += 1
+            removeDownloadSnapshotFiles(at: removedPaths)
             saveDownloadCompletedRecords()
             rebuildVisibleDownloadItems()
             retainVisibleDownloadSelection()
+            refreshDownloads()
+            refreshCompleted()
         }
         statusText = Self.clearMessage(count: removedIDs.count, deleteFiles: deleteFiles, errors: errors)
         operationNotices[.completed] = errors.isEmpty ? nil : statusText
+    }
+
+    private func removeDownloadSnapshotFiles(at removedPaths: Set<String>) {
+        guard !removedPaths.isEmpty else { return }
+        var survivingPairs: [PairItem] = []
+        var survivingPhotos = downloadPhotos.filter { !removedPaths.contains($0.standardizedFileURL.path) }
+        var survivingVideos = downloadVideos.filter { !removedPaths.contains($0.standardizedFileURL.path) }
+        for pair in downloadPairs {
+            let imageRemoved = removedPaths.contains(pair.imageURL.standardizedFileURL.path)
+            let videoRemoved = removedPaths.contains(pair.videoURL.standardizedFileURL.path)
+            if !imageRemoved && !videoRemoved { survivingPairs.append(pair) }
+            else {
+                if !imageRemoved, MediaFileRevision(pair.imageURL) != nil { survivingPhotos.append(pair.imageURL) }
+                if !videoRemoved, MediaFileRevision(pair.videoURL) != nil { survivingVideos.append(pair.videoURL) }
+            }
+        }
+        ThumbnailCollectionAnimation.perform {
+            downloadPairs = survivingPairs
+            downloadPhotos = survivingPhotos
+            downloadVideos = survivingVideos
+        }
+        for path in removedPaths {
+            downloadModifiedTimesByPath.removeValue(forKey: path)
+            downloadDisplayOrdersByPath.removeValue(forKey: path)
+        }
     }
 
     private nonisolated static func completedStem(for url: URL) -> String {
@@ -1552,7 +1908,7 @@ final class ImporterModel: ObservableObject {
                     }
                 }
 
-                return try sortedCompletedItems(imageByStem
+                let imageItems = try imageByStem
                     .map { stem, image in
                         let movie = movieByStem[stem]
                         let revision = movie.flatMap { MediaPairRevision(image: image.url, movie: $0) }
@@ -1566,7 +1922,12 @@ final class ImporterModel: ObservableObject {
                             standaloneRevision: movie == nil ? MediaFileRevision(image.url) : nil
                         )
                     }
-                )
+                let videoItems = movieByStem.compactMap { stem, movie -> CompletedItem? in
+                    guard imageByStem[stem] == nil, let revision = MediaFileRevision(movie) else { return nil }
+                    return CompletedItem(imagePath: movie.path, modifiedTime: revision.modified,
+                        displayOrder: MediaDisplayOrder.read(from: movie), standaloneRevision: revision)
+                }
+                return sortedCompletedItems(imageItems + videoItems)
             }
         }.value
     }
@@ -1851,56 +2212,66 @@ final class ImporterModel: ObservableObject {
 
     private nonisolated static func downloadItems(in folder: URL, excluding excludedFolder: URL) async -> DownloadScanResult {
         await Task.detached(priority: .utility) { () -> DownloadScanResult in
-            let fileManager = FileManager.default
-            let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey]
-            guard let enumerator = fileManager.enumerator(
-                at: folder,
-                includingPropertiesForKeys: resourceKeys,
-                options: [.skipsHiddenFiles]
-            ) else {
-                return DownloadScanResult(pairs: [], photos: [], videos: [])
-            }
-
-            let excludedPath = excludedFolder.standardizedFileURL.path
-            var images: [URL] = []
-            var videos: [URL] = []
-            var modifiedTimesByPath: [String: TimeInterval] = [:]
-            var displayOrdersByPath: [String: MediaDisplayOrder] = [:]
-            while let url = enumerator.nextObject() as? URL {
-                let standardizedURL = url.standardizedFileURL
-                if standardizedURL.path == excludedPath || standardizedURL.path.hasPrefix(excludedPath + "/") {
-                    enumerator.skipDescendants()
-                    continue
+            withSecurityScopedAccess(to: folder) {
+                let fileManager = FileManager.default
+                let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .contentModificationDateKey]
+                guard (try? fileManager.contentsOfDirectory(atPath: folder.path)) != nil else {
+                    return DownloadScanResult(pairs: [], photos: [], videos: [], directoryUnavailable: true)
                 }
-                guard let values = try? standardizedURL.resourceValues(forKeys: Set(resourceKeys)),
-                      values.isRegularFile == true else {
-                    continue
+                var enumerationFailed = false
+                guard let enumerator = fileManager.enumerator(
+                    at: folder,
+                    includingPropertiesForKeys: resourceKeys,
+                    options: [.skipsHiddenFiles],
+                    errorHandler: { _, _ in enumerationFailed = true; return false }
+                ) else {
+                    return DownloadScanResult(pairs: [], photos: [], videos: [], directoryUnavailable: true)
                 }
-                modifiedTimesByPath[standardizedURL.path] = (values.contentModificationDate ?? .distantPast).timeIntervalSince1970
-                if let order = MediaDisplayOrder.read(from: standardizedURL) {
-                    displayOrdersByPath[standardizedURL.path] = order
+
+                let excludedPath = excludedFolder.standardizedFileURL.path
+                var images: [URL] = []
+                var videos: [URL] = []
+                var modifiedTimesByPath: [String: TimeInterval] = [:]
+                var displayOrdersByPath: [String: MediaDisplayOrder] = [:]
+                while let url = enumerator.nextObject() as? URL {
+                    let standardizedURL = url.standardizedFileURL
+                    if standardizedURL.path == excludedPath || standardizedURL.path.hasPrefix(excludedPath + "/") {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    guard let values = try? standardizedURL.resourceValues(forKeys: Set(resourceKeys)),
+                          values.isRegularFile == true else {
+                        continue
+                    }
+                    modifiedTimesByPath[standardizedURL.path] = (values.contentModificationDate ?? .distantPast).timeIntervalSince1970
+                    if let order = MediaDisplayOrder.read(from: standardizedURL) {
+                        displayOrdersByPath[standardizedURL.path] = order
+                    }
+                    if FileSystemUtilities.isImage(standardizedURL) {
+                        images.append(standardizedURL)
+                    } else if FileSystemUtilities.isVideo(standardizedURL) {
+                        videos.append(standardizedURL)
+                    }
                 }
-                if FileSystemUtilities.isImage(standardizedURL) {
-                    images.append(standardizedURL)
-                } else if FileSystemUtilities.isVideo(standardizedURL) {
-                    videos.append(standardizedURL)
+
+                let sortedImages = images.sorted {
+                    $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
                 }
-            }
+                let sortedVideos = videos.sorted {
+                    $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+                }
+                let pairs = uniqueMediaPairs(images: sortedImages, videos: sortedVideos)
+                let usedVideos = Set(pairs.map(\.videoURL))
+                let usedImages = Set(pairs.map(\.imageURL))
 
-            let sortedImages = images.sorted {
-                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-            }
-            let sortedVideos = videos.sorted {
-                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-            }
-            let pairs = uniqueMediaPairs(images: sortedImages, videos: sortedVideos)
-            let usedVideos = Set(pairs.map(\.videoURL))
-            let usedImages = Set(pairs.map(\.imageURL))
+                let photos = sortedImages.filter { !usedImages.contains($0) }
+                let unpairedVideos = sortedVideos.filter { !usedVideos.contains($0) }
 
-            let photos = sortedImages.filter { !usedImages.contains($0) }
-            let unpairedVideos = sortedVideos.filter { !usedVideos.contains($0) }
-
-            return DownloadScanResult(pairs: pairs, photos: photos, videos: unpairedVideos, modifiedTimesByPath: modifiedTimesByPath, displayOrdersByPath: displayOrdersByPath)
+                guard !enumerationFailed else {
+                    return DownloadScanResult(pairs: [], photos: [], videos: [], directoryUnavailable: true)
+                }
+                return DownloadScanResult(pairs: pairs, photos: photos, videos: unpairedVideos, modifiedTimesByPath: modifiedTimesByPath, displayOrdersByPath: displayOrdersByPath)
+            }
         }.value
     }
 
