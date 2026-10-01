@@ -57,82 +57,97 @@ func tiffTypeSize(_ type: UInt16) -> Int {
 func extractAssetID(from jpegURL: URL) throws -> String {
     let data = try Data(contentsOf: jpegURL)
     guard data.count > 4, data[0] == 0xff, data[1] == 0xd8 else { throw ToolError.noAssetID }
-
     var offset = 2
-    while offset + 4 < data.count {
+    while offset + 4 <= data.count {
         guard data[offset] == 0xff else { break }
         let marker = data[offset + 1]
-        if marker == 0xda { break }
-        let segmentLength = Int(readUInt16BE(data, offset + 2))
-        let segmentStart = offset + 4
-        let segmentEnd = offset + 2 + segmentLength
-        if marker == 0xe1,
-           segmentEnd <= data.count,
-           segmentLength >= 14,
-           data[segmentStart..<segmentStart + 6] == Data([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]) {
-            let tiffStart = segmentStart + 6
-            guard data[tiffStart] == 0x4d, data[tiffStart + 1] == 0x4d else { throw ToolError.noAssetID }
-            let ifd0Offset = Int(readUInt32BE(data, tiffStart + 4))
-            let ifd0Start = tiffStart + ifd0Offset
-            let ifd0Count = Int(readUInt16BE(data, ifd0Start))
-            var exifOffset: Int?
-
-            for index in 0..<ifd0Count {
-                let entry = ifd0Start + 2 + index * 12
-                let tag = readUInt16BE(data, entry)
-                if tag == 0x8769 {
-                    exifOffset = Int(readUInt32BE(data, entry + 8))
-                    break
-                }
-            }
-
-            guard let exifOffset else { throw ToolError.noAssetID }
-            let exifStart = tiffStart + exifOffset
-            let exifCount = Int(readUInt16BE(data, exifStart))
-            var makerOffset: Int?
-            var makerCount: Int?
-
-            for index in 0..<exifCount {
-                let entry = exifStart + 2 + index * 12
-                let tag = readUInt16BE(data, entry)
-                if tag == 0x927c {
-                    makerCount = Int(readUInt32BE(data, entry + 4))
-                    makerOffset = Int(readUInt32BE(data, entry + 8))
-                    break
-                }
-            }
-
-            guard let makerOffset, let makerCount else { throw ToolError.noAssetID }
-            let makerStart = tiffStart + makerOffset
-            guard makerStart + makerCount <= data.count,
-                  makerCount > 20,
-                  String(data: data[makerStart..<makerStart + 9], encoding: .ascii) == "Apple iOS" else {
-                throw ToolError.noAssetID
-            }
-
-            let makerIfdStart = makerStart + 14
-            let makerEntryCount = Int(readUInt16BE(data, makerIfdStart))
-            for index in 0..<makerEntryCount {
-                let entry = makerIfdStart + 2 + index * 12
-                let tag = readUInt16BE(data, entry)
-                let type = readUInt16BE(data, entry + 2)
-                let count = Int(readUInt32BE(data, entry + 4))
-                let value = Int(readUInt32BE(data, entry + 8))
-                if tag == 17, type == 2, count > 1 {
-                    let byteCount = count * tiffTypeSize(type)
-                    let valueStart = byteCount <= 4 ? entry + 8 : makerStart + value
-                    let valueEnd = min(valueStart + count, data.count)
-                    let raw = data[valueStart..<valueEnd].filter { $0 != 0 }
-                    if let id = String(data: Data(raw), encoding: .utf8), !id.isEmpty {
-                        return id
-                    }
-                }
-            }
+        if marker == 0xda || marker == 0xd9 { break }
+        let length = Int(readUInt16BE(data, offset + 2))
+        guard length >= 2, length <= data.count - offset - 2 else { throw ToolError.noAssetID }
+        let start = offset + 4
+        let end = offset + 2 + length
+        if marker == 0xe1, end - start >= 6,
+           data[start..<start + 6] == Data("Exif\0\0".utf8) {
+            return try extractAssetIDFromTIFF(Data(data[start + 6..<end]))
         }
-        offset = segmentEnd
+        offset = end
+    }
+    throw ToolError.noAssetID
+}
+
+/// Bounds-checked ISO BMFF boxes, shared by HEIF metadata and MOV field edits.
+struct ISOBox {
+    let range: Range<Int>
+    let payload: Range<Int>
+    let type: UInt32
+    var typeRange: Range<Int> { range.lowerBound + 4..<range.lowerBound + 8 }
+    func isType(_ name: String) -> Bool { type == fourCC(name) }
+}
+
+func fourCC(_ name: String) -> UInt32 {
+    name.utf8.reduce(0) { ($0 << 8) | UInt32($1) }
+}
+
+func isoBox(in data: Data, offset: Int, limit: Int) throws -> ISOBox {
+    guard offset >= data.startIndex, limit <= data.endIndex, offset <= limit, limit - offset >= 8 else { throw ToolError.noAssetID }
+    let shortSize = Int(readUInt32BE(data, offset))
+    var headerSize = 8
+    let size: Int
+    if shortSize == 1 {
+        guard limit - offset >= 16 else { throw ToolError.noAssetID }
+        let longSize = (UInt64(readUInt32BE(data, offset + 8)) << 32) | UInt64(readUInt32BE(data, offset + 12))
+        guard longSize <= UInt64(limit - offset) else { throw ToolError.noAssetID }
+        size = Int(longSize)
+        headerSize = 16
+    } else { size = shortSize == 0 ? limit - offset : shortSize }
+    guard size >= headerSize, size <= limit - offset else { throw ToolError.noAssetID }
+    return ISOBox(range: offset..<offset + size, payload: offset + headerSize..<offset + size,
+                  type: readUInt32BE(data, offset + 4))
+}
+
+func isoBoxes(in data: Data, range: Range<Int>) throws -> [ISOBox] {
+    guard range.lowerBound >= data.startIndex, range.upperBound <= data.endIndex else { throw ToolError.noAssetID }
+    var result: [ISOBox] = []
+    var offset = range.lowerBound
+    while offset < range.upperBound {
+        let box = try isoBox(in: data, offset: offset, limit: range.upperBound)
+        result.append(box)
+        offset = box.range.upperBound
+    }
+    return result
+}
+
+// Older HERMES HEIF exports appended Exif bytes without an enclosing box.
+// Locate meta without interpreting that historical tail as another box.
+func firstISOBox(ofType type: String, in data: Data) throws -> ISOBox? {
+    var offset = data.startIndex
+    while offset < data.endIndex {
+        let box = try isoBox(in: data, offset: offset, limit: data.endIndex)
+        if box.isType(type) { return box }
+        offset = box.range.upperBound
+    }
+    return nil
+}
+
+struct MetadataCursor {
+    let data: Data
+    let limit: Int
+    var offset: Int
+
+    mutating func integer(_ count: Int) throws -> Int {
+        guard count >= 0, count <= 8, offset >= data.startIndex,
+              offset <= limit, count <= limit - offset, limit <= data.endIndex else { throw ToolError.noAssetID }
+        var value: UInt64 = 0
+        for byte in data[offset..<offset + count] { value = (value << 8) | UInt64(byte) }
+        guard value <= UInt64(Int.max) else { throw ToolError.noAssetID }
+        offset += count
+        return Int(value)
     }
 
-    throw ToolError.noAssetID
+    mutating func skip(_ count: Int) throws {
+        guard count >= 0, offset <= limit, count <= limit - offset else { throw ToolError.noAssetID }
+        offset += count
+    }
 }
 
 struct HEICExifItemLocation {
@@ -168,282 +183,181 @@ func integerFits(_ value: Int, byteCount: Int) -> Bool {
 }
 
 func heicExifItemLocation(in data: Data) throws -> HEICExifItemLocation {
-    guard data.count > 12 else { throw ToolError.noAssetID }
-
-    func readUInt32(_ offset: Int) -> UInt32 {
-        (UInt32(data[offset]) << 24) | (UInt32(data[offset + 1]) << 16) | (UInt32(data[offset + 2]) << 8) | UInt32(data[offset + 3])
-    }
-
-    func type(_ offset: Int) -> String {
-        String(data: data[offset + 4..<offset + 8], encoding: .isoLatin1) ?? ""
-    }
-
-    var metaOffset: Int?
-    var metaSize: Int?
-    var offset = 0
-    while offset + 8 <= data.count {
-        let size = Int(readUInt32(offset))
-        if type(offset) == "meta" {
-            metaOffset = offset
-            metaSize = size
-            break
-        }
-        guard size >= 8 else { break }
-        offset += size
-    }
-
-    guard let metaOffset, let metaSize else { throw ToolError.noAssetID }
-    let metaEnd = metaOffset + metaSize
+    guard let meta = try firstISOBox(ofType: "meta", in: data),
+          meta.payload.count >= 4 else { throw ToolError.noAssetID }
+    let children = try isoBoxes(in: data, range: meta.payload.lowerBound + 4..<meta.payload.upperBound)
     var exifItemID: Int?
-    var itemLocations: [Int: HEICExifItemLocation] = [:]
-
-    var childOffset = metaOffset + 12
-    while childOffset + 8 <= metaEnd {
-        let size = Int(readUInt32(childOffset))
-        let boxType = type(childOffset)
-        let content = childOffset + 12
-
-        if boxType == "iinf" {
-            let version = data[childOffset + 8]
-            var cursor = content
-            let count: Int
-            if version == 0 {
-                count = Int(readUInt16BE(data, cursor))
-                cursor += 2
-            } else {
-                count = Int(readUInt32(cursor))
-                cursor += 4
-            }
-            for _ in 0..<count {
-                let entryOffset = cursor
-                let entrySize = Int(readUInt32(entryOffset))
-                if type(entryOffset) == "infe" {
-                    let entryVersion = data[entryOffset + 8]
-                    var entryCursor = entryOffset + 12
-                    if entryVersion >= 2 {
-                        let itemID: Int
-                        if entryVersion == 2 {
-                            itemID = Int(readUInt16BE(data, entryCursor))
-                            entryCursor += 2
-                        } else {
-                            itemID = Int(readUInt32(entryCursor))
-                            entryCursor += 4
-                        }
-                        entryCursor += 2
-                        let itemType = String(data: data[entryCursor..<entryCursor + 4], encoding: .isoLatin1) ?? ""
-                        if itemType == "Exif" {
-                            exifItemID = itemID
-                        }
-                    }
-                }
-                cursor += entrySize
-            }
-        } else if boxType == "iloc" {
-            let version = data[childOffset + 8]
-            var cursor = content
-            let sizes1 = data[cursor]
-            cursor += 1
-            let offsetSize = Int(sizes1 >> 4)
-            let lengthSize = Int(sizes1 & 0x0f)
-            let sizes2 = data[cursor]
-            cursor += 1
-            let baseOffsetSize = Int(sizes2 >> 4)
-            let indexSize = (version == 1 || version == 2) ? Int(sizes2 & 0x0f) : 0
-            let itemCount: Int
-            if version < 2 {
-                itemCount = Int(readUInt16BE(data, cursor))
-                cursor += 2
-            } else {
-                itemCount = Int(readUInt32(cursor))
-                cursor += 4
-            }
-
-            func readN(_ byteCount: Int, cursor: inout Int) -> Int {
-                let start = cursor
-                cursor += byteCount
-                return byteCount == 0 ? 0 : readIntegerBE(data, range: start..<cursor)
-            }
-
-            for _ in 0..<itemCount {
-                let itemID: Int
-                if version < 2 {
-                    itemID = Int(readUInt16BE(data, cursor))
-                    cursor += 2
-                } else {
-                    itemID = Int(readUInt32(cursor))
-                    cursor += 4
-                }
-                var constructionMethodRange: Range<Int>?
-                if version == 1 || version == 2 {
-                    constructionMethodRange = cursor..<cursor + 2
-                    cursor += 2
-                }
-                cursor += 2
-
-                let baseOffsetStart = cursor
-                let base = readN(baseOffsetSize, cursor: &cursor)
-                let baseOffsetRange = baseOffsetStart..<cursor
-                let extentCount = Int(readUInt16BE(data, cursor))
-                cursor += 2
-                for extentIndex in 0..<extentCount {
-                    if indexSize > 0 {
-                        _ = readN(indexSize, cursor: &cursor)
-                    }
-                    let extentOffsetStart = cursor
-                    let extentOffset = readN(offsetSize, cursor: &cursor)
-                    let extentOffsetRange = extentOffsetStart..<cursor
-                    let extentLengthStart = cursor
-                    let extentLength = readN(lengthSize, cursor: &cursor)
-                    let extentLengthRange = extentLengthStart..<cursor
-                    if extentIndex == 0 {
-                        let itemStart = base + extentOffset
-                        let itemEnd = itemStart + extentLength
-                        guard itemStart >= 0, itemEnd <= data.count else { throw ToolError.noAssetID }
-                        itemLocations[itemID] = HEICExifItemLocation(
-                            itemRange: itemStart..<itemEnd,
-                            constructionMethodRange: constructionMethodRange,
-                            baseOffsetRange: baseOffsetRange,
-                            extentOffsetRange: extentOffsetRange,
-                            extentLengthRange: extentLengthRange
-                        )
-                    }
-                }
+    if let info = children.first(where: { $0.isType("iinf") }), info.payload.count >= 4 {
+        var cursor = MetadataCursor(data: data, limit: info.payload.upperBound, offset: info.payload.lowerBound)
+        let version = try cursor.integer(1)
+        try cursor.skip(3)
+        let count = try cursor.integer(version == 0 ? 2 : 4)
+        let entries = try isoBoxes(in: data, range: cursor.offset..<info.payload.upperBound)
+        guard count == entries.count else { throw ToolError.noAssetID }
+        for entry in entries where entry.isType("infe") {
+            var item = MetadataCursor(data: data, limit: entry.payload.upperBound, offset: entry.payload.lowerBound)
+            let version = try item.integer(1)
+            try item.skip(3)
+            guard version == 2 || version == 3 else { continue }
+            let identifier = try item.integer(version == 2 ? 2 : 4)
+            try item.skip(2)
+            if try item.integer(4) == Int(fourCC("Exif")) { exifItemID = identifier }
+        }
+    }
+    guard let exifItemID, let location = children.first(where: { $0.isType("iloc") }), location.payload.count >= 4 else {
+        throw ToolError.noAssetID
+    }
+    var cursor = MetadataCursor(data: data, limit: location.payload.upperBound, offset: location.payload.lowerBound)
+    let version = try cursor.integer(1)
+    guard version <= 2 else { throw ToolError.noAssetID }
+    try cursor.skip(3)
+    let sizes1 = try cursor.integer(1), sizes2 = try cursor.integer(1)
+    let offsetSize = sizes1 >> 4, lengthSize = sizes1 & 15
+    let baseSize = sizes2 >> 4, indexSize = version == 0 ? 0 : sizes2 & 15
+    guard [offsetSize, lengthSize, baseSize, indexSize].allSatisfy({ $0 <= 8 }) else { throw ToolError.noAssetID }
+    let count = try cursor.integer(version < 2 ? 2 : 4)
+    // Every item consumes at least an ID, data reference and extent count.
+    guard count <= (cursor.limit - cursor.offset) / (version < 2 ? 6 : 8) else { throw ToolError.noAssetID }
+    for _ in 0..<count {
+        let identifier = try cursor.integer(version < 2 ? 2 : 4)
+        let methodRange = version == 0 ? nil : cursor.offset..<cursor.offset + 2
+        let method = version == 0 ? 0 : try cursor.integer(2) & 15
+        let dataReference = try cursor.integer(2)
+        let baseRange = cursor.offset..<cursor.offset + baseSize
+        let base = try cursor.integer(baseSize)
+        let extentCount = try cursor.integer(2)
+        let extentWidth = indexSize + offsetSize + lengthSize
+        guard extentWidth > 0 || extentCount == 0,
+              extentWidth == 0 || extentCount <= (cursor.limit - cursor.offset) / extentWidth else { throw ToolError.noAssetID }
+        var result: HEICExifItemLocation?
+        for index in 0..<extentCount {
+            try cursor.skip(indexSize)
+            let offsetRange = cursor.offset..<cursor.offset + offsetSize
+            let extentOffset = try cursor.integer(offsetSize)
+            let lengthRange = cursor.offset..<cursor.offset + lengthSize
+            let length = try cursor.integer(lengthSize)
+            if identifier == exifItemID, index == 0 {
+                guard dataReference == 0, method <= 1, extentCount == 1 else { throw ToolError.noAssetID }
+                let origin: Int
+                let limit: Int
+                if method == 1 {
+                    guard let itemData = children.first(where: { $0.isType("idat") }) else { throw ToolError.noAssetID }
+                    origin = itemData.payload.lowerBound
+                    limit = itemData.payload.upperBound
+                } else { origin = data.startIndex; limit = data.endIndex }
+                guard base <= limit - origin, extentOffset <= limit - origin - base,
+                      length <= limit - origin - base - extentOffset else { throw ToolError.noAssetID }
+                let start = origin + base + extentOffset
+                result = HEICExifItemLocation(itemRange: start..<start + length,
+                    constructionMethodRange: methodRange, baseOffsetRange: baseRange,
+                    extentOffsetRange: offsetRange, extentLengthRange: lengthRange)
             }
         }
-
-        guard size >= 8 else { break }
-        childOffset += size
+        if let result { return result }
     }
-
-    guard let exifItemID, let exifLocation = itemLocations[exifItemID] else { throw ToolError.noAssetID }
-    return exifLocation
+    throw ToolError.noAssetID
 }
 
 func extractHEICExifData(from heicURL: URL) throws -> Data {
     let data = try Data(contentsOf: heicURL)
     let location = try heicExifItemLocation(in: data)
-    let exifItem = data[location.itemRange]
-    guard exifItem.count > 10 else { throw ToolError.noAssetID }
-    return Data(exifItem.dropFirst(10))
+    let exifItem = Data(data[location.itemRange])
+    guard exifItem.count >= 4 else { throw ToolError.noAssetID }
+    let tiffOffset = Int(readUInt32BE(exifItem, 0))
+    guard tiffOffset <= exifItem.count - 4 else { throw ToolError.noAssetID }
+    return Data(exifItem.dropFirst(4 + tiffOffset))
 }
 
 func extractAssetIDFromTIFF(_ data: Data) throws -> String {
-    guard data.count > 16, data[0] == 0x4d, data[1] == 0x4d else { throw ToolError.noAssetID }
+    guard data.count >= 8, data[0] == 0x4d, data[1] == 0x4d,
+          readUInt16BE(data, 2) == 42 else { throw ToolError.noAssetID }
+    let ifd0 = try parseIFDEntries(from: data, offset: Int(readUInt32BE(data, 4))).0
+    guard let exif = ifd0.first(where: { $0.tag == 0x8769 && $0.type == 4 && $0.count == 1 }) else { throw ToolError.noAssetID }
+    let exifEntries = try parseIFDEntries(from: data, offset: Int(readUInt32BE(exif.valueField, 0))).0
+    guard let maker = exifEntries.first(where: { $0.tag == 0x927c })?.referencedData,
+          maker.count >= 18, String(data: maker.prefix(9), encoding: .ascii) == "Apple iOS" else { throw ToolError.noAssetID }
+    let entries = try parseIFDEntries(from: maker, offset: 14).0
+    guard let identifier = entries.first(where: { $0.tag == 17 && $0.type == 2 && $0.count > 1 }) else { throw ToolError.noAssetID }
+    let bytes = identifier.referencedData ?? Data(identifier.valueField.prefix(Int(identifier.count)))
+    guard let value = String(data: bytes.filter { $0 != 0 }, encoding: .utf8), !value.isEmpty else { throw ToolError.noAssetID }
+    return value
+}
 
-    func read16(_ offset: Int) -> UInt16 { readUInt16BE(data, offset) }
-    func read32(_ offset: Int) -> UInt32 { readUInt32BE(data, offset) }
-
-    let ifd0Offset = Int(read32(4))
-    let ifd0Count = Int(read16(ifd0Offset))
-    var exifOffset: Int?
-    for index in 0..<ifd0Count {
-        let entry = ifd0Offset + 2 + index * 12
-        if read16(entry) == 0x8769 {
-            exifOffset = Int(read32(entry + 8))
-            break
+func extractAssetIDFromMovie(_ movieURL: URL) async throws -> String {
+    let asset = AVURLAsset(url: movieURL)
+    var identifiers = Set<String>()
+    for format in try await asset.load(.availableMetadataFormats) {
+        for item in try await asset.loadMetadata(for: format)
+        where item.identifier == .quickTimeMetadataContentIdentifier {
+            if let value = try await item.load(.stringValue), !value.isEmpty { identifiers.insert(value) }
         }
     }
-    guard let exifOffset else { throw ToolError.noAssetID }
+    guard identifiers.count == 1, let identifier = identifiers.first else { throw ToolError.noAssetID }
+    return identifier
+}
 
-    let exifCount = Int(read16(exifOffset))
-    var makerOffset: Int?
-    var makerCount: Int?
-    for index in 0..<exifCount {
-        let entry = exifOffset + 2 + index * 12
-        if read16(entry) == 0x927c {
-            makerCount = Int(read32(entry + 4))
-            makerOffset = Int(read32(entry + 8))
-            break
+func movieMetadataValueRanges(in data: Data, key: String) throws -> [Range<Int>] {
+    guard let movie = try isoBoxes(in: data, range: data.startIndex..<data.endIndex).first(where: { $0.isType("moov") }) else {
+        throw ToolError.noAssetID
+    }
+    let movieChildren = try isoBoxes(in: data, range: movie.payload)
+    var containers = movieChildren.filter { $0.isType("meta") }
+    for userData in movieChildren where userData.isType("udta") {
+        containers += try isoBoxes(in: data, range: userData.payload).filter { $0.isType("meta") }
+    }
+    var ranges: [Range<Int>] = []
+    for container in containers {
+        // QuickTime meta has no version/flags; ISO meta is a FullBox.
+        let children: [ISOBox]
+        if let quickTime = try? isoBoxes(in: data, range: container.payload) { children = quickTime }
+        else {
+            guard container.payload.count >= 4, readUInt32BE(data, container.payload.lowerBound) == 0 else { throw ToolError.noAssetID }
+            children = try isoBoxes(in: data, range: container.payload.lowerBound + 4..<container.payload.upperBound)
         }
-    }
-
-    guard let makerOffset, let makerCount, makerOffset + makerCount <= data.count else {
-        throw ToolError.noAssetID
-    }
-    let maker = data[makerOffset..<makerOffset + makerCount]
-    guard maker.count > 32,
-          String(data: maker[maker.startIndex..<maker.startIndex + 9], encoding: .ascii) == "Apple iOS" else {
-        throw ToolError.noAssetID
-    }
-
-    let base = maker.startIndex
-    let makerCountEntries = Int(readUInt16BE(maker, base + 14))
-    for index in 0..<makerCountEntries {
-        let entry = base + 16 + index * 12
-        let tag = readUInt16BE(maker, entry)
-        let type = readUInt16BE(maker, entry + 2)
-        let count = Int(readUInt32BE(maker, entry + 4))
-        let value = Int(readUInt32BE(maker, entry + 8))
-        if tag == 17, type == 2, count > 1 {
-            let valueStart = count <= 4 ? entry + 8 : base + value
-            let valueEnd = min(valueStart + count, maker.endIndex)
-            let raw = maker[valueStart..<valueEnd].filter { $0 != 0 }
-            if let id = String(data: Data(raw), encoding: .utf8), !id.isEmpty {
-                return id
+        guard let handler = children.first(where: { $0.isType("hdlr") }), handler.payload.count >= 12,
+              readUInt32BE(data, handler.payload.lowerBound + 8) == fourCC("mdta"),
+              let keys = children.first(where: { $0.isType("keys") }), keys.payload.count >= 8,
+              let values = children.first(where: { $0.isType("ilst") }) else { continue }
+        var cursor = MetadataCursor(data: data, limit: keys.payload.upperBound, offset: keys.payload.lowerBound)
+        guard try cursor.integer(4) == 0 else { throw ToolError.noAssetID }
+        let count = try cursor.integer(4)
+        guard count <= (cursor.limit - cursor.offset) / 8 else { throw ToolError.noAssetID }
+        var indices = Set<UInt32>()
+        for index in 0..<count {
+            let size = try cursor.integer(4)
+            guard size >= 8, size - 4 <= cursor.limit - cursor.offset else { throw ToolError.noAssetID }
+            let namespace = try cursor.integer(4)
+            let end = cursor.offset + size - 8
+            if namespace == Int(fourCC("mdta")), String(data: data[cursor.offset..<end], encoding: .utf8) == key {
+                indices.insert(UInt32(index + 1))
             }
+            cursor.offset = end
+        }
+        guard cursor.offset == cursor.limit else { throw ToolError.noAssetID }
+        for value in try isoBoxes(in: data, range: values.payload) where indices.contains(value.type) {
+            let atoms = try isoBoxes(in: data, range: value.payload)
+            guard atoms.count == 1, let atom = atoms.first, atom.isType("data"), atom.payload.count >= 8,
+                  readUInt32BE(data, atom.payload.lowerBound) == 1 else { throw ToolError.noAssetID }
+            ranges.append(atom.payload.lowerBound + 8..<atom.payload.upperBound)
         }
     }
-
-    throw ToolError.noAssetID
+    return ranges
 }
 
-func extractAssetIDFromMovie(_ movieURL: URL) throws -> String {
-    let data = try Data(contentsOf: movieURL)
-    guard let text = String(data: data, encoding: .isoLatin1) else {
-        throw ToolError.noAssetID
-    }
-
-    return try extractAssetID(fromMovieText: text)
-}
-
-func extractAssetID(fromMovieText text: String) throws -> String {
-    guard text.contains("com.apple.quicktime.content.identifier") else {
-        throw ToolError.noAssetID
-    }
-
-    let pattern = #"[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}"#
-    let regex = try NSRegularExpression(pattern: pattern)
-    let range = NSRange(text.startIndex..<text.endIndex, in: text)
-    guard let match = regex.firstMatch(in: text, range: range),
-          let uuidRange = Range(match.range, in: text) else {
-        throw ToolError.noAssetID
-    }
-    return String(text[uuidRange])
-}
-
-func copyMovieReplacingAssetIDIfPossible(sourceURL: URL, outputURL: URL, assetID: String) throws -> Bool {
-    guard fileContainsAllASCII([
-        "com.apple.quicktime.content.identifier",
-        "com.apple.quicktime.still-image-time"
-    ], in: sourceURL) else {
-        return false
-    }
-
+func copyMovieReplacingAssetIDIfPossible(sourceURL: URL, outputURL: URL, assetID: String) async throws -> Bool {
+    guard fileContainsAllASCII(["com.apple.quicktime.still-image-time"], in: sourceURL),
+          let existingAssetID = try? await extractAssetIDFromMovie(sourceURL) else { return false }
+    let asset = AVURLAsset(url: sourceURL)
+    guard !(try await asset.loadTracks(withMediaType: .metadata)).isEmpty else { return false }
     var data = try Data(contentsOf: sourceURL)
-    guard let text = String(data: data, encoding: .isoLatin1) else {
-        return false
-    }
-
-    let existingAssetID = try extractAssetID(fromMovieText: text)
-    guard existingAssetID.utf8.count == assetID.utf8.count else { return false }
-
-    let existingData = Data(existingAssetID.utf8)
-    let replacementData = Data(assetID.utf8)
-    var searchStart = data.startIndex
-    var replacementCount = 0
-    while searchStart < data.endIndex,
-          let range = data[searchStart...].range(of: existingData) {
-        data.replaceSubrange(range, with: replacementData)
-        searchStart = range.upperBound
-        replacementCount += 1
-    }
-
-    guard replacementCount > 0 else { return false }
+    let existingBytes = Data(existingAssetID.utf8), replacementBytes = Data(assetID.utf8)
+    guard existingBytes.count == replacementBytes.count,
+          let ranges = try? movieMetadataValueRanges(in: data, key: "com.apple.quicktime.content.identifier"),
+          !ranges.isEmpty, ranges.allSatisfy({ data[$0] == existingBytes }) else { return false }
+    for range in ranges { data.replaceSubrange(range, with: replacementBytes) }
     try? FileManager.default.removeItem(at: outputURL)
     try data.write(to: outputURL, options: .atomic)
-
-    let writtenAssetID = try extractAssetIDFromMovie(outputURL)
-    guard writtenAssetID == assetID else {
+    guard (try? await extractAssetIDFromMovie(outputURL)) == assetID else {
         try? FileManager.default.removeItem(at: outputURL)
         return false
     }
@@ -552,7 +466,7 @@ func makePreservingAppleMakerNote(from existingMaker: Data, assetID: String) thr
     return maker
 }
 
-func makeLivePhotoExifSegment(width: UInt32, height: UInt32, assetID: String) -> Data {
+func makeLivePhotoExifSegment(width: UInt32, height: UInt32, assetID: String) throws -> Data {
     let maker = makeAppleMakerNote(assetID: assetID)
     let ifd0Count = 6
     let exifCount = 8
@@ -598,6 +512,7 @@ func makeLivePhotoExifSegment(width: UInt32, height: UInt32, assetID: String) ->
     var payload = Data("Exif\0\0".utf8)
     payload.append(tiff)
 
+    guard payload.count + 2 <= UInt16.max else { throw ToolError.noAssetID }
     var segment = Data([0xff, 0xe1])
     appendUInt16BE(UInt16(payload.count + 2), to: &segment)
     segment.append(payload)
@@ -617,11 +532,11 @@ func tiffByteCount(type: UInt16, count: UInt32) -> Int {
 }
 
 func parseIFDEntries(from tiff: Data, offset: Int) throws -> ([PreservedTIFFEntry], UInt32) {
-    guard offset + 2 <= tiff.count else { throw ToolError.noAssetID }
+    guard offset >= tiff.startIndex, offset <= tiff.endIndex, tiff.endIndex - offset >= 2 else { throw ToolError.noAssetID }
     let count = Int(readUInt16BE(tiff, offset))
     let entriesStart = offset + 2
     let nextOffsetPosition = entriesStart + count * 12
-    guard nextOffsetPosition + 4 <= tiff.count else { throw ToolError.noAssetID }
+    guard nextOffsetPosition <= tiff.endIndex, tiff.endIndex - nextOffsetPosition >= 4 else { throw ToolError.noAssetID }
 
     var entries: [PreservedTIFFEntry] = []
     for index in 0..<count {
@@ -634,7 +549,7 @@ func parseIFDEntries(from tiff: Data, offset: Int) throws -> ([PreservedTIFFEntr
         let referencedData: Data?
         if byteCount > 4 {
             let dataOffset = Int(readUInt32BE(tiff, entryOffset + 8))
-            guard dataOffset >= 0, dataOffset + byteCount <= tiff.count else { throw ToolError.noAssetID }
+            guard dataOffset >= tiff.startIndex, dataOffset <= tiff.endIndex, byteCount <= tiff.endIndex - dataOffset else { throw ToolError.noAssetID }
             referencedData = Data(tiff[dataOffset..<dataOffset + byteCount])
         } else {
             referencedData = nil
@@ -752,7 +667,6 @@ func makePreservingLivePhotoExifSegment(from existingSegmentPayload: Data, asset
     var payload = Data("Exif\0\0".utf8)
     payload.append(tiff)
     guard payload.count + 2 <= UInt16.max else { throw ToolError.noAssetID }
-
     var segment = Data([0xff, 0xe1])
     appendUInt16BE(UInt16(payload.count + 2), to: &segment)
     segment.append(payload)
@@ -766,7 +680,7 @@ func writeJPEGWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throw
     }
 
     let dimensions = jpegDimensions(source)
-    let fallbackSegment = makeLivePhotoExifSegment(width: dimensions.width, height: dimensions.height, assetID: assetID)
+    let fallbackSegment = try makeLivePhotoExifSegment(width: dimensions.width, height: dimensions.height, assetID: assetID)
 
     var offset = 2
     while offset + 4 < source.count, source[offset] == 0xff {
@@ -775,6 +689,7 @@ func writeJPEGWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throw
         let length = Int(readUInt16BE(source, offset + 2))
         let start = offset + 4
         let end = offset + 2 + length
+        guard length >= 2, end <= source.count else { throw ToolError.noAssetID }
         if marker == 0xe1,
            end <= source.count,
            source[start..<min(start + 6, end)] == Data([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]) {
@@ -811,21 +726,24 @@ func writeHEICWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throw
     var source = try Data(contentsOf: sourceURL)
     let location = try heicExifItemLocation(in: source)
     let originalExifItem = Data(source[location.itemRange])
-    guard originalExifItem.count > 10 else { throw ToolError.noAssetID }
+    guard originalExifItem.count >= 4 else { throw ToolError.noAssetID }
+    let tiffOffset = Int(readUInt32BE(originalExifItem, 0))
+    guard tiffOffset <= originalExifItem.count - 4 else { throw ToolError.noAssetID }
+    let tiffStart = 4 + tiffOffset
 
-    let existingSegmentPayload = Data("Exif\0\0".utf8) + Data(originalExifItem.dropFirst(10))
+    let existingSegmentPayload = Data("Exif\0\0".utf8) + Data(originalExifItem.dropFirst(tiffStart))
     let segment: Data
     if let preservingSegment = try? makePreservingLivePhotoExifSegment(from: existingSegmentPayload, assetID: assetID) {
         segment = preservingSegment
     } else {
         let dimensions = heicImageDimensions(sourceURL)
-        segment = makeLivePhotoExifSegment(width: dimensions.width, height: dimensions.height, assetID: assetID)
+        segment = try makeLivePhotoExifSegment(width: dimensions.width, height: dimensions.height, assetID: assetID)
     }
 
     let segmentPayload = Data(segment.dropFirst(4))
     guard segmentPayload.count > 6 else { throw ToolError.noAssetID }
-    let newExifItem = Data(originalExifItem.prefix(10)) + Data(segmentPayload.dropFirst(6))
-    let newItemStart = source.count
+    let newExifItem = Data(originalExifItem.prefix(tiffStart)) + Data(segmentPayload.dropFirst(6))
+    let newItemStart = source.count + 8
     let newItemLength = newExifItem.count
 
     guard integerFits(newItemLength, byteCount: location.extentLengthRange.count) else {
@@ -852,6 +770,8 @@ func writeHEICWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throw
     }
 
     writeIntegerBE(newItemLength, range: location.extentLengthRange, in: &source)
+    appendUInt32BE(UInt32(newExifItem.count + 8), to: &source)
+    source.append(Data("mdat".utf8))
     source.append(newExifItem)
     try source.write(to: outputURL)
 
@@ -1059,21 +979,30 @@ func makeAppleCompatibleMovieIfNeeded(_ movieURL: URL) async throws -> URL? {
 
 func rewriteHEVCSampleEntryForAppleCompatibility(_ movieURL: URL) throws {
     var data = try Data(contentsOf: movieURL)
-    let sourceFourCC = Data("hev1".utf8)
-    let destinationFourCC = Data("hvc1".utf8)
-    var searchStart = data.startIndex
-    var didRewrite = false
-
-    while searchStart < data.endIndex,
-          let range = data[searchStart...].range(of: sourceFourCC) {
-        data.replaceSubrange(range, with: destinationFourCC)
-        searchStart = range.upperBound
-        didRewrite = true
+    let roots = try isoBoxes(in: data, range: data.startIndex..<data.endIndex)
+    var typeRanges: [Range<Int>] = []
+    for movie in roots where movie.isType("moov") {
+        for track in try isoBoxes(in: data, range: movie.payload) where track.isType("trak") {
+            guard let media = try isoBoxes(in: data, range: track.payload).first(where: { $0.isType("mdia") }) else { continue }
+            let children = try isoBoxes(in: data, range: media.payload)
+            guard let handler = children.first(where: { $0.isType("hdlr") }), handler.payload.count >= 12,
+                  readUInt32BE(data, handler.payload.lowerBound + 8) == fourCC("vide"),
+                  let info = children.first(where: { $0.isType("minf") }),
+                  let table = try isoBoxes(in: data, range: info.payload).first(where: { $0.isType("stbl") }),
+                  let descriptions = try isoBoxes(in: data, range: table.payload).first(where: { $0.isType("stsd") }),
+                  descriptions.payload.count >= 8 else { continue }
+            let entries = try isoBoxes(in: data, range: descriptions.payload.lowerBound + 8..<descriptions.payload.upperBound)
+            guard Int(readUInt32BE(data, descriptions.payload.lowerBound + 4)) == entries.count else { throw ToolError.noAssetID }
+            for entry in entries where entry.isType("hev1") {
+                guard entry.payload.count >= 78,
+                      try isoBoxes(in: data, range: entry.payload.lowerBound + 78..<entry.payload.upperBound)
+                        .contains(where: { $0.isType("hvcC") }) else { throw ToolError.noAssetID }
+                typeRanges.append(entry.typeRange)
+            }
+        }
     }
-
-    if didRewrite {
-        try data.write(to: movieURL, options: .atomic)
-    }
+    for range in typeRanges { data.replaceSubrange(range, with: Data("hvc1".utf8)) }
+    if !typeRanges.isEmpty { try data.write(to: movieURL, options: .atomic) }
 }
 
 func metadataItem(identifier: AVMetadataIdentifier, value: any NSCopying & NSObjectProtocol, dataType: String) -> AVMutableMetadataItem {
@@ -1197,7 +1126,7 @@ func makeMovie(sourceURL: URL, outputURL: URL, assetID: String) async throws {
 }
 
 func makeLivePhotoMovie(sourceURL: URL, outputURL: URL, assetID: String) async throws {
-    if try copyMovieReplacingAssetIDIfPossible(sourceURL: sourceURL, outputURL: outputURL, assetID: assetID) {
+    if try await copyMovieReplacingAssetIDIfPossible(sourceURL: sourceURL, outputURL: outputURL, assetID: assetID) {
         return
     }
 
@@ -1210,7 +1139,7 @@ func makeLivePhotoMovie(sourceURL: URL, outputURL: URL, assetID: String) async t
             throw error
         }
         defer { try? FileManager.default.removeItem(at: compatibleMovieURL) }
-        if try copyMovieReplacingAssetIDIfPossible(sourceURL: compatibleMovieURL, outputURL: outputURL, assetID: assetID) {
+        if try await copyMovieReplacingAssetIDIfPossible(sourceURL: compatibleMovieURL, outputURL: outputURL, assetID: assetID) {
             return
         }
         try await makeMovie(sourceURL: compatibleMovieURL, outputURL: outputURL, assetID: assetID)
@@ -1309,14 +1238,14 @@ struct Main {
                     assetID = try extractAssetIDFromTIFF(extractHEICExifData(from: jpegURL))
                     stillHasAssetID = true
                 } catch {
-                    assetID = (try? extractAssetIDFromMovie(videoURL)) ?? UUID().uuidString.uppercased()
+                    assetID = (try? await extractAssetIDFromMovie(videoURL)) ?? UUID().uuidString.uppercased()
                 }
             } else {
                 do {
                     assetID = try extractAssetID(from: jpegURL)
                     stillHasAssetID = true
                 } catch {
-                    assetID = (try? extractAssetIDFromMovie(videoURL)) ?? UUID().uuidString.uppercased()
+                    assetID = (try? await extractAssetIDFromMovie(videoURL)) ?? UUID().uuidString.uppercased()
                 }
             }
 
@@ -1401,7 +1330,7 @@ struct Main {
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputMOV.path)
 
             guard CGImageSourceCreateWithURL(outputJPEG as CFURL, nil) != nil,
-                  try extractAssetIDFromMovie(outputMOV) == assetID else {
+                  try await extractAssetIDFromMovie(outputMOV) == assetID else {
                 throw NSError(domain: "HERMES.Tool", code: 2, userInfo: [NSLocalizedDescriptionKey: "合成结果验证失败，未发布文件。"])
             }
             let published = try publishLivePhoto(still: outputJPEG, movie: outputMOV, to: destinationFolder, baseName: baseName)

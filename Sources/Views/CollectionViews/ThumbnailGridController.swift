@@ -75,19 +75,30 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true) {
         guard newItems != items else { return }
         let previousItems = itemByID
-        let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
+        let previousIDs = dataSource.snapshot().itemIdentifiers
         itemByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         items = newItems
 
-        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
-        snapshot.appendSections([Section.main])
-        snapshot.appendItems(newItems.map(\.id), toSection: Section.main)
-        snapshot.reloadItems(newItems.compactMap { item in
-            existingIDs.contains(item.id) && previousItems[item.id] != item ? item.id : nil
-        })
+        // Reconfigure retained visible items without asking Diffable to reuse
+        // them. configure() preserves pixels for status-only changes and still
+        // invalidates a thumbnail when its file revision actually changes.
+        for visibleItem in collectionView.visibleItems() {
+            guard let indexPath = collectionView.indexPath(for: visibleItem),
+                  let id = dataSource.itemIdentifier(for: indexPath),
+                  let updated = itemByID[id], previousItems[id] != updated,
+                  let thumbnail = visibleItem as? ThumbnailCollectionItem else { continue }
+            thumbnail.configure(with: updated.url, status: updated.status, mediaKind: updated.mediaKind,
+                contentVersion: updated.contentVersion, unavailableMessage: updated.unavailableMessage)
+        }
 
-        let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+        let newIDs = newItems.map(\.id)
+        if previousIDs != newIDs {
+            var snapshot = NSDiffableDataSourceSnapshot<String, String>()
+            snapshot.appendSections([Section.main])
+            snapshot.appendItems(newIDs, toSection: Section.main)
+            let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+        }
         applySelection(selectedIDs)
     }
 

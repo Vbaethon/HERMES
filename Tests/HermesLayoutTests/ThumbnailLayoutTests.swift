@@ -42,4 +42,39 @@ final class ThumbnailLayoutTests: XCTestCase {
         XCTAssertNil(item.imageView?.image)
     }
 
+    func testGridStatusChangesPreserveLoadedImage() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 400))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        let url = URL(fileURLWithPath: "/tmp/hermes-status-preservation.png")
+        func update(_ status: PairItem.Status, version: TimeInterval = 1) {
+            grid.updateItems([ThumbnailGridItem(id: "stable", url: url, status: status,
+                mediaKind: .livePhoto, contentVersion: version)], animatingDifferences: false)
+            scroll.layoutSubtreeIfNeeded()
+            grid.nsCollectionView.layoutSubtreeIfNeeded()
+        }
+        update(.running)
+        try await Task.sleep(for: .milliseconds(100))
+        let indexPath = IndexPath(item: 0, section: 0)
+        let original = try XCTUnwrap(grid.nsCollectionView.item(at: indexPath) as? ThumbnailCollectionItem)
+        let image = NSImage(size: NSSize(width: 32, height: 32))
+        original.imageView?.image = image
+        original.imageView?.alphaValue = 1
+        for status in [PairItem.Status.finished, .failed, .running] {
+            update(status)
+            let current = try XCTUnwrap(grid.nsCollectionView.item(at: indexPath) as? ThumbnailCollectionItem)
+            XCTAssertTrue(current === original, "State changes must preserve the visible collection item")
+            XCTAssertTrue(current.imageView?.image === image, "State changes must not clear a loaded thumbnail")
+            XCTAssertEqual(current.imageView?.alphaValue, 1, "State changes must not restart the image fade")
+        }
+        XCTAssertTrue((original.view.accessibilityValue() as? String)?.contains("正在合成") == true)
+        update(.finished, version: 2)
+        let replacement = try XCTUnwrap(grid.nsCollectionView.item(at: indexPath) as? ThumbnailCollectionItem)
+        XCTAssertNil(replacement.imageView?.image, "A changed file revision must still invalidate stale pixels")
+        withExtendedLifetime(window) {}
+    }
+
 }

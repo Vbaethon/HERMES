@@ -230,6 +230,17 @@ enum ToolRunResult: Sendable { case success(String), failure(String) }
         try bitmap.representation(using:.png,properties:[:])!.write(to:part)
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"png") } catch { throw NSError(domain:"REGRESSION valid PNG rejected",code:1,userInfo:[NSUnderlyingErrorKey:error]) }
         do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"mp4"); fatalError("accepted image as video") } catch { }
+        let validPNG = try Data(contentsOf: part)
+        try validPNG.prefix(33).write(to: part)
+        do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"png"); fatalError("accepted PNG headers without pixel data") } catch { }
+        let jpegBitmap = NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:64,pixelsHigh:64,bitsPerSample:8,samplesPerPixel:3,hasAlpha:false,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:192,bitsPerPixel:24)!
+        for offset in 0..<(64 * 192) { jpegBitmap.bitmapData![offset] = UInt8(offset % 255) }
+        let validJPEG = jpegBitmap.representation(using:.jpeg,properties:[:])!
+        try validJPEG.write(to: part)
+        try await MediaFileUtilities.validateMedia(part, expectedSuffix:"jpg")
+        try validJPEG.prefix(validJPEG.count / 2).write(to: part)
+        do { try await MediaFileUtilities.validateMedia(part,expectedSuffix:"jpg"); fatalError("accepted truncated JPEG with recovered partial pixels") } catch { }
+        try validPNG.write(to: part)
         if CommandLine.arguments.count > 1 {
             try FileManager.default.removeItem(at: part)
             try FileManager.default.copyItem(at:URL(fileURLWithPath:CommandLine.arguments[1]),to:part)

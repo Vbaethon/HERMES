@@ -390,6 +390,51 @@ import Foundation
         pass("migration preserves an independent download folder")
         try await Task.sleep(for: .milliseconds(100))
 
+        let ordinaryMigration = try model("ordinary-download-migration")
+        let ordinaryDownloadRoot = ordinaryMigration.downloadOutputFolder
+        let ordinaryPhoto = ordinaryDownloadRoot.appendingPathComponent("photo.jpg")
+        let ordinaryVideo = ordinaryDownloadRoot.appendingPathComponent("video.mp4")
+        try Data("original downloaded photo".utf8).write(to: ordinaryPhoto)
+        try Data("original downloaded video".utf8).write(to: ordinaryVideo)
+        // The exported pair deliberately shares the raw photo's name.
+        let ordinaryExport = try pair(ordinaryMigration.outputFolder, "photo")
+        ordinaryMigration.completed = [record(ordinaryExport)]
+        ordinaryMigration.refreshDownloads()
+        try await waitUntil { ordinaryMigration.canMoveOutputFolder && ordinaryMigration.completed.count == 3 }
+        ordinaryMigration.selectedCompletedIDs = [ordinaryPhoto.path, ordinaryVideo.path]
+        ordinaryMigration.mediaFilesImporter = { urls, _ in .success(urls.count) }
+        await ordinaryMigration.importCompletedToPhotos()
+        ordinaryMigration.selectedDownloadItemIDs = ["photo:" + ordinaryPhoto.path, "video:" + ordinaryVideo.path]
+        let ordinaryBefore = try [Data(contentsOf: ordinaryPhoto), Data(contentsOf: ordinaryVideo)]
+        ordinaryMigration.selectOutputParentFolder(root.appendingPathComponent("ordinary-download-new"))
+        try await waitUntil { ordinaryMigration.canMoveOutputFolder }
+        expect(ordinaryMigration.outputFolder.lastPathComponent == "HERMES", "export migration must succeed despite shared raw filename")
+        expect(ordinaryMigration.downloadOutputFolder == ordinaryDownloadRoot, "independent download folder setting must stay unchanged")
+        let ordinaryAfter = try [Data(contentsOf: ordinaryPhoto), Data(contentsOf: ordinaryVideo)]
+        expect(ordinaryBefore == ordinaryAfter, "ordinary download originals must stay in place and byte-identical")
+        expect(ordinaryMigration.downloadPhotos == [ordinaryPhoto] && ordinaryMigration.downloadVideos == [ordinaryVideo], "download refresh must retain original media")
+        expect(ordinaryMigration.completed.filter { $0.moviePath == nil }.allSatisfy { $0.importedToPhotos && $0.outputIsCurrent }, "raw download revisions and import flags must survive migration")
+        expect(ordinaryMigration.selectedCompletedIDs == [ordinaryPhoto.path, ordinaryVideo.path], "standalone completion selection must keep source paths")
+        expect(ordinaryMigration.selectedDownloadItemIDs.count == 2, "raw download selection must survive migration")
+        expect(fm.fileExists(atPath: ordinaryMigration.outputFolder.appendingPathComponent("photo.mov").path), "paired export must still move")
+        let ordinaryReloaded = ImporterModel(refreshOnInit: false)
+        expect(ordinaryReloaded.completed.filter { $0.moviePath == nil }.count == 2, "ordinary download records must persist after migration")
+        pass("export migration preserves independent ordinary downloads, shared names, revisions and selections")
+
+        let nestedOrdinary = try model("nested-ordinary-migration")
+        nestedOrdinary.downloadOutputFolder = nestedOrdinary.outputFolder.appendingPathComponent("Downloader")
+        try fm.createDirectory(at: nestedOrdinary.downloadOutputFolder, withIntermediateDirectories: true)
+        let nestedPhoto = nestedOrdinary.downloadOutputFolder.appendingPathComponent("raw.jpg")
+        try Data("nested downloaded photo".utf8).write(to: nestedPhoto)
+        nestedOrdinary.refreshDownloads()
+        try await waitUntil { nestedOrdinary.canMoveOutputFolder && nestedOrdinary.completed.count == 1 }
+        nestedOrdinary.selectOutputParentFolder(root.appendingPathComponent("nested-ordinary-new"))
+        try await waitUntil { nestedOrdinary.canMoveOutputFolder }
+        let movedNestedPhoto = nestedOrdinary.downloadOutputFolder.appendingPathComponent("raw.jpg")
+        expect(fm.fileExists(atPath: movedNestedPhoto.path) && !fm.fileExists(atPath: nestedPhoto.path), "nested download media must move with the export directory")
+        expect(nestedOrdinary.completed.first?.imageURL == movedNestedPhoto && nestedOrdinary.completed.first?.outputIsCurrent == true, "nested raw completion path and revision must rebase")
+        pass("export migration still relocates nested ordinary download media and records")
+
         let conflict = try model("conflict-migration")
         let originalConflictRoot = conflict.outputFolder
         let conflicting = try pair(originalConflictRoot, "same")

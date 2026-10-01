@@ -999,11 +999,13 @@ enum XHSNativeDownloader {
         retries: Int = 3,
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws -> DownloadResult {
+        try Task.checkCancellation()
+        let temporaryURL = task.destination.appendingPathExtension("part")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
         var lastError: Error?
         for attempt in 0...retries {
             do {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let temporaryURL = task.destination.appendingPathExtension("part")
                 for sourceURL in task.urls {
                     do {
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent, progress: progress)
@@ -1012,6 +1014,7 @@ enum XHSNativeDownloader {
                         if task.audioURLs.contains(sourceURL), !hasAudio {
                             throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "客户端有声实况源未返回音轨，尝试备用素材。"])
                         }
+                        try Task.checkCancellation()
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
@@ -1023,11 +1026,15 @@ enum XHSNativeDownloader {
                         task.displayOrder?.write(to: finalURL)
                         return DownloadResult(isLivePhoto: task.isLivePhoto, hasAudio: hasAudio)
                     } catch {
+                        try Task.checkCancellation()
+                        if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                         lastError = error
                         try? FileManager.default.removeItem(at: temporaryURL)
                     }
                 }
             } catch {
+                try Task.checkCancellation()
+                if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                 lastError = error
                 try? FileManager.default.removeItem(at: task.destination.appendingPathExtension("part"))
             }
@@ -1089,6 +1096,7 @@ enum XHSNativeDownloader {
         do {
             try await DownloaderInfra.downloadOnceAsync(requestURL, to: destination, userAgent: requestUserAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress)
         } catch {
+            try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: request) else { throw error }
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination)

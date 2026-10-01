@@ -728,6 +728,9 @@ final class ImporterModel: ObservableObject {
     private func movableCompletedRecordFiles(from sourceFolder: URL, to destinationFolder: URL) throws -> [URL] {
         let fileManager = FileManager.default
         let urls = completed
+            // Single-file completion records reference download originals, not
+            // detached exports. Files inside the old export root move above.
+            .filter { $0.moviePath != nil }
             .flatMap { [$0.imageURL, $0.movieURL].compactMap { $0 } }
             .map(\.standardizedFileURL)
         let movableURLs = Dictionary(grouping: urls, by: \.path)
@@ -737,6 +740,7 @@ final class ImporterModel: ObservableObject {
                 fileManager.fileExists(atPath: $0.path)
                     && !Self.contains($0, in: sourceFolder)
                     && !Self.contains($0, in: destinationFolder)
+                    && !Self.contains($0.resolvingSymlinksInPath(), in: downloadOutputFolder.resolvingSymlinksInPath())
             }
         let movingNames = movableURLs.map(\.lastPathComponent)
         guard Set(movingNames).count == movingNames.count else {

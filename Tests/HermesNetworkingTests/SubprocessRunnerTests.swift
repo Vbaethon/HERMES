@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import HermesNetworking
 
@@ -39,5 +40,48 @@ final class SubprocessRunnerTests: XCTestCase {
         XCTAssertThrowsError(try SubprocessRunner.run(
             executable: URL(fileURLWithPath: "/no-such-hermes-test-executable"), arguments: [], timeout: 30
         ))
+    }
+
+    func testCancellationStopsOnlyItsOwnUnresponsiveChild() async throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("HERMES-cancel-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let unrelated = Process()
+        unrelated.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        unrelated.arguments = ["-e", "sleep 30"]
+        try unrelated.run()
+        defer {
+            if unrelated.isRunning { unrelated.terminate() }
+            unrelated.waitUntilExit()
+        }
+
+        let task = Task {
+            try await SubprocessRunner.runAsync(
+                executable: URL(fileURLWithPath: "/usr/bin/perl"),
+                arguments: ["-e", "$SIG{TERM} = 'IGNORE'; open my $f, '>', $ARGV[0] or die $!; print $f $$; close $f; sleep 30", marker.path],
+                timeout: 30
+            )
+        }
+        // Confirm the child actually launched before testing its cancellation.
+        for _ in 0..<200 where !FileManager.default.fileExists(atPath: marker.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard let pidText = try? String(contentsOf: marker, encoding: .utf8),
+              let pid = Int32(pidText) else {
+            task.cancel()
+            _ = try? await task.value
+            XCTFail("The child did not start")
+            return
+        }
+        let cancelledAt = Date()
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled execution must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 3)
+        XCTAssertEqual(kill(pid, 0), -1, "The cancelled child must have exited")
+        XCTAssertTrue(unrelated.isRunning, "Cancellation must leave unrelated processes running")
     }
 }

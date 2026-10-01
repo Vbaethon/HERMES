@@ -39,6 +39,7 @@ app_is_running() {
 }
 
 # Optional machine-specific signing configuration; never commit this file.
+# Callers use a guarded array expansion: Bash 3.2 treats an empty array as unset under set -u.
 SIGNING_ARGS=()
 if [[ -f "$ROOT_DIR/Signing.local.xcconfig" ]]; then
   SIGNING_ARGS=(-xcconfig "$ROOT_DIR/Signing.local.xcconfig")

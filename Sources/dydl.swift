@@ -549,6 +549,8 @@ enum DouyinNativeDownloader {
 	        }
             return (finalURL, seedInfo)
         } catch {
+            try Task.checkCancellation()
+            if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
             if let fallback = try? await resolveURLWithCompatibilityCurl(url) {
                 if debugEnabled {
                     print("[DouyinDebug] resolveURL: URLSession failed (\(error.localizedDescription)); curl resolved \(fallback.resolvedURL.absoluteString)")
@@ -2900,13 +2902,15 @@ enum DouyinNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws -> DownloadOutcome {
         try Task.checkCancellation()
+        let temporaryURL = task.destination.appendingPathExtension("part")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
         var lastError: Error?
         for attempt in 0...retries {
             do {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let temporaryURL = task.destination.appendingPathExtension("part")
                 try await downloadOnceAsync(task.url, to: temporaryURL, progress: progress)
                 try await MediaFileUtilities.validateMedia(temporaryURL, expectedSuffix: task.destination.pathExtension)
+                try Task.checkCancellation()
                 let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                 let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                 try? FileManager.default.removeItem(at: finalURL)
@@ -2917,6 +2921,7 @@ enum DouyinNativeDownloader {
                 return DownloadOutcome(fileURL: finalURL, sourceHost: task.url.host ?? "unknown")
             } catch {
                 try Task.checkCancellation()
+                if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                 lastError = error
                 try? FileManager.default.removeItem(at: task.destination.appendingPathExtension("part"))
                 if attempt < retries {
@@ -2931,6 +2936,7 @@ enum DouyinNativeDownloader {
                 return outcome
             } catch {
                 try Task.checkCancellation()
+                if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                 lastError = error
             }
         }

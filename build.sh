@@ -60,7 +60,7 @@ mkdir -p "$DERIVED_DATA_DIR" "$PRODUCTS_DIR"
 
 DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$XCODEBUILD" \
   -project "$ROOT_DIR/$PROJECT_NAME" \
-  "${SIGNING_ARGS[@]}" \
+  ${SIGNING_ARGS[@]+"${SIGNING_ARGS[@]}"} \
   -scheme "$SCHEME" \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA_DIR" \

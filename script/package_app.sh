@@ -14,6 +14,7 @@ STAGED_APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-/Applications}"
 FINAL_APP="$INSTALL_DIR/$APP_NAME.app"
 TEMP_APP="$INSTALL_DIR/.$APP_NAME.installing.$$.app"
+PREVIOUS_APP="$INSTALL_DIR/.$APP_NAME.previous.$$.app"
 MAC_ARCH="$(uname -m)"
 XCODE_DESTINATION="platform=macOS,arch=$MAC_ARCH"
 SHOULD_BUMP_VERSION=true
@@ -21,6 +22,9 @@ VERSION_SCOPE="patch"
 EXPLICIT_VERSION=""
 SHOULD_OPEN=true
 PROJECT_FILE_BACKUP=""
+INSTALLATION_STARTED=false
+HAD_PREVIOUS_APP=false
+INSTALLATION_COMMITTED=false
 
 XCODE_DEVELOPER_DIR="$(resolve_developer_dir)"
 XCODEBUILD="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
@@ -80,13 +84,38 @@ bump_build_number() {
 
 cleanup() {
   local exit_code=$?
-  if [[ "$exit_code" -ne 0 && -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
-    cp "$PROJECT_FILE_BACKUP" "$PROJECT_FILE"
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ "$INSTALLATION_COMMITTED" != true ]]; then
+    # Bash 3.2 can enter EXIT with status 0 after an unset-variable expansion error.
+    if [[ "$exit_code" -eq 0 ]]; then exit_code=1; fi
+    if [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
+      if ! rm -rf "$FINAL_APP" || ! mv "$PREVIOUS_APP" "$FINAL_APP"; then
+        echo "Failed to restore HERMES; previous app retained at: $PREVIOUS_APP" >&2
+        exit_code=1
+      fi
+    elif [[ "$INSTALLATION_STARTED" == true && "$HAD_PREVIOUS_APP" == false ]]; then
+      rm -rf "$FINAL_APP"
+    fi
+    if [[ -n "$PROJECT_FILE_BACKUP" && -f "$PROJECT_FILE_BACKUP" ]]; then
+      if cp "$PROJECT_FILE_BACKUP" "$PROJECT_FILE"; then
+        rm -f "$PROJECT_FILE_BACKUP"
+      else
+        echo "Failed to restore project version; backup retained at: $PROJECT_FILE_BACKUP" >&2
+        exit_code=1
+      fi
+    fi
+  else
+    rm -rf "$PREVIOUS_APP"
+    rm -f "$PROJECT_FILE_BACKUP"
   fi
-  rm -f "$PROJECT_FILE_BACKUP"
   rm -rf "$TEMP_APP"
+  exit "$exit_code"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$BUILD_DIR" "$DERIVED_DATA_DIR" "$PRODUCTS_DIR" "$INSTALL_DIR"
 
@@ -98,7 +127,7 @@ fi
 
 DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$XCODEBUILD" \
   -project "$ROOT_DIR/$PROJECT_NAME" \
-  "${SIGNING_ARGS[@]}" \
+  ${SIGNING_ARGS[@]+"${SIGNING_ARGS[@]}"} \
   -scheme "$SCHEME" \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA_DIR" \
@@ -123,8 +152,18 @@ ditto "$BUILT_APP" "$STAGED_APP"
 xattr -cr "$STAGED_APP" || true
 
 ditto "$STAGED_APP" "$TEMP_APP"
-rm -rf "$FINAL_APP"
+# Staging can take time; recheck before touching the installed app.
+if app_is_running; then
+  echo "HERMES is running; installation skipped to protect current downloads." >&2
+  exit 1
+fi
+INSTALLATION_STARTED=true
+if [[ -e "$FINAL_APP" || -L "$FINAL_APP" ]]; then
+  HAD_PREVIOUS_APP=true
+  mv "$FINAL_APP" "$PREVIOUS_APP"
+fi
 mv "$TEMP_APP" "$FINAL_APP"
+INSTALLATION_COMMITTED=true
 
 if [[ "$SHOULD_OPEN" == true ]]; then
   /usr/bin/open "$FINAL_APP"

@@ -129,6 +129,7 @@ enum DownloaderHTTPCompatibility {
     }
 
     static func shouldFallback(after error: Error, for request: URLRequest?) -> Bool {
+        guard !isCancellation(error) else { return false }
         let nsError = error as NSError
         if let request,
            DownloaderNetworkPolicy.shouldFallbackHTTPStatus(nsError.code, for: request) {
@@ -150,6 +151,12 @@ enum DownloaderHTTPCompatibility {
 	            ].contains(nsError.code)
     }
 
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
     /// Keep HTTP status validation and fallback routing together at every page request entry.
     static func requestData(
         for request: URLRequest,
@@ -159,6 +166,7 @@ enum DownloaderHTTPCompatibility {
             try await dataAsync(for: request, readsBody: readsBody)
         }
     ) async throws -> (Data, URL?) {
+        try Task.checkCancellation()
         do {
             let (data, response) = try await session.data(for: request)
             if let response = response as? HTTPURLResponse, !(200..<400).contains(response.statusCode) {
@@ -167,6 +175,7 @@ enum DownloaderHTTPCompatibility {
             }
             return (readsBody ? data : Data(), response.url)
         } catch {
+            try Task.checkCancellation()
             guard shouldFallback(after: error, for: request) else { throw error }
             return try await fallback(request, readsBody)
         }
@@ -185,12 +194,19 @@ enum DownloaderHTTPCompatibility {
     }
 
     static func downloadAsync(_ request: URLRequest, to destination: URL) async throws {
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
         try? FileManager.default.removeItem(at: destination)
+        var completed = false
+        defer {
+            if !completed { try? FileManager.default.removeItem(at: destination) }
+        }
         _ = try await runCurl(request: request, outputURL: destination, reportsEffectiveURL: false)
+        try Task.checkCancellation()
+        completed = true
     }
 
     private static func runCurl(
@@ -198,6 +214,7 @@ enum DownloaderHTTPCompatibility {
         outputURL: URL,
         reportsEffectiveURL: Bool
     ) async throws -> URL? {
+        try Task.checkCancellation()
         guard let url = request.url else {
             throw URLError(.badURL)
         }
@@ -236,14 +253,11 @@ enum DownloaderHTTPCompatibility {
         }
         arguments.append(url.absoluteString)
 
-        let curlArguments = arguments
-        let captured = try await Task.detached(priority: .utility) {
-            try SubprocessRunner.run(
-                executable: URL(fileURLWithPath: "/usr/bin/curl"),
-                arguments: curlArguments,
-                timeout: TimeInterval(transferLimit * 3 + 20)
-            )
-        }.value
+        let captured = try await SubprocessRunner.runAsync(
+            executable: URL(fileURLWithPath: "/usr/bin/curl"),
+            arguments: arguments,
+            timeout: TimeInterval(transferLimit * 3 + 20)
+        )
         let output = String(data: captured.stdout, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let errorOutput = String(data: captured.stderr, encoding: .utf8)?

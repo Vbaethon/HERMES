@@ -18,8 +18,15 @@ enum MediaFileUtilities {
         guard !text.hasPrefix("<"), !text.hasPrefix("{"), !text.hasPrefix("[") else { throw invalid() }
         let expectsVideo = ["mp4", "mov", "m4v"].contains(expectedSuffix.lowercased())
         if !expectsVideo, let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-           CGImageSourceGetCount(source) > 0,
-           CGImageSourceCopyPropertiesAtIndex(source, 0, nil) != nil { return }
+           CGImageSourceGetCount(source) > 0 {
+            // Headers can remain readable after all pixel data has been truncated.
+            // Read decode status before any property query, which can hide JPEG EOF errors.
+            let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+            guard let image = CGImageSourceCreateImageAtIndex(source, 0, options),
+                  image.width > 0, image.height > 0,
+                  CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw invalid() }
+            return
+        }
         if ["jpg", "jpeg", "png", "heic", "heif", "webp", "avif"].contains(expectedSuffix.lowercased()) { throw invalid() }
         // Walk ISO container boundaries without reading payloads or restricting brands.
         // A readable moov alone does not prove the mdat payload finished downloading.

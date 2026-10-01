@@ -45,6 +45,7 @@ enum DownloaderInfra {
         session: URLSession,
         shouldUseDirectly: (URLRequest) -> Bool
     ) async throws -> Data {
+        try Task.checkCancellation()
         var req = URLRequest(url: url)
         req.timeoutInterval = 30
         req.assumesHTTP3Capable = false
@@ -63,6 +64,7 @@ enum DownloaderInfra {
             }
             return data
         } catch {
+            try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
             return try await DownloaderHTTPCompatibility.dataAsync(for: req).0
         }
@@ -81,6 +83,7 @@ enum DownloaderInfra {
         extraHeaders: [String: String] = [:],
         progress: ProgressHandler? = nil
     ) async throws {
+        try Task.checkCancellation()
         var req = URLRequest(url: url)
         req.timeoutInterval = 30
         req.assumesHTTP3Capable = false
@@ -97,6 +100,7 @@ enum DownloaderInfra {
         do {
             try await streamDownload(req, to: destination, session: session, progress: progress)
         } catch {
+            try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination)
@@ -111,6 +115,7 @@ enum DownloaderInfra {
         progress: ProgressHandler?
     ) async throws {
         let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
         if let httpResponse = response as? HTTPURLResponse, !(200..<400).contains(httpResponse.statusCode) {
             throw NSError(
                 domain: "DownloaderInfra",
@@ -149,11 +154,13 @@ enum DownloaderInfra {
             buffer.append(byte)
             receivedLength += 1
             if buffer.count >= 128 * 1024 {
+                try Task.checkCancellation()
                 try handle.write(contentsOf: buffer)
                 buffer.removeAll(keepingCapacity: true)
                 await publishIfNeeded()
             }
         }
+        try Task.checkCancellation()
         if !buffer.isEmpty {
             try handle.write(contentsOf: buffer)
         }
@@ -175,7 +182,10 @@ enum DownloaderInfra {
         extraHeaders: [String: String] = [:],
         progress: ProgressHandler? = nil
     ) async throws {
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temporaryURL = destination.appendingPathExtension("part")
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
         var lastError: Error?
         var candidates: [URL] = []
         var seen = Set<String>()
@@ -185,9 +195,9 @@ enum DownloaderInfra {
         for candidate in candidates {
             for _ in 0..<retries {
                 do {
-                    let temporaryURL = destination.appendingPathExtension("part")
                     try await downloadOnceAsync(candidate, to: temporaryURL, userAgent: userAgent, session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders, progress: progress)
                     try await validate?(temporaryURL)
+                    try Task.checkCancellation()
                     if FileManager.default.fileExists(atPath: destination.path) {
                         try FileManager.default.removeItem(at: destination)
                     }
@@ -195,8 +205,10 @@ enum DownloaderInfra {
                     try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: destination.path)
                     return
                 } catch {
+                    try Task.checkCancellation()
+                    if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                     lastError = error
-                    try? FileManager.default.removeItem(at: destination.appendingPathExtension("part"))
+                    try? FileManager.default.removeItem(at: temporaryURL)
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }
