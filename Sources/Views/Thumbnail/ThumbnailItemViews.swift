@@ -386,6 +386,11 @@ final class ThumbnailItemView: NSView {
         updateBadgeFrames()
     }
 
+    func containsThumbnail(at point: NSPoint) -> Bool {
+        layoutSubtreeIfNeeded()
+        return !interactiveFrame.isEmpty && interactiveFrame.contains(point)
+    }
+
     func updateImageFrame(for image: NSImage?) {
         guard let imageView else { return }
         guard let image, image.size.width > 0, image.size.height > 0 else {

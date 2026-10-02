@@ -22,15 +22,14 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
             NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
         }
 
-        override func mouseDown(with event: NSEvent) {
-            let point = convert(event.locationInWindow, from: nil)
-            if indexPathForItem(at: point) == nil {
-                deselectItems(at: selectionIndexPaths)
-                gridController?.syncSelectionFromCollectionView()
-                super.mouseDown(with: event)
-                return
+        override func indexPathForItem(at point: NSPoint) -> IndexPath? {
+            // Layout cells also include the padding around proportionally scaled artwork.
+            guard let indexPath = super.indexPathForItem(at: point),
+                  let thumbnailView = item(at: indexPath)?.view as? ThumbnailItemView,
+                  thumbnailView.containsThumbnail(at: thumbnailView.convert(point, from: self)) else {
+                return nil
             }
-            super.mouseDown(with: event)
+            return indexPath
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {

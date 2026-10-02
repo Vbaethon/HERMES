@@ -426,9 +426,13 @@ import Foundation
         menuScroll.layoutSubtreeIfNeeded()
         menuCoordinator.collectionView!.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
-        func rightClickMenu(_ collection: NSCollectionView, at index: Int) -> NSMenu {
-            let frame = collection.collectionViewLayout!.layoutAttributesForItem(at: IndexPath(item: index, section: 0))!.frame
-            let point = collection.convert(NSPoint(x: frame.midX, y: frame.midY), to: nil)
+        func rightClickMenu(_ collection: NSCollectionView, at index: Int) async throws -> NSMenu {
+            let indexPath = IndexPath(item: index, section: 0)
+            try await waitUntil { collection.item(at: indexPath)?.imageView?.image != nil }
+            let thumbnailView = collection.item(at: indexPath)!.view as! ThumbnailItemView
+            thumbnailView.layoutSubtreeIfNeeded()
+            let imageFrame = thumbnailView.imageView!.frame
+            let point = thumbnailView.convert(NSPoint(x: imageFrame.midX, y: imageFrame.midY), to: nil)
             let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],
                 timestamp: 0, windowNumber: collection.window!.windowNumber, context: nil,
                 eventNumber: 0, clickCount: 1, pressure: 1)!
@@ -445,18 +449,18 @@ import Foundation
         }
         menuCoordinator.gridController!.applySelection([pairID, photoID])
         menuModel.selectedDownloadItemIDs = []
-        let selectedMenu = rightClickMenu(menuCoordinator.collectionView!, at: pairIndex)
+        let selectedMenu = try await rightClickMenu(menuCoordinator.collectionView!, at: pairIndex)
         expect(menuModel.selectedDownloadItemIDs == [pairID, photoID], "right click must restore the current multi-selection before building its menu")
         expect(menuSelections == [[pairID, photoID]], "opening the menu must publish selection exactly once")
         expect(selectedMenu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled), "download must leave eligible composition, Finder, import and deletion menu actions available")
         menuCoordinator.gridController!.applySelection([pairID])
         menuSelections = []
-        let photoMenu = rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
+        let photoMenu = try await rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
         expect(menuModel.selectedDownloadItemIDs == [photoID] && menuSelections == [[photoID]], "right-clicking another item must atomically select it without publishing an empty selection")
         let photoActions = photoMenu.items.filter { !$0.isSeparatorItem }
         expect(!photoActions[0].isEnabled && photoActions.dropFirst().allSatisfy(\.isEnabled), "a standalone photo must retain Finder, Photos, album and deletion actions while downloading")
         menuModel.isProcessingDownloads = true
-        let composingMenu = rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
+        let composingMenu = try await rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
         expect(composingMenu.items.first { $0.title.contains("访达") }!.isEnabled, "Finder must remain available during composition")
         expect(!composingMenu.items.first { $0.title.contains("导入“照片”") }!.isEnabled, "conflicting media import must remain guarded during composition")
         menuModel.isProcessingDownloads = false
@@ -467,10 +471,10 @@ import Foundation
         pairMenuScroll.layoutSubtreeIfNeeded()
         pairMenuCoordinator.collectionView!.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
-        let pairMenu = rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
+        let pairMenu = try await rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
         expect(pairMenu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled), "queue actions must remain available for settled sources during download")
         menuModel.isProcessingDownloads = true
-        let guardedPairMenu = rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
+        let guardedPairMenu = try await rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
         expect(!guardedPairMenu.items[0].isEnabled, "queue menu composition must follow model eligibility when another composition is running")
         expect(guardedPairMenu.items.first { $0.title.contains("访达") }!.isEnabled, "queue Finder action must remain available during another composition")
         menuModel.isProcessingDownloads = false
