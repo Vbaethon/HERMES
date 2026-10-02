@@ -41,6 +41,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private let collectionView: GridCollectionView
     private let dataSource: NSCollectionViewDiffableDataSource<String, String>
     private var items: [ThumbnailGridItem] = []
+    private var requestedItems: [ThumbnailGridItem] = []
+    private var requestedIDs = Set<String>()
     private var itemByID: [String: ThumbnailGridItem] = [:]
     private var selectedIDs: Set<String> = []
     private var isApplyingSelection = false
@@ -48,6 +50,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private var makeContextMenu: (() -> NSMenu?)?
 
     var nsCollectionView: NSCollectionView { collectionView }
+    var hasPresentedItems: Bool { !items.isEmpty }
+    var onPresentationChange: (() -> Void)?
 
     init(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset) {
         let collectionView = GridCollectionView()
@@ -61,6 +65,13 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                 return item
             }
             thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion, unavailableMessage: gridItem.unavailableMessage)
+            thumbnailItem.onCompositionPresentationEnded = { [weak grid = (collectionView as? GridCollectionView)?.gridController] in
+                // Reuse can happen inside a snapshot application; refresh on the next turn.
+                Task { @MainActor [weak grid] in
+                    guard let grid else { return }
+                    grid.updateItems(grid.requestedItems)
+                }
+            }
             thumbnailItem.setSelectedAppearance(
                 (collectionView as? GridCollectionView)?.gridController?.selectedIDs.contains(itemID) == true
             )
@@ -72,34 +83,54 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         ThumbnailCollectionStyle.prepare(collectionView, sectionInset: sectionInset)
     }
 
-    func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true) {
-        guard newItems != items else { return }
-        let previousItems = itemByID
-        let previousIDs = dataSource.snapshot().itemIdentifiers
-        itemByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
-        items = newItems
+    func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true, defersCompletionRemoval: Bool = true) {
+        requestedItems = newItems
+        requestedIDs = Set(newItems.map(\.id))
+        var presentedItems = newItems
+        if defersCompletionRemoval {
+            // Keep visible completed rows through their minimum playback and dissolve,
+            // including rows removed from the queue or the "not composed" filter.
+            for (index, old) in items.enumerated() where !requestedIDs.contains(old.id) {
+                guard let path = dataSource.indexPath(for: old.id),
+                      let cell = collectionView.item(at: path) as? ThumbnailCollectionItem,
+                      cell.isPresentingComposition else { continue }
+                let completed = ThumbnailGridItem(id: old.id, url: old.url, status: .finished,
+                    mediaKind: old.mediaKind, contentVersion: old.contentVersion, unavailableMessage: old.unavailableMessage)
+                presentedItems.insert(completed, at: min(index, presentedItems.count))
+            }
+        }
+        guard presentedItems != items else { return }
+        let previousIDs = items.map(\.id)
+        itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
+        items = presentedItems
 
-        // Reconfigure retained visible items without asking Diffable to reuse
-        // them. configure() preserves pixels for status-only changes and still
-        // invalidates a thumbnail when its file revision actually changes.
-        for visibleItem in collectionView.visibleItems() {
-            guard let indexPath = collectionView.indexPath(for: visibleItem),
-                  let id = dataSource.itemIdentifier(for: indexPath),
-                  let updated = itemByID[id], previousItems[id] != updated,
-                  let thumbnail = visibleItem as? ThumbnailCollectionItem else { continue }
-            thumbnail.configure(with: updated.url, status: updated.status, mediaKind: updated.mediaKind,
-                contentVersion: updated.contentVersion, unavailableMessage: updated.unavailableMessage)
+        // reloadItems discards the bitmap and interrupts the mesh, then starts a
+        // second thumbnail fade-in. Reconfigure the existing cell for status updates.
+        updateVisibleItems()
+        guard previousIDs != presentedItems.map(\.id) else {
+            applySelection(selectedIDs)
+            return
         }
 
-        let newIDs = newItems.map(\.id)
-        if previousIDs != newIDs {
-            var snapshot = NSDiffableDataSourceSnapshot<String, String>()
-            snapshot.appendSections([Section.main])
-            snapshot.appendItems(newIDs, toSection: Section.main)
-            let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
+        snapshot.appendSections([Section.main])
+        snapshot.appendItems(presentedItems.map(\.id), toSection: Section.main)
+
+        let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
+            self?.updateVisibleItems()
         }
         applySelection(selectedIDs)
+        onPresentationChange?()
+    }
+
+    private func updateVisibleItems() {
+        for case let cell as ThumbnailCollectionItem in collectionView.visibleItems() {
+            guard let path = collectionView.indexPath(for: cell),
+                  let id = dataSource.itemIdentifier(for: path), let item = itemByID[id] else { continue }
+            cell.configure(with: item.url, status: item.status, mediaKind: item.mediaKind,
+                           contentVersion: item.contentVersion, unavailableMessage: item.unavailableMessage)
+        }
     }
 
     func updateSectionInset(_ inset: NSEdgeInsets) {
@@ -120,7 +151,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func applySelection(_ ids: Set<String>) {
-        selectedIDs = ids.intersection(itemByID.keys)
+        selectedIDs = ids.intersection(requestedIDs)
         let indexPaths = Set(selectedIDs.compactMap { dataSource.indexPath(for: $0) })
         guard collectionView.selectionIndexPaths != indexPaths else {
             updateVisibleSelectionAppearance()
@@ -154,7 +185,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private func syncSelectionFromCollectionView() {
         guard !isApplyingSelection else { return }
         let ids = Set(collectionView.selectionIndexPaths.compactMap { indexPath in
-            dataSource.itemIdentifier(for: indexPath).flatMap { itemByID[$0] == nil ? nil : $0 }
+            dataSource.itemIdentifier(for: indexPath).flatMap { requestedIDs.contains($0) ? $0 : nil }
         })
         selectedIDs = ids
         onSelectionChange?(ids)
@@ -165,7 +196,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         let point = collectionView.convert(event.locationInWindow, from: nil)
         guard let clickedIndexPath = collectionView.indexPathForItem(at: point),
               let clickedID = dataSource.itemIdentifier(for: clickedIndexPath),
-              itemByID[clickedID] != nil else {
+              requestedIDs.contains(clickedID) else {
             return nil
         }
 

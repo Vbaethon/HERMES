@@ -47,6 +47,7 @@
 		111111111111111111111142 /* DewuPlaybackLogVideoExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */; };
 		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
 		111111111111111111111147 /* SubprocessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111146 /* SubprocessRunner.swift */; };
+		111111111111111111111151 /* ThumbnailCompositionEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111150 /* ThumbnailCompositionEffect.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -116,6 +117,7 @@
 		111111111111111111111051 /* DewuPlaybackLogVideoExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuPlaybackLogVideoExtractor.swift; sourceTree = "<group>"; };
 		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
 		111111111111111111111146 /* SubprocessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/SubprocessRunner.swift; sourceTree = "<group>"; };
+		111111111111111111111150 /* ThumbnailCompositionEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailCompositionEffect.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -165,6 +167,7 @@
 				11111111111111111111104F /* Views/Other/NativePanelPresenter.swift */,
 				111111111111111111111036 /* Views/Other/PageControllers.swift */,
 				11111111111111111111104E /* Views/Other/SystemWindowBackgroundController.swift */,
+				111111111111111111111150 /* ThumbnailCompositionEffect.swift */,
 				111111111111111111111037 /* Views/Thumbnail/ThumbnailItemViews.swift */,
 				111111111111111111111038 /* Views/Thumbnail/ThumbnailService.swift */,
 				11111111111111111111104D /* Views/Thumbnail/SystemThumbnailProvider.swift */,
@@ -367,6 +370,7 @@
 				111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */,
 				111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */,
 				11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */,
+				111111111111111111111151 /* ThumbnailCompositionEffect.swift in Sources */,
 				111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */,
 				111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */,
 				11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */,
@@ -534,7 +538,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 628;
+				CURRENT_PROJECT_VERSION = 637;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -546,7 +550,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 1.9.17;
+				MARKETING_VERSION = 1.9.26;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -568,7 +572,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 628;
+				CURRENT_PROJECT_VERSION = 637;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -580,7 +584,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 1.9.17;
+				MARKETING_VERSION = 1.9.26;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

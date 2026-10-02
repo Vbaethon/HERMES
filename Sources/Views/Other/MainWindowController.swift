@@ -14,7 +14,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let toolbarController: NativeWindowToolbarController
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
-    private var terminationProgressSheet: NSPanel?
+    private var terminationProgressAlert: NSAlert?
     var requestTermination: () -> Void = { NSApp.terminate(nil) }
 
     init(model: ImporterModel = ImporterModel()) {
@@ -121,36 +121,47 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    static func makeTerminationProgressAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "正在结束任务…"
+        alert.informativeText = "任务结束后将自动退出。"
+        let progress = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 240, height: 0))
+        progress.style = .bar
+        progress.controlSize = .regular
+        progress.isIndeterminate = true
+        progress.sizeToFit()
+        alert.accessoryView = progress
+        // An alert without explicit buttons creates an actionable OK button.
+        // Keep AppKit's response-button layout while cleanup owns completion.
+        let exitButton = alert.addButton(withTitle: "退出")
+        exitButton.isEnabled = false
+        exitButton.keyEquivalent = ""
+        return alert
+    }
+
     func showTerminationProgress() {
-        guard terminationProgressSheet == nil, let window else { return }
-        let spinner = NSProgressIndicator()
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isIndeterminate = true
-        spinner.startAnimation(nil)
-        let label = NSTextField(labelWithString: "正在结束任务…")
-        let content = NSStackView(views: [spinner, label])
-        content.orientation = .horizontal
-        content.alignment = .centerY
-        content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 88),
-                            styleMask: [.titled], backing: .buffered, defer: false)
-        panel.title = "HERMES"
-        panel.isReleasedWhenClosed = false
-        panel.contentView = content
-        terminationProgressSheet = panel
-        presentAfterDismissingCurrentSheet { [weak self] in
-            guard self?.terminationProgressSheet === panel else { return }
-            window.beginSheet(panel)
+        guard terminationProgressAlert == nil, let window else { return }
+        let alert = Self.makeTerminationProgressAlert()
+        terminationProgressAlert = alert
+        presentAfterDismissingCurrentSheet { [weak self, alert] in
+            guard self?.terminationProgressAlert === alert else { return }
+            (alert.accessoryView as? NSProgressIndicator)?.startAnimation(nil)
+            alert.beginSheetModal(for: window) { [weak self, weak alert] _ in
+                guard let self, let alert, self.terminationProgressAlert === alert else { return }
+                (alert.accessoryView as? NSProgressIndicator)?.stopAnimation(nil)
+                self.terminationProgressAlert = nil
+            }
         }
     }
 
     func hideTerminationProgress() {
-        guard let panel = terminationProgressSheet else { return }
-        terminationProgressSheet = nil
-        if panel.sheetParent != nil { panel.sheetParent?.endSheet(panel) }
-        panel.orderOut(nil)
+        guard let alert = terminationProgressAlert else { return }
+        terminationProgressAlert = nil
+        (alert.accessoryView as? NSProgressIndicator)?.stopAnimation(nil)
+        let sheet = alert.window
+        sheet.sheetParent?.endSheet(sheet)
+        sheet.orderOut(nil)
     }
 
     private func presentAfterDismissingCurrentSheet(_ presentation: @escaping @MainActor @Sendable () -> Void) {

@@ -296,14 +296,14 @@ private final class FinderSidebarCellView: NSTableCellView {
     }
 
     private var currentSelectionState = false
+    private var currentSymbolName = ""
+    private var currentSymbolDescription = ""
 
     func configure(title: String, symbolName: String, count: Int?, isSelected: Bool, rowSizeStyle: NSTableView.RowSizeStyle) {
         currentSelectionState = isSelected
+        currentSymbolName = symbolName
+        currentSymbolDescription = title
         self.rowSizeStyle = rowSizeStyle
-        let symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
-        symbolImage?.isTemplate = true
-        symbolView.image = symbolImage
-        symbolView.contentTintColor = .controlAccentColor
         titleField.stringValue = title
         applySourceListMetrics(isSelected: isSelected)
 
@@ -362,6 +362,10 @@ private final class FinderSidebarCellView: NSTableCellView {
         default:
             dimension = 20
         }
+        let symbolImage = NSImage(systemSymbolName: currentSymbolName, accessibilityDescription: currentSymbolDescription)
+        symbolImage?.isTemplate = true
+        symbolView.image = symbolImage
+        symbolView.contentTintColor = .controlAccentColor
         symbolView.symbolConfiguration = NSImage.SymbolConfiguration(
             pointSize: dimension,
             weight: .regular,
@@ -370,4 +374,5 @@ private final class FinderSidebarCellView: NSTableCellView {
         symbolWidthConstraint?.constant = dimension
         symbolHeightConstraint?.constant = dimension
     }
+
 }

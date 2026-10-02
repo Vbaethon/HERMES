@@ -33,9 +33,10 @@ enum DownloadCollectionView {
         bottomContentInset: CGFloat
     ) {
         coordinator.gridController?.updateSectionInset(downloadSectionInset(bottomContentInset: bottomContentInset))
+        let filterChanged = coordinator.filter != filter
         coordinator.filter = filter
         coordinator.model = model
-        coordinator.applyItems(items)
+        coordinator.applyItems(items, defersCompletionRemoval: !filterChanged)
         coordinator.applySelection()
     }
 
@@ -63,9 +64,9 @@ enum DownloadCollectionView {
             }
         }
 
-        func applyItems(_ newItems: [DownloadGridItem], animatingDifferences: Bool = true) {
+        func applyItems(_ newItems: [DownloadGridItem], animatingDifferences: Bool = true, defersCompletionRemoval: Bool = true) {
             items = newItems
-            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences)
+            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences, defersCompletionRemoval: defersCompletionRemoval)
         }
 
         func applySelection() {

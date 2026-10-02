@@ -208,8 +208,8 @@ final class QueuePageController: NSViewController, ThumbnailPageController {
             pair.0.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
-        scrollView?.isHidden = model.pairs.isEmpty
-        emptyView.isHidden = !model.pairs.isEmpty
+        coordinator?.gridController?.onPresentationChange = { [weak self] in self?.updateCollectionVisibility() }
+        updateCollectionVisibility()
 
         model.$pairs
             .receive(on: RunLoop.main)
@@ -222,14 +222,7 @@ final class QueuePageController: NSViewController, ThumbnailPageController {
     }
 
     func reload() {
-        if model.pairs.isEmpty {
-            scrollView?.isHidden = true
-            emptyView.isHidden = false
-            emptyView.message = model.statusText
-            return
-        }
-        emptyView.isHidden = true
-        scrollView?.isHidden = false
+        emptyView.message = model.statusText
         guard let scrollView, let coordinator else { return }
         PairCollectionView.update(
             scrollView: scrollView,
@@ -237,6 +230,13 @@ final class QueuePageController: NSViewController, ThumbnailPageController {
             items: model.pairs,
             model: model
         )
+        updateCollectionVisibility()
+    }
+
+    private func updateCollectionVisibility() {
+        let hasItems = coordinator?.gridController?.hasPresentedItems == true
+        scrollView?.isHidden = !hasItems
+        emptyView.isHidden = hasItems
     }
 }
 

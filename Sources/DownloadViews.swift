@@ -1193,8 +1193,8 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         ])
         progressStack.update(with: model.downloadProgressItems, animated: false)
 
-        scrollView?.isHidden = model.visibleDownloadItems.isEmpty
-        emptyView.isHidden = !model.visibleDownloadItems.isEmpty
+        coordinator?.gridController?.onPresentationChange = { [weak self] in self?.updateCollectionVisibility() }
+        updateCollectionVisibility()
 
         model.$visibleDownloadItemsCache
             .receive(on: RunLoop.main)
@@ -1254,22 +1254,22 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
             for: rawLineCount
         )
 
-        if model.visibleDownloadItems.isEmpty {
-            scrollView?.isHidden = true
-            emptyView.isHidden = false
-        } else {
-            emptyView.isHidden = true
-            scrollView?.isHidden = false
-            guard let scrollView, let coordinator else { return }
-            DownloadCollectionView.update(
-                scrollView: scrollView,
-                coordinator: coordinator,
-                items: model.visibleDownloadItems,
-                filter: model.downloadFilter,
-                model: model,
-                bottomContentInset: bottomInset
-            )
-        }
+        guard let scrollView, let coordinator else { return }
+        DownloadCollectionView.update(
+            scrollView: scrollView,
+            coordinator: coordinator,
+            items: model.visibleDownloadItems,
+            filter: model.downloadFilter,
+            model: model,
+            bottomContentInset: bottomInset
+        )
+        updateCollectionVisibility()
+    }
+
+    private func updateCollectionVisibility() {
+        let hasItems = coordinator?.gridController?.hasPresentedItems == true
+        scrollView?.isHidden = !hasItems
+        emptyView.isHidden = hasItems
     }
 
     private func reloadProgress() {

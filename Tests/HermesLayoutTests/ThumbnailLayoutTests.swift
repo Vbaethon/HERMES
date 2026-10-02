@@ -4,6 +4,50 @@ import XCTest
 
 @MainActor
 final class ThumbnailLayoutTests: XCTestCase {
+    func testStatusUpdatesKeepTheVisibleCellAndLoadedImage() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let url = URL(fileURLWithPath: "/tmp/hermes-status-fixture.png")
+        func entry(_ status: PairItem.Status) -> ThumbnailGridItem {
+            ThumbnailGridItem(id: "same", url: url, status: status, mediaKind: .livePhoto, contentVersion: 1)
+        }
+        grid.updateItems([entry(.waiting)], animatingDifferences: false)
+        scroll.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        let cell = try XCTUnwrap(grid.nsCollectionView.item(at: IndexPath(item: 0, section: 0)) as? ThumbnailCollectionItem)
+        let image = try XCTUnwrap(cell.imageView?.image)
+        grid.updateItems([entry(.running)])
+        try await Task.sleep(for: .milliseconds(150))
+        let runningCell = grid.nsCollectionView.item(at: IndexPath(item: 0, section: 0)) as? ThumbnailCollectionItem
+        XCTAssertTrue(runningCell === cell, "Changing status must not recreate the collection cell")
+        XCTAssertTrue(runningCell?.imageView?.image === image, "Changing status must not clear/reload the thumbnail")
+        grid.updateItems([entry(.finished)])
+        try await Task.sleep(for: .milliseconds(150))
+        let finishedCell = grid.nsCollectionView.item(at: IndexPath(item: 0, section: 0)) as? ThumbnailCollectionItem
+        XCTAssertTrue(finishedCell === cell, "Completion must update the existing cell in place")
+        XCTAssertTrue(finishedCell?.imageView?.image === image, "Completion must preserve the original bitmap")
+        let completedView = try XCTUnwrap(finishedCell?.view as? ThumbnailItemView)
+        XCTAssertTrue(completedView.compositionEffect.isRunning)
+        // Queue/filter removal must not bypass the minimum playback period.
+        grid.updateItems([])
+        XCTAssertTrue(grid.hasPresentedItems)
+        XCTAssertTrue(grid.nsCollectionView.item(at: IndexPath(item: 0, section: 0)) === cell)
+        for _ in 0..<400 where grid.hasPresentedItems { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(grid.hasPresentedItems)
+
+        grid.updateItems([entry(.running)], animatingDifferences: false)
+        try await Task.sleep(for: .milliseconds(200))
+        // A user-requested filter switch is immediate, not a delayed completion.
+        grid.updateItems([], animatingDifferences: false, defersCompletionRemoval: false)
+        XCTAssertFalse(grid.hasPresentedItems)
+    }
+
     func testGridWrapsAndTracksViewportAfterDownloadAndResize() async throws {
         _ = NSApplication.shared
         let grid = ThumbnailGridController()

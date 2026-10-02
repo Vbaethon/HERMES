@@ -11,6 +11,11 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var unavailableMessage: String?
     private var previewMessage: String?
     private var thumbnailView: ThumbnailItemView? { view as? ThumbnailItemView }
+    var isPresentingComposition: Bool { thumbnailView?.compositionEffect.isPresenting == true }
+    var onCompositionPresentationEnded: (() -> Void)? {
+        get { thumbnailView?.compositionEffect.onPresentationEnded }
+        set { thumbnailView?.compositionEffect.onPresentationEnded = newValue }
+    }
 
     deinit {
         thumbnailTask?.cancel()
@@ -32,6 +37,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.addSubview(imageView)
         rootView.imageView = imageView
         self.imageView = imageView
+
+        rootView.addSubview(rootView.compositionEffect)
 
         let ringView = ThumbnailStateRingView(frame: .zero)
         ringView.isHidden = true
@@ -88,6 +95,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         previewMessage = nil
         view.setAccessibilityLabel(nil)
         view.setAccessibilityValue(nil)
+        thumbnailView?.compositionEffect.reset()
         thumbnailView?.failureLabel?.isHidden = true
         thumbnailView?.placeholderLabel?.isHidden = true
         imageView?.image = nil
@@ -132,6 +140,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailDurationCache.cache.removeObject(forKey: url.standardizedFileURL as NSURL)
         thumbnailStatus = status
         self.mediaKind = mediaKind
+        thumbnailView?.compositionEffect.reset()
         imageView?.alphaValue = 0
         imageView?.image = nil
         thumbnailView?.updateImageFrame(for: nil)
@@ -241,9 +250,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         let availability = unavailableMessage ?? previewMessage
         view.setAccessibilityValue(([status, availability, isSelected ? "已选择" : "未选择"].compactMap { $0 }).joined(separator: "，"))
         view.toolTip = representedURL.map { availability == nil ? $0.lastPathComponent : "\(availability!)\n\($0.path)" }
-        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .running ? "正在合成…" : (thumbnailStatus == .failed ? "合成失败" : availability ?? "")
+        thumbnailView?.compositionEffect.update(image: imageView?.image, running: thumbnailStatus == .running)
+        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .failed ? "合成失败" : availability ?? ""
         thumbnailView?.failureLabel?.textColor = .labelColor
-        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && thumbnailStatus != .running && availability == nil
+        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && availability == nil
         thumbnailView?.needsLayout = true
         if isSelected {
             thumbnailView?.setRingState(.selected)
@@ -356,6 +366,7 @@ final class ThumbnailBadgeLabel: NSTextField {
 }
 
 final class ThumbnailItemView: NSView {
+    let compositionEffect = ThumbnailCompositionEffect(frame: .zero)
     weak var imageView: NSImageView?
     weak var badgeLabel: NSTextField?
     weak var failureLabel: NSTextField?
@@ -380,6 +391,7 @@ final class ThumbnailItemView: NSView {
         guard let image, image.size.width > 0, image.size.height > 0 else {
             interactiveFrame = .zero
             imageView.frame = .zero
+            compositionEffect.frame = .zero
             ringView?.frame = .zero
             updateBadgeFrames()
             return
@@ -392,6 +404,7 @@ final class ThumbnailItemView: NSView {
         let frame = NSRect(origin: origin, size: size)
         interactiveFrame = frame
         imageView.frame = frame
+        compositionEffect.frame = frame
         updateRingFrame()
         updateBadgeFrames()
     }

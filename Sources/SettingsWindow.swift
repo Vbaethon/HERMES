@@ -1,32 +1,56 @@
 import AppKit
-import Combine
+import SwiftUI
+
+private final class SettingsWindow: NSWindow {
+    override func toggleToolbarShown(_ sender: Any?) {}
+    override func miniaturize(_ sender: Any?) {}
+    override func performMiniaturize(_ sender: Any?) {}
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(toggleToolbarShown(_:)) || item.action == #selector(performMiniaturize(_:)) {
+            return false
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleToolbarShown(_:)) || menuItem.action == #selector(performMiniaturize(_:)) {
+            return false
+        }
+        return super.validateMenuItem(menuItem)
+    }
+}
 
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
-    init(model: ImporterModel) {
-        let controller = SettingsViewController(model: model)
-        let window = NSWindow(contentViewController: controller)
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.title = "合成与导入"
-        window.toolbarStyle = .unified
-        window.setContentSize(NSSize(width: 780, height: 480))
-        window.contentMinSize = NSSize(width: 680, height: 360)
+    init(model: ImporterModel, defaults: UserDefaults = .standard) {
+        let controller = SettingsViewController(model: model, defaults: defaults)
+        let window = SettingsWindow(contentViewController: controller)
+        window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
+        window.title = "设置"
+        window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
+        window.toolbarStyle = .unifiedCompact
+        window.tabbingMode = .disallowed
+        window.showsToolbarButton = false
         window.isReleasedWhenClosed = false
         window.autorecalculatesKeyViewLoop = true
         super.init(window: window)
         let toolbar = NSToolbar(identifier: "HermesSettingsToolbar")
         toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
+        toolbar.allowsDisplayModeCustomization = false
         window.toolbar = toolbar
-        controller.splitView.setPosition(220, ofDividerAt: 0)
+        window.setContentSize(SettingsViewController.contentSize)
+        controller.splitView.setPosition(SettingsViewController.sidebarWidth, ofDividerAt: 0)
+        window.center()
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace]
+        [.sidebarTrackingSeparator, .flexibleSpace]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [.flexibleSpace]
+        [.sidebarTrackingSeparator, .flexibleSpace]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
@@ -41,25 +65,35 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
 }
 
 final class SettingsViewController: NSSplitViewController {
-    private enum Category: Int, CaseIterable, SidebarDestination {
+    static let selectedPanePreferenceKey = "SettingsSelectedPane.v1"
+    static let contentSize = NSSize(width: 760, height: 460)
+    static let sidebarWidth: CGFloat = 220
+
+    enum Pane: String, CaseIterable, SidebarDestination {
         case synthesis, completed
+
         var title: String { self == .synthesis ? "合成与导入" : "已完成" }
-        var symbolName: String { self == .synthesis ? "photo.badge.plus" : "checkmark.circle" }
+        var symbolName: String {
+            self == .synthesis ? AppSymbol.composeLivePhoto.normal : AppSymbol.completed.normal
+        }
     }
 
     private let model: ImporterModel
-    private lazy var sidebar = NativeSidebarController<Category>(
-        sections: Category.allCases, selection: .synthesis, count: { _ in nil }, accessibilityLabel: "设置分类",
-        onSelect: { [weak self] category in self?.showCategory(category) }
+    private let defaults: UserDefaults
+    private(set) var selectedPane: Pane
+    private lazy var sidebar = NativeSidebarController<Pane>(
+        sections: Pane.allCases,
+        selection: selectedPane,
+        count: { _ in nil },
+        accessibilityLabel: "设置分类",
+        onSelect: { [weak self] pane in self?.selectPane(pane) }
     )
-    private let importToPhotos = NSSwitch()
-    private let addToAlbum = NSSwitch()
-    private let completedAddToAlbum = NSSwitch()
-    private var panes: [Category: NSView] = [:]
-    private var cancellables = Set<AnyCancellable>()
+    private lazy var detail = NSHostingController(rootView: SettingsPaneView(model: model, pane: selectedPane))
 
-    init(model: ImporterModel) {
+    init(model: ImporterModel, defaults: UserDefaults) {
         self.model = model
+        self.defaults = defaults
+        selectedPane = defaults.string(forKey: Self.selectedPanePreferenceKey).flatMap(Pane.init(rawValue:)) ?? .synthesis
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -70,143 +104,67 @@ final class SettingsViewController: NSSplitViewController {
         super.viewDidLoad()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        // Reuse the main window's source list, including system row-size
+        // preferences and AppKit's automatic scroll-view titlebar insets.
+        let navigation = sidebar.makeSplitViewItem()
+        navigation.minimumThickness = Self.sidebarWidth
+        navigation.maximumThickness = Self.sidebarWidth
+        navigation.canCollapse = false
+        navigation.canCollapseFromWindowResize = false
+        addSplitViewItem(navigation)
 
-        let sidebarItem = sidebar.makeSplitViewItem()
-        sidebarItem.minimumThickness = 190
-        sidebarItem.maximumThickness = 280
-        sidebarItem.preferredThicknessFraction = 0.28
-        sidebarItem.canCollapseFromWindowResize = false
-        addSplitViewItem(sidebarItem)
-
-        let detail = NSViewController()
-        detail.view = NSView()
-        let detailItem = NSSplitViewItem(viewController: detail)
-        detailItem.minimumThickness = 460
-        detailItem.automaticallyAdjustsSafeAreaInsets = true
-        addSplitViewItem(detailItem)
-        for category in Category.allCases {
-            let pane = makePane(category)
-            pane.translatesAutoresizingMaskIntoConstraints = false
-            detail.view.addSubview(pane)
-            NSLayoutConstraint.activate([
-                pane.topAnchor.constraint(equalTo: detail.view.safeAreaLayoutGuide.topAnchor, constant: 28),
-                pane.leadingAnchor.constraint(equalTo: detail.view.safeAreaLayoutGuide.leadingAnchor, constant: 28),
-                pane.trailingAnchor.constraint(equalTo: detail.view.safeAreaLayoutGuide.trailingAnchor, constant: -28),
-                pane.bottomAnchor.constraint(lessThanOrEqualTo: detail.view.safeAreaLayoutGuide.bottomAnchor, constant: -20)
-            ])
-            panes[category] = pane
-        }
-        showCategory(.synthesis)
-        reloadFromModel()
-        model.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.reloadFromModel() }
-            .store(in: &cancellables)
+        // AppKit owns the fixed window frame, title and toolbar. The hosting
+        // controller contributes only the system-rendered grouped settings form.
+        detail.sceneBridgingOptions = []
+        detail.sizingOptions = []
+        let content = NSSplitViewItem(viewController: detail)
+        content.automaticallyAdjustsSafeAreaInsets = true
+        addSplitViewItem(content)
     }
 
-    private func showCategory(_ category: Category) {
-        sidebar.update(sections: Category.allCases, selection: category, count: { _ in nil })
-        panes.forEach { $0.value.isHidden = $0.key != category }
-        view.window?.title = category.title
+    func selectPane(_ pane: Pane) {
+        guard pane != selectedPane else { return }
+        selectedPane = pane
+        defaults.set(pane.rawValue, forKey: Self.selectedPanePreferenceKey)
+        sidebar.update(sections: Pane.allCases, selection: pane, count: { _ in nil })
+        detail.rootView = SettingsPaneView(model: model, pane: pane)
+        view.window?.recalculateKeyViewLoop()
     }
+}
 
-    private func makePane(_ category: Category) -> NSView {
-        let rows: [[NSView]]
-        switch category {
-        case .synthesis:
-            rows = [
-                makeRow("合成后自动导入“照片”", help: "将合成的 Live Photo 添加到“照片”图库。", control: importToPhotos, identifier: "settings.importToPhotos"),
-                makeRow("加入 HERMES 相簿", help: "自动导入时，同时添加到 HERMES 相簿。", control: addToAlbum, identifier: "settings.addToAlbum")
-            ]
-        case .completed:
-            rows = [makeRow("加入 HERMES 相簿", help: "从“已完成”导入时，同时添加到 HERMES 相簿。", control: completedAddToAlbum, identifier: "settings.completedAddToAlbum")]
-        }
-        var gridRows: [[NSView]] = []
-        for (index, row) in rows.enumerated() {
-            if index > 0 {
-                let separator = NSBox()
-                separator.boxType = .separator
-                separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
-                gridRows.append([separator, NSGridCell.emptyContentView])
+private struct SettingsPaneView: View {
+    @ObservedObject var model: ImporterModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let pane: SettingsViewController.Pane
+
+    var body: some View {
+        Form {
+            Section(pane.title) {
+                switch pane {
+                case .synthesis:
+                    Toggle(isOn: $model.importToPhotos) {
+                        Label("合成后自动导入“照片”", systemImage: AppSymbol.importToPhotos.normal)
+                    }
+                    .help("将合成的 Live Photo 添加到“照片”图库。")
+                    .accessibilityIdentifier("settings.importToPhotos")
+                    if model.importToPhotos {
+                        Toggle(isOn: $model.addToAlbum) {
+                            Label("同时加入 HERMES 相簿", systemImage: AppSymbol.addToAlbum.normal)
+                        }
+                        .help("自动导入时，同时添加到 HERMES 相簿。")
+                        .accessibilityIdentifier("settings.addToAlbum")
+                    }
+                case .completed:
+                    Toggle(isOn: $model.completedAddToAlbum) {
+                        Label("导入时加入 HERMES 相簿", systemImage: AppSymbol.addToAlbum.normal)
+                    }
+                    .help("从“已完成”导入时，同时添加到 HERMES 相簿。")
+                    .accessibilityIdentifier("settings.completedAddToAlbum")
+                }
             }
-            gridRows.append(row)
         }
-        let grid = NSGridView(views: gridRows)
-        grid.rowSpacing = 16
-        grid.columnSpacing = 24
-        grid.column(at: 0).xPlacement = .fill
-        grid.column(at: 1).xPlacement = .trailing
-        // Reserve only the switch's intrinsic width. Otherwise NSGridView gives
-        // the control column spare space and wraps the explanation prematurely.
-        grid.column(at: 1).width = rows[0][1].fittingSize.width
-        for row in stride(from: 1, to: gridRows.count, by: 2) {
-            grid.mergeCells(inHorizontalRange: NSRange(location: 0, length: 2), verticalRange: NSRange(location: row, length: 1))
-        }
-        grid.yPlacement = .center
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        // NSBox.primary draws the platform's standard group; no custom fill,
-        // borders, rounded paths, layers or drawing overrides are used.
-        let group = NSBox()
-        group.title = "照片"
-        group.titlePosition = .noTitle
-        group.boxType = .primary
-        let content = group.contentView!
-        content.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            grid.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            grid.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            grid.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)
-        ])
-        let heading = NSTextField(labelWithString: "照片")
-        heading.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        let section = NSStackView(views: [heading, group])
-        section.orientation = .vertical
-        section.alignment = .leading
-        section.spacing = 10
-        group.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
-        return section
-    }
-
-    private func makeRow(_ title: String, help: String, control: NSSwitch, identifier: String) -> [NSView] {
-        let label = NSTextField(wrappingLabelWithString: title)
-        label.font = .systemFont(ofSize: NSFont.systemFontSize)
-        let description = NSTextField(wrappingLabelWithString: help)
-        description.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        description.textColor = .secondaryLabelColor
-        let text = NSStackView(views: [label, description])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 6
-        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        description.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        label.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
-        description.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
-        control.identifier = NSUserInterfaceItemIdentifier(identifier)
-        control.setAccessibilityLabel(title)
-        control.setAccessibilityHelp(help)
-        control.setContentHuggingPriority(.required, for: .horizontal)
-        control.setContentCompressionResistancePriority(.required, for: .horizontal)
-        control.target = self
-        control.action = #selector(toggleChanged(_:))
-        return [text, control]
-    }
-
-    private func reloadFromModel() {
-        importToPhotos.state = model.importToPhotos ? .on : .off
-        addToAlbum.state = model.addToAlbum ? .on : .off
-        addToAlbum.isEnabled = model.importToPhotos
-        completedAddToAlbum.state = model.completedAddToAlbum ? .on : .off
-    }
-
-    @objc private func toggleChanged(_ sender: NSSwitch) {
-        switch sender {
-        case importToPhotos: model.importToPhotos = sender.state == .on
-        case addToAlbum: model.addToAlbum = sender.state == .on
-        case completedAddToAlbum: model.completedAddToAlbum = sender.state == .on
-        default: return
-        }
-        reloadFromModel()
+        .formStyle(.grouped)
+        .toggleStyle(.switch)
+        .animation(reduceMotion ? nil : .default, value: model.importToPhotos)
     }
 }
