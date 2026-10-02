@@ -112,6 +112,8 @@ enum XHSNativeDownloader {
         var imageUserAgent: String?
         var liveUserAgent: String?
         var livePhotoDeclared = false
+        var liveFromAppCache = false
+        // Informational source metadata only; selection and validation use provenance and actual media.
         var liveHasAudio = false
         var audioURLs: Set<URL> = []
     }
@@ -124,7 +126,6 @@ enum XHSNativeDownloader {
         var isLivePhoto = false
         var isImage = false
         var displayOrder: MediaDisplayOrder? = nil
-        var audioURLs: Set<URL> = []
     }
 
     struct DownloadResult: Sendable {
@@ -243,8 +244,8 @@ enum XHSNativeDownloader {
                     "下载 Live Photo 视频: \(liveCount) 个",
                     liveCount > 0 ? "已核验有音轨: \(audioCount)/\(liveCount) 个" : nil,
                     note.usedAppCache ? "已读取本机小红书客户端的同笔记素材记录。" : nil,
-                    liveCount > audioCount ? "提示：\(liveCount - audioCount) 段实况没有音轨。可在本机小红书打开该笔记后重试；原素材也可能无声。" : nil,
-                    missingLiveCount > 0 ? "提示：\(missingLiveCount) 张实况尚未取得动态视频。" : nil,
+                    liveCount > audioCount ? "提示：\(liveCount - audioCount) 段实况文件未检测到音轨。" : nil,
+                    missingLiveCount > 0 ? "提示：\(missingLiveCount) 张实况尚未取得本机客户端动态源，请在小红书中打开该笔记后重试。" : nil,
                     "输出目录: \(outputFolder.path)"
                 ].compactMap { $0 }.joined(separator: "\n"))
             }
@@ -359,7 +360,7 @@ enum XHSNativeDownloader {
         var bestNote = preferredNote(notes)
         let identity = expectedID ?? bestNote?.noteID
         if let identity, XHSAppCache.isNoteID(identity), bestNote?.type != "video" {
-            let roots = XHSAppCache.cacheRoots()
+            var roots = XHSAppCache.cacheRoots()
             func mergeCache() {
                 let cached = XHSAppCache.notes(noteID: identity, roots: roots).compactMap {
                     parseAppNote($0, expectedID: identity, fallbackURL: url)
@@ -367,16 +368,17 @@ enum XHSNativeDownloader {
                 bestNote = preferredNote(notes + cached)
             }
             mergeCache()
-            // Refresh once when exact client originals or Live Photo audio are missing.
+            // Refresh missing exact-ID client originals or motion sources; audio metadata is not a source criterion.
             // A bounded wait leaves the bare original available if the app is absent.
             if shouldRefreshClientCache(for: bestNote) {
                 try Task.checkCancellation()
-                await DownloaderInfra.reportStatus("正在读取客户端原图来源")
+                await DownloaderInfra.reportStatus("正在读取客户端原图与实况来源")
                 try Task.checkCancellation()
-                if !roots.isEmpty, await XHSAppCache.openNote(identity, shareURL: url) {
+                if await XHSAppCache.openNote(identity, shareURL: url) {
                     for _ in 0..<8 {
                         try Task.checkCancellation()
                         try await Task.sleep(for: .seconds(1))
+                        roots = XHSAppCache.cacheRoots()
                         mergeCache()
                         if !shouldRefreshClientCache(for: bestNote) { break }
                     }
@@ -465,7 +467,7 @@ enum XHSNativeDownloader {
                     fileID: JSONValueUtilities.nonEmptyString(item["fileId"]) ?? imageCandidate.token,
                     imageQuality: imageScore(imageCandidate),
                     liveScore: liveCandidate.map(streamScore) ?? 0,
-                    livePhotoDeclared: JSONValueUtilities.boolValue(item["livePhoto"]) || liveCandidate != nil,
+                    livePhotoDeclared: JSONValueUtilities.boolValue(item["livePhoto"]) || !nestedStreamCandidates(in: item).isEmpty,
                     liveHasAudio: hasAudio,
                     audioURLs: hasAudio ? Set(liveURLs) : []
                 ))
@@ -507,6 +509,7 @@ enum XHSNativeDownloader {
         // Only this exact image's original field supplies a client fallback.
         for i in parsed.items.indices {
             parsed.items[i].imageQuality = -1
+            parsed.items[i].liveFromAppCache = parsed.items[i].liveURL != nil
             guard let image = images.first(where: { $0["fileid"] as? String == parsed.items[i].fileID }) else { continue }
             parsed.items[i].appOriginalURLs = appOriginalURL(from: image, fileID: parsed.items[i].fileID).map { [$0] } ?? []
             parsed.items[i].imageURLs = orderedUniqueURLs([parsed.items[i].imageURL]
@@ -519,7 +522,7 @@ enum XHSNativeDownloader {
         guard let note else { return true }
         guard note.type != "video" else { return false }
         return note.items.isEmpty || note.items.contains {
-            $0.appOriginalURLs.isEmpty || (($0.livePhotoDeclared || $0.liveURL != nil) && !$0.liveHasAudio)
+            $0.appOriginalURLs.isEmpty || ($0.livePhotoDeclared && !$0.liveFromAppCache)
         }
     }
 
@@ -586,11 +589,29 @@ enum XHSNativeDownloader {
     }
 
     private static func bestLivePhotoCandidate(from item: [String: Any]) -> StreamCandidate? {
-        let candidates = nestedStreamCandidates(in: item)
-        return candidates.max { lhs, rhs in
-            if streamHasAudio(lhs.item) != streamHasAudio(rhs.item) { return !streamHasAudio(lhs.item) }
-            return streamScore(lhs) < streamScore(rhs)
+        // WEB_LIVEPHOTO_19 is a separately encoded, potentially watermarked rendition.
+        // A watermark query parameter cannot remove a logo already encoded in its frames.
+        let candidates = nestedStreamCandidates(in: item).compactMap { candidate -> StreamCandidate? in
+            let streamType = JSONValueUtilities.intValue(value(in: candidate.item, keys: ["streamType", "stream_type"]))
+            let description = JSONValueUtilities.string(value(in: candidate.item, keys: ["streamDesc", "stream_desc"])) ?? ""
+            guard streamType != 19, !description.uppercased().contains("WEB_LIVEPHOTO") else { return nil }
+            let urls = streamURLs(candidate.item).filter { !isWatermarkedLivePhotoURL($0) }
+            guard let first = urls.first else { return nil }
+            var clean = candidate
+            for key in ["masterUrl", "master_url", "backupUrls", "backup_urls"] { clean.item.removeValue(forKey: key) }
+            clean.item["masterUrl"] = first.absoluteString
+            clean.item["backupUrls"] = urls.dropFirst().map(\.absoluteString)
+            return clean
         }
+        return candidates.max { streamScore($0) < streamScore($1) }
+    }
+
+    private static func isWatermarkedLivePhotoURL(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        return path.contains("/10/19/") || path.contains("/watermark/") || path.contains("/wm/")
+            || URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains {
+                $0.name.lowercased() == "watermark" && $0.value == "1"
+            } == true
     }
 
     private static func streamHasAudio(_ item: [String: Any]) -> Bool {
@@ -621,7 +642,19 @@ enum XHSNativeDownloader {
     static func preferredNote(_ notes: [NoteInfo]) -> NoteInfo? {
         // Do not compare or combine different works returned by inconsistent pages.
         guard let identity = notes.first?.noteID else { return nil }
-        let matching = notes.filter { $0.noteID == identity }
+        let matching = notes.filter { $0.noteID == identity }.map { note in
+            var localOnly = note
+            for i in localOnly.items.indices where !localOnly.items[i].liveFromAppCache {
+                localOnly.items[i].livePhotoDeclared = localOnly.items[i].livePhotoDeclared || localOnly.items[i].liveURL != nil
+                localOnly.items[i].liveURL = nil
+                localOnly.items[i].liveURLs = []
+                localOnly.items[i].liveScore = 0
+                localOnly.items[i].liveUserAgent = nil
+                localOnly.items[i].liveHasAudio = false
+                localOnly.items[i].audioURLs = []
+            }
+            return localOnly
+        }
         // A client response supplements the web image order, even when its codec
         // has a higher score or its image array arrives in a different order.
         let webNotes = matching.filter { !$0.usedAppCache }
@@ -654,13 +687,13 @@ enum XHSNativeDownloader {
                         result.usedAppCache = true
                     }
                     if item.liveURL != nil,
-                       result.items[i].liveURL == nil || (item.liveHasAudio && !result.items[i].liveHasAudio)
-                        || (item.liveHasAudio == result.items[i].liveHasAudio && item.liveScore > result.items[i].liveScore) {
+                       result.items[i].liveURL == nil || item.liveScore > result.items[i].liveScore {
                         let fallbackURLs = result.items[i].liveURLs
                         result.items[i].liveURL = item.liveURL
                         result.items[i].liveURLs = item.liveURLs + fallbackURLs.filter { !item.liveURLs.contains($0) }
                         result.items[i].liveScore = item.liveScore
                         result.items[i].liveUserAgent = item.liveUserAgent ?? note.requestUserAgent
+                        result.items[i].liveFromAppCache = true
                         result.items[i].liveHasAudio = item.liveHasAudio
                         result.items[i].audioURLs.formUnion(item.audioURLs)
                         result.usedAppCache = result.usedAppCache || note.usedAppCache
@@ -1040,12 +1073,12 @@ enum XHSNativeDownloader {
     }
 
     static func livePhotoDownloadTask(_ item: MediaItem, destination: URL, userAgent: String = mobileUserAgent) -> DownloadTask? {
-        guard let liveURL = item.liveURL else { return nil }
+        guard item.liveFromAppCache, let liveURL = item.liveURL else { return nil }
         let urls = item.liveURLs.isEmpty ? [liveURL] : item.liveURLs
-        // Try all advertised audio sources before a silent web fallback.
-        return DownloadTask(urls: urls.filter { item.audioURLs.contains($0) } + urls.filter { !item.audioURLs.contains($0) },
+        // All primary and backup URLs belong to this exact client motion source.
+        return DownloadTask(urls: urls,
                             destination: destination, requestUserAgent: item.liveUserAgent ?? userAgent,
-                            videoHDRHint: nil, isLivePhoto: true, audioURLs: item.audioURLs)
+                            videoHDRHint: nil, isLivePhoto: true)
     }
 
     static func download(
@@ -1141,9 +1174,6 @@ enum XHSNativeDownloader {
                         try await MediaFileUtilities.validateMedia(temporaryURL,
                             expectedSuffix: task.isImage ? "jpg" : task.destination.pathExtension)
                         let hasAudio = task.isLivePhoto ? try await livePhotoHasAudio(at: temporaryURL) : false
-                        if task.audioURLs.contains(sourceURL), !hasAudio {
-                            throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "客户端有声实况源未返回音轨，尝试备用素材。"])
-                        }
                         try Task.checkCancellation()
                         await DownloaderInfra.reportStatus(task.isImage ? "图片校验完成，正在整理文件" : "视频校验完成，正在整理文件")
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)

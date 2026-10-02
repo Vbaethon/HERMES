@@ -78,15 +78,14 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         }
         let desktop = try xhsNote([],mobile:false)
         let mobile = try xhsNote([1,2],mobile:true)
-        precondition(X.preferredNote([desktop,mobile])!.items.filter { $0.liveURL != nil }.count == 2)
+        precondition(X.preferredNote([desktop,mobile])!.items.allSatisfy { $0.liveURL == nil && $0.livePhotoDeclared })
         precondition(!X.noteIsLessComplete(mobile,mobile))
         precondition(!X.noteIsLessComplete(desktop,desktop))
         let sameDesktop = try xhsNote([1,2],mobile:false)
         precondition(X.preferredNote([sameDesktop,mobile])!.requestUserAgent == X.mobileUserAgent)
         precondition(X.preferredNote([mobile,sameDesktop])!.requestUserAgent == X.mobileUserAgent)
         let partial = X.preferredNote([try xhsNote([1],mobile:false),try xhsNote([2],mobile:true)])!
-        precondition(partial.items.allSatisfy { $0.liveURL != nil })
-        precondition(partial.items[0].liveUserAgent == X.desktopUserAgent)
+        precondition(partial.items.allSatisfy { $0.liveURL == nil && $0.livePhotoDeclared })
         let otherNote = try xhsNote([1,2],mobile:true,identity:"other")
         precondition(X.preferredNote([desktop,otherNote])!.items.allSatisfy { $0.liveURL == nil })
         var highQuality = sameDesktop
@@ -94,7 +93,7 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         highQuality.items[0].imageQuality += 1
         highQuality.items[0].imageURL = URL(string:"https://sns-img.xhscdn.com/high-quality")!
         let richer = X.preferredNote([mobile,highQuality])!
-        precondition(richer.items[0].liveScore == highQuality.items[0].liveScore)
+        precondition(richer.items[0].liveURL == nil)
         precondition(richer.items[0].imageURL == highQuality.items[0].imageURL)
         var videoDesktop = X.NoteInfo(noteID:"video",type:"video",videoURL:a,videoScore:100)
         videoDesktop.requestUserAgent = X.desktopUserAgent
@@ -121,7 +120,8 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         precondition(combined.items[1].liveURL!.lastPathComponent == "client-2.mp4")
         precondition(combined.items.allSatisfy { $0.liveHasAudio && $0.audioURLs.count == 2 })
         precondition(combined.items.map(\.imageURL) == web.items.map(\.imageURL))
-        precondition(combined.items[0].liveURLs.contains(web.items[0].liveURL!))
+        precondition(!combined.items[0].liveURLs.contains(web.items[0].liveURL!))
+        precondition(combined.items.allSatisfy { $0.liveFromAppCache })
         precondition(combined.usedAppCache)
         precondition(X.parseAppNote(appNote,expectedID:"ffffffffffffffffffffffff",fallbackURL:fallback) == nil)
         appNote["images_list"] = [appImage(1),appImage(1)]
@@ -129,9 +129,31 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         appNote["images_list"] = [appImage(2)]
         let sparseClient = X.parseAppNote(appNote,expectedID:noteID,fallbackURL:fallback)!
         let sparseCombined = X.preferredNote([web,sparseClient])!
-        precondition(!sparseCombined.items[0].liveHasAudio && sparseCombined.items[1].liveHasAudio)
+        precondition(sparseCombined.items[0].liveURL == nil && sparseCombined.items[1].liveFromAppCache)
         web.items[0].liveScore = Int64.max / 4
         precondition(X.preferredNote([web,client])!.items[0].liveHasAudio)
+        appNote["images_list"] = [appImage(2, audio:false),appImage(1, audio:false)]
+        let silentClient = X.parseAppNote(appNote,expectedID:noteID,fallbackURL:fallback)!
+        let silentCombined = X.preferredNote([web,silentClient])!
+        precondition(silentCombined.items.allSatisfy { $0.liveFromAppCache && !$0.liveHasAudio })
+        precondition(silentCombined.items.map(\.liveURL) == combined.items.map(\.liveURL))
+        precondition(!X.shouldRefreshClientCache(for:silentCombined), "Missing audio metadata must not trigger refresh")
+        precondition(X.shouldRefreshClientCache(for:sparseCombined))
+        precondition(X.livePhotoDownloadTask(web.items[0],destination:URL(fileURLWithPath:"/tmp/web-live.mp4")) == nil)
+        var higherQuality = appImage(1, audio:false)
+        higherQuality["live_photo"] = ["media":["stream":["h265":[[
+            "master_url":"https://sns-video.xhscdn.com/client-hires.mp4","width":1440,"height":2560,"audio_channels":0]]]]]
+        let highQualityClient = X.parseAppNote(["id":noteID,"type":"normal","images_list":[higherQuality]],expectedID:noteID,fallbackURL:fallback)!
+        let qualityPreferred = X.preferredNote([web,client,highQualityClient])!
+        precondition(qualityPreferred.items[0].liveURL == highQualityClient.items[0].liveURL,
+            "Audio metadata must not outrank client stream quality")
+        var misleading = appImage(1)
+        misleading["live_photo"] = ["media":["stream":["h264":[[
+            "master_url":"https://sns-video.xhscdn.com/stream/1/10/19/watermarked.mp4", "stream_type":19,
+            "stream_desc":"WEB_LIVEPHOTO_19", "width":4000,"height":4000,"audio_channels":2]]]]]
+        let watermarked = X.parseAppNote(["id":noteID,"type":"normal","images_list":[misleading]],expectedID:noteID,fallbackURL:fallback)!
+        precondition(watermarked.items[0].liveURL == nil && watermarked.items[0].livePhotoDeclared)
+        print("PASS: exact-ID client Live Photos with or without audio metadata; no web motion fallback or watermarked rendition")
         let signedWebURLs = (1...4).map { number in
             URL(string: "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/notes_pre_post/still-\(number)!web-display")!
         }
@@ -180,7 +202,7 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         precondition(!X.shouldRefreshClientCache(for: videoDesktop), "Video notes must not trigger still-image cache refresh")
         let originalsReady = X.preferredNote([ordinaryWeb, stillClient])!
         precondition(!X.shouldRefreshClientCache(for: originalsReady), "All exact client originals satisfy an ordinary still-image refresh")
-        precondition(X.shouldRefreshClientCache(for: stillCombined), "Having image originals must not bypass the existing Live Photo audio refresh")
+        precondition(X.shouldRefreshClientCache(for: stillCombined), "Having image originals must not bypass the missing client motion refresh")
         let oneOriginal = X.parseAppNote(["id": noteID, "type": "normal", "images_list": [
             ["fileid": "notes_pre_post/still-3", "original": signedClientURLs[2].absoluteString]
         ]], expectedID: noteID, fallbackURL: fallback)!
@@ -573,36 +595,47 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
             if CommandLine.arguments.count > 3 {
                 let silent = base.appendingPathComponent("silent.mp4")
                 let good = base.appendingPathComponent("good.mp4")
-                var audioItem = combined.items[0]
-                audioItem.liveURL = silent
-                audioItem.liveURLs = [silent, good]
-                audioItem.audioURLs = [silent, good]
-                let destination = dir.appendingPathComponent("xhs-audio.mp4")
-                var audioTask = X.livePhotoDownloadTask(audioItem, destination:destination)!
-                audioTask.displayOrder = displayOrder
-                let result = try await X.download(audioTask, retries:0)
-                precondition(result.isLivePhoto && result.hasAudio)
+                var localItem = combined.items[0]
+                // Metadata can claim audio even when the actual client file is silent.
+                localItem.liveURL = silent
+                localItem.liveURLs = [silent, good]
+                let destination = dir.appendingPathComponent("xhs-silent.mp4")
+                var localTask = X.livePhotoDownloadTask(localItem, destination:destination)!
+                localTask.displayOrder = displayOrder
+                let result = try await X.download(localTask, retries:0)
+                precondition(result.isLivePhoto && !result.hasAudio)
                 precondition(MediaDisplayOrder.read(from: destination) == displayOrder)
+                let expectedSilent = try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[3]))
+                let downloadedSilent = try Data(contentsOf:destination)
+                precondition(downloadedSilent == expectedSilent)
+                // Invalid content can fall back only to another exact client source.
+                localItem.liveURL = base.appendingPathComponent("bad.mp4")
+                localItem.liveURLs = [localItem.liveURL!,good]
+                let audioDestination = dir.appendingPathComponent("xhs-audio.mp4")
+                let audioResult = try await X.download(X.livePhotoDownloadTask(localItem,destination:audioDestination)!,retries:0)
+                precondition(audioResult.isLivePhoto && audioResult.hasAudio)
                 let expectedAudio = try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[1]))
-                let downloadedAudio = try Data(contentsOf:destination)
+                let downloadedAudio = try Data(contentsOf:audioDestination)
                 precondition(downloadedAudio == expectedAudio)
-                // A failed client source may fall back, but must report actual silence.
-                audioItem.liveURL = base.appendingPathComponent("bad.mp4")
-                audioItem.liveURLs = [audioItem.liveURL!,silent]
-                audioItem.audioURLs = [audioItem.liveURL!]
-                let fallbackTask = X.livePhotoDownloadTask(audioItem,destination:dir.appendingPathComponent("xhs-silent.mp4"))!
-                let silentResult = try await X.download(fallbackTask,retries:0)
-                precondition(silentResult.isLivePhoto && !silentResult.hasAudio)
-                // An advertised audio source alone must not publish a silent file.
-                audioItem.liveURL = silent; audioItem.liveURLs = [silent]; audioItem.audioURLs = [silent]
+                // A working web video must not rescue a failed client motion source.
+                var availableWeb = web
+                availableWeb.items[0].liveURL = good
+                availableWeb.items[0].liveURLs = [good]
+                var failedClient = client
+                let failedIndex = failedClient.items.firstIndex { $0.fileID == availableWeb.items[0].fileID }!
+                failedClient.items[failedIndex].liveURL = localItem.liveURL
+                failedClient.items[failedIndex].liveURLs = [localItem.liveURL!]
+                let mergedFailure = X.preferredNote([availableWeb,failedClient])!.items[0]
+                precondition(mergedFailure.liveURLs == [localItem.liveURL!])
+                localItem.liveURLs = [localItem.liveURL!]
                 let rejected = dir.appendingPathComponent("xhs-rejected.mp4")
                 do {
-                    _ = try await X.download(X.livePhotoDownloadTask(audioItem,destination:rejected)!,retries:0)
-                    fatalError("advertised audio silently lost")
+                    _ = try await X.download(X.livePhotoDownloadTask(mergedFailure,destination:rejected)!,retries:0)
+                    fatalError("invalid client source must not publish a file")
                 } catch { }
                 precondition(!FileManager.default.fileExists(atPath:rejected.path))
                 precondition(!FileManager.default.fileExists(atPath:rejected.appendingPathExtension("part").path))
-                print("PASS: XHS client audio validation, silent source rejection, audio backup, explicit silent fallback")
+                print("PASS: silent client bytes preserved, actual client audio preserved, client backup recovery and failed-source cleanup")
             }
         }
         let remaining = try FileManager.default.contentsOfDirectory(atPath:dir.path)
