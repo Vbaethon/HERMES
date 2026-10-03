@@ -393,8 +393,9 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
 
         // The client's upload key is a separate source from its playback stream.
         // Keep that key bound to the same note and unique still-image fileid.
+        // Mixed namespaces also exercise reversed arrays, sparse data and revisions.
         let sourceKeys = [
-            "livephoto/1040g398325rhvd944q8g5onncaqnqnmqsnpi001",
+            "livephoto_pre_post/1040g398325rhvd944q8g5onncaqnqnmqsnpi001",
             "livephoto/1040g398325rhvd944q8g5onncaqnqnmqsnpi002"
         ]
         func liveOriginalURLs(_ key: String) -> [URL] {
@@ -434,6 +435,16 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
         precondition(!X.shouldRefreshClientCache(for: keyOnlyClient),
             "An exact upload key is a complete motion source even when stream metadata is absent")
         precondition(X.livePhotoDownloadTask(keyOnly, destination: URL(fileURLWithPath: "/tmp/key-only.mp4")) != nil)
+
+        let voicedPlaybackClient = originalClient([appImage(1, audio: true)])!
+        for snapshots in [[web, voicedPlaybackClient, sourceClient], [web, sourceClient, voicedPlaybackClient]] {
+            let preferredOriginal = X.preferredNote(snapshots)!.items[0]
+            precondition(preferredOriginal.liveURL == liveOriginalURLs(sourceKeys[0])[0]
+                && preferredOriginal.livePhotoFileID == sourceKeys[0],
+                "A voiced playback stream must not displace its exact pre-post cloud original")
+            precondition(preferredOriginal.liveAudioURLs.contains(voicedPlaybackClient.items[0].liveURL!),
+                "The same-image voiced stream remains an audio donor after probing the original")
+        }
 
         let highSilentStream = URL(string: "https://sns-video.xhscdn.com/high-silent.mp4")!
         let lowerAudioStream = URL(string: "https://sns-video.xhscdn.com/lower-audio.mp4")!
@@ -522,14 +533,13 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
         precondition(X.preferredNote([web, differentStillClient])!.items.allSatisfy { $0.liveOriginalURLs.isEmpty },
             "A key for another image must not be borrowed by matching array index")
 
-        let invalidSourceKeys = [
-            "../" + sourceKeys[0], "livephoto/../other", "livephoto/./other",
-            "livephoto/%2e%2e/other", "livephoto/a%2fb", "livephoto/a\\b",
-            "livephoto/", "livephoto/a/b", "livephoto/a?sign=foreign", "livephoto/a#fragment",
-            "/" + sourceKeys[0], "https://sns-video-bd.xhscdn.com/" + sourceKeys[0],
-            "//sns-video-bd.xhscdn.com/" + sourceKeys[0], "stream/1/10/66/foreign.mp4",
-            "notes_pre_post/foreign", "livephoto/with space", "livephoto/\nforeign"
-        ]
+        let invalidSourceKeys = ["livephoto", "livephoto_pre_post"].flatMap { namespace in
+            ["../\(namespace)/foreign", "\(namespace)/../other", "\(namespace)/./other",
+             "\(namespace)/%2e%2e/other", "\(namespace)/a%2fb", "\(namespace)/a\\b",
+             "\(namespace)/", "\(namespace)/a/b", "\(namespace)/a?sign=foreign", "\(namespace)/a#fragment",
+             "/\(namespace)/foreign", "https://sns-video-bd.xhscdn.com/\(namespace)/foreign",
+             "//sns-video-bd.xhscdn.com/\(namespace)/foreign", "\(namespace)/with space", "\(namespace)/\nforeign"]
+        } + ["stream/1/10/66/foreign.mp4", "notes_pre_post/foreign", "livephoto_pre_post_other/foreign"]
         for invalidKey in invalidSourceKeys {
             var image = appImage(1)
             image["live_photo_file_id"] = invalidKey

@@ -599,8 +599,10 @@ enum XHSNativeDownloader {
     }
 
     private static func originalLivePhotoFileID(_ value: Any?) -> String? {
+        // Client details use both namespaces for the exact still's cloud motion.
+        // Keep the object key strict: no arbitrary paths, transforms or signed URLs.
         guard let key = JSONValueUtilities.nonEmptyString(value),
-              key.range(of: #"^livephoto/[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { return nil }
+              key.range(of: #"^livephoto(?:_pre_post)?/[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { return nil }
         return key
     }
 
