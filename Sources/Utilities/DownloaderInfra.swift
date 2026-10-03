@@ -6,19 +6,75 @@ import Foundation
 /// Box types and async helpers shared by all platform downloaders (Dewu, Douyin, XHS).
 enum DownloaderInfra {
     typealias ProgressHandler = @Sendable (Double) async -> Void
-    typealias StatusHandler = @Sendable (String) async -> Void
+
+    enum DownloadStage: CaseIterable, Equatable, Sendable {
+        case readingLink, findingMedia, readingClient, waitingClient
+        case downloadingFile, downloadingImage, downloadingVideo, downloadingLivePhoto
+        case checkingFile, recoveringAudio, savingFile
+        case waitingForResponse, retrying, tryingAlternative, completed, failed
+
+        var text: String {
+            switch self {
+            case .readingLink: "读取链接"
+            case .findingMedia: "查找资源"
+            case .readingClient: "读取客户端"
+            case .waitingClient: "等待客户端"
+            case .downloadingFile: "下载文件"
+            case .downloadingImage: "下载图片"
+            case .downloadingVideo: "下载视频"
+            case .downloadingLivePhoto: "下载实况"
+            case .checkingFile: "检查文件"
+            case .recoveringAudio: "补充声音"
+            case .savingFile: "保存文件"
+            case .waitingForResponse: "等待响应"
+            case .retrying: "重试下载"
+            case .tryingAlternative: "尝试其他地址"
+            case .completed: "下载完成"
+            case .failed: "下载失败"
+            }
+        }
+
+        var priority: Int {
+            switch self {
+            case .waitingForResponse, .waitingClient: 3
+            case .retrying, .tryingAlternative: 2
+            case .checkingFile, .savingFile, .completed, .failed: 0
+            default: 1
+            }
+        }
+
+        var isTransfer: Bool {
+            switch self {
+            case .downloadingFile, .downloadingImage, .downloadingVideo, .downloadingLivePhoto: true
+            default: false
+            }
+        }
+    }
+
+    struct DownloadStatus: Equatable, Sendable {
+        var stage: DownloadStage
+        var item: String? = nil
+
+        var text: String {
+            guard let item else { return stage.text }
+            return "\(item) · \(stage.isTransfer ? "下载中" : stage.text)"
+        }
+
+        func forItem(_ item: String) -> Self { Self(stage: stage, item: item) }
+    }
+
+    typealias StatusHandler = @Sendable (DownloadStatus) async -> Void
 
     @TaskLocal static var statusHandler: StatusHandler?
 
-    static func reportStatus(_ message: String) async {
+    static func reportStatus(_ stage: DownloadStage) async {
         guard !Task.isCancelled, let statusHandler else { return }
-        await statusHandler(message)
+        await statusHandler(DownloadStatus(stage: stage))
     }
 
     actor DownloadProgressAggregator {
         private struct ActiveStatus {
-            let message: String
-            let priority: Int
+            let status: DownloadStatus
             let sequence: Int
         }
         private let totalCount: Int
@@ -28,7 +84,7 @@ enum DownloaderInfra {
         private var statuses: [Int: ActiveStatus] = [:]
         private var completedIndices = Set<Int>()
         private var statusSequence = 0
-        private var lastPublishedStatus: String?
+        private var lastPublishedStatus: DownloadStatus?
         private var hasStatusUpdates = false
 
         init(totalCount: Int, handler: ProgressHandler?) {
@@ -50,24 +106,20 @@ enum DownloaderInfra {
             await publishStatus()
         }
 
-        func updateStatus(index: Int, message: String) async {
+        func updateStatus(index: Int, status: DownloadStatus) async {
             guard !Task.isCancelled, !completedIndices.contains(index) else { return }
             hasStatusUpdates = true
             statusSequence += 1
-            let priority: Int
-            if message.contains("等待") || message.contains("响应较慢") { priority = 3 }
-            else if message.contains("失败") || message.contains("重试") || message.contains("切换") { priority = 2 }
-            else if message.contains("校验") { priority = 0 }
-            else { priority = 1 }
-            statuses[index] = ActiveStatus(message: message, priority: priority, sequence: statusSequence)
+            statuses[index] = ActiveStatus(status: status, sequence: statusSequence)
             await publishStatus()
         }
 
         private func publishStatus() async {
             guard !Task.isCancelled, hasStatusUpdates, let statusHandler else { return }
             let status = statuses.values.max {
-                $0.priority == $1.priority ? $0.sequence < $1.sequence : $0.priority < $1.priority
-            }?.message ?? (completedIndices.count == totalCount ? "媒体下载完成，正在整理结果" : nil)
+                $0.status.stage.priority == $1.status.stage.priority
+                    ? $0.sequence < $1.sequence : $0.status.stage.priority < $1.status.stage.priority
+            }?.status ?? (completedIndices.count == totalCount ? DownloadStatus(stage: .completed) : nil)
             guard let status, status != lastPublishedStatus else { return }
             lastPublishedStatus = status
             await statusHandler(status)
@@ -128,18 +180,20 @@ enum DownloaderInfra {
         shouldUseDirectly: (URLRequest) -> Bool,
         extraHeaders: [String: String] = [:],
         progress: ProgressHandler? = nil,
-        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil,
+        stage: DownloadStage = .downloadingFile
     ) async throws {
         try Task.checkCancellation()
+        await reportStatus(stage)
         let statusMonitor: Task<Void, Never>?
-        if transferPolicy != nil, statusHandler != nil {
-            statusMonitor = Task { await monitorTransferStatus(at: destination) }
+        if statusHandler != nil {
+            statusMonitor = Task { await monitorTransferStatus(at: destination, stage: stage) }
         } else { statusMonitor = nil }
         try await withTaskCancellationHandler {
             do {
                 try await performDownloadOnceAsync(url, to: destination, userAgent: userAgent,
                     session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders,
-                    progress: progress, transferPolicy: transferPolicy)
+                    progress: progress, transferPolicy: transferPolicy, stage: stage)
                 statusMonitor?.cancel()
                 await statusMonitor?.value
             } catch {
@@ -160,7 +214,8 @@ enum DownloaderInfra {
         shouldUseDirectly: (URLRequest) -> Bool,
         extraHeaders: [String: String],
         progress: ProgressHandler?,
-        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy?
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy?,
+        stage: DownloadStage
     ) async throws {
         var req = URLRequest(url: url)
         req.timeoutInterval = transferPolicy.map { TimeInterval($0.idleTimeout) } ?? 30
@@ -170,7 +225,6 @@ enum DownloaderInfra {
             req.setValue(value, forHTTPHeaderField: key)
         }
         if shouldUseDirectly(req) {
-            await reportStatus("正在下载当前来源")
             await progress?(0)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
@@ -196,8 +250,9 @@ enum DownloaderInfra {
         } catch {
             try Task.checkCancellation()
             guard DownloaderHTTPCompatibility.shouldFallback(after: error, for: req) else { throw error }
-            await reportStatus("当前源传输中断，正在重试")
+            await reportStatus(.retrying)
             await progress?(0)
+            await reportStatus(stage)
             try await DownloaderHTTPCompatibility.downloadAsync(req, to: destination, transferPolicy: transferPolicy)
             await progress?(1)
         }
@@ -205,7 +260,7 @@ enum DownloaderInfra {
 
     /// File growth is available for both native streaming and curl. An unchanged
     /// progress callback alone is not evidence that a transfer has stopped.
-    private static func monitorTransferStatus(at destination: URL) async {
+    private static func monitorTransferStatus(at destination: URL, stage: DownloadStage) async {
         var previousSize: UInt64 = 0
         var lastGrowth = ContinuousClock.now
         var isWaiting = false
@@ -215,15 +270,15 @@ enum DownloaderInfra {
             let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.uint64Value ?? 0
             if size > previousSize {
                 lastGrowth = .now
-                if isWaiting { await reportStatus("当前源已继续传输，正在下载") }
+                if isWaiting { await reportStatus(stage) }
                 isWaiting = false
             } else if size < previousSize {
                 // Switching from native to curl replaces the staged file.
                 lastGrowth = .now
                 isWaiting = false
             } else if lastGrowth.duration(to: .now) >= .seconds(4) {
+                if !isWaiting { await reportStatus(.waitingForResponse) }
                 isWaiting = true
-                await reportStatus("当前源响应较慢，仍在等待下载")
             }
             previousSize = size
         }
@@ -301,7 +356,8 @@ enum DownloaderInfra {
         session: URLSession,
         shouldUseDirectly: @escaping (URLRequest) -> Bool,
         extraHeaders: [String: String] = [:],
-        progress: ProgressHandler? = nil
+        progress: ProgressHandler? = nil,
+        stage: DownloadStage = .downloadingFile
     ) async throws {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -313,12 +369,15 @@ enum DownloaderInfra {
         for candidate in [url] + fallbackURLs where seen.insert(candidate.absoluteString).inserted {
             candidates.append(candidate)
         }
-        for candidate in candidates {
-            for _ in 0..<retries {
+        for (sourceIndex, candidate) in candidates.enumerated() {
+            if sourceIndex > 0 { await reportStatus(.tryingAlternative) }
+            for attempt in 0..<retries {
                 do {
-                    try await downloadOnceAsync(candidate, to: temporaryURL, userAgent: userAgent, session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders, progress: progress)
+                    try await downloadOnceAsync(candidate, to: temporaryURL, userAgent: userAgent, session: session, shouldUseDirectly: shouldUseDirectly, extraHeaders: extraHeaders, progress: progress, stage: stage)
+                    if validate != nil { await reportStatus(.checkingFile) }
                     try await validate?(temporaryURL)
                     try Task.checkCancellation()
+                    await reportStatus(.savingFile)
                     if FileManager.default.fileExists(atPath: destination.path) {
                         try FileManager.default.removeItem(at: destination)
                     }
@@ -330,6 +389,8 @@ enum DownloaderInfra {
                     if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                     lastError = error
                     try? FileManager.default.removeItem(at: temporaryURL)
+                    if attempt + 1 < retries { await reportStatus(.retrying) }
+                    else if sourceIndex + 1 < candidates.count { await reportStatus(.tryingAlternative) }
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }

@@ -6,9 +6,18 @@ import Darwin
 enum ToolRunResult: Sendable { case success(String), failure(String) }
 
 private actor DownloadStatusRecorder {
-    private var messages: [String] = []
-    func record(_ message: String) { messages.append(message) }
-    func snapshot() -> [String] { messages }
+    private var statuses: [DownloaderInfra.DownloadStatus] = []
+    func record(_ status: DownloaderInfra.DownloadStatus) { statuses.append(status) }
+    func snapshot() -> [String] { statuses.map(\.text) }
+    func stageSnapshot() -> [DownloaderInfra.DownloadStage] { statuses.map(\.stage) }
+    func statusSnapshot() -> [DownloaderInfra.DownloadStatus] { statuses }
+}
+
+private func containsStagesInOrder(_ stages: [DownloaderInfra.DownloadStage], _ expected: [DownloaderInfra.DownloadStage]) -> Bool {
+    var remaining = expected.makeIterator()
+    var next = remaining.next()
+    for stage in stages where stage == next { next = remaining.next() }
+    return next == nil
 }
 
 private final class FailedNativeTransferProtocol: URLProtocol, @unchecked Sendable {
@@ -842,14 +851,14 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
         }
         let imageRequests = try String(contentsOf: imageFixture.appendingPathComponent("requests.txt"), encoding: .utf8)
         precondition(imageRequests.split(separator: "\n").filter { $0.hasPrefix("/invalid-") }.count == 2, "Failed first image sources must advance to alternatives without redownloading completed stills")
-        let sourceStages = await imageStatuses.snapshot()
-        precondition(sourceStages.contains { $0.contains("首选原图") })
-        precondition(sourceStages.contains { $0.contains("首选原图失败") })
-        precondition(sourceStages.contains { $0.contains("切换备用源") })
-        precondition(sourceStages.contains { $0.contains("下载备用图片") })
-        precondition(sourceStages.contains { $0.contains("校验图片") })
-        precondition(sourceStages.last == "媒体下载完成，正在整理结果")
-        precondition(sourceStages.allSatisfy { !$0.contains("http") }, "Progress text must not expose source URLs")
+        let sourceStages = await imageStatuses.stageSnapshot()
+        precondition(sourceStages.contains(.downloadingImage))
+        precondition(sourceStages.contains(.tryingAlternative))
+        precondition(sourceStages.contains(.checkingFile))
+        precondition(sourceStages.contains(.savingFile))
+        precondition(sourceStages.last == .completed)
+        let sourceMessages = await imageStatuses.snapshot()
+        precondition(sourceMessages.allSatisfy { !$0.contains("http") }, "Progress text must not expose source URLs")
 
         // The fallback stage comes from the real native-to-curl branch, rather
         // than being inferred from a long pause in numeric progress.
@@ -868,9 +877,9 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
                 shouldUseDirectly: usesNativeFirst, transferPolicy: .init(maximumDuration: 10, idleTimeout: 12))
         }
         let compatibilityBytes = try Data(contentsOf: compatibilityFile)
-        let fallbackStages = await fallbackStatuses.snapshot()
+        let fallbackStages = await fallbackStatuses.stageSnapshot()
         precondition(compatibilityBytes == validPNG)
-        precondition(fallbackStages == ["当前源传输中断，正在重试"])
+        precondition(fallbackStages.contains(.retrying))
 
         // A completed sibling's validation must not hide the source that is
         // still waiting. The actual delayed HTTP response must later complete.
@@ -884,21 +893,49 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
         }) {
             try await X.download(waitingTasks, maxConcurrentDownloads: 2)
         }
-        let waitingStages = await waitingStatuses.snapshot()
-        precondition(waitingStages.contains { $0.contains("第 1 张图片") && $0.contains("仍在等待下载") })
-        precondition(!waitingStages.contains { $0.contains("失败") }, "Waiting alone must not be described as a failed source")
-        precondition(waitingStages.last == "媒体下载完成，正在整理结果")
+        let waitingStages = await waitingStatuses.statusSnapshot()
+        precondition(waitingStages.contains { $0.stage == .waitingForResponse && $0.item == "图片 1" })
+        precondition(!waitingStages.contains { [.retrying, .tryingAlternative, .failed].contains($0.stage) }, "Waiting alone must not be described as a failed source")
+        precondition(waitingStages.last?.stage == .completed)
         let priorityStatuses = DownloadStatusRecorder()
         let statusAggregator = DownloaderInfra.$statusHandler.withValue({ message in
             await priorityStatuses.record(message)
         }) { DownloaderInfra.DownloadProgressAggregator(totalCount: 2, handler: nil) }
-        await statusAggregator.updateStatus(index: 0, message: "第 1 张图片：仍在等待下载")
-        await statusAggregator.updateStatus(index: 1, message: "第 2 张图片：正在校验图片")
+        let waitingImage = DownloaderInfra.DownloadStatus(stage: .waitingForResponse, item: "图片 1")
+        await statusAggregator.updateStatus(index: 0, status: waitingImage)
+        await statusAggregator.updateStatus(index: 0, status: waitingImage)
+        await statusAggregator.updateStatus(index: 1, status: .init(stage: .checkingFile, item: "图片 2"))
         await statusAggregator.complete(index: 1)
-        let priorityStages = await priorityStatuses.snapshot()
-        precondition(priorityStages == ["第 1 张图片：仍在等待下载"])
-        await statusAggregator.updateStatus(index: 0, message: "第 1 张图片：当前源已继续传输，正在下载")
+        await statusAggregator.updateStatus(index: 1, status: .init(stage: .retrying, item: "图片 2"))
+        let priorityStages = await priorityStatuses.statusSnapshot()
+        precondition(priorityStages == [waitingImage], "A sibling's check, completion or late retry must not hide the waiting source; identical updates must not repeat")
+        await statusAggregator.updateStatus(index: 0, status: .init(stage: .downloadingImage, item: "图片 1"))
         await statusAggregator.complete(index: 0)
+        await statusAggregator.complete(index: 0)
+        await statusAggregator.updateStatus(index: 0, status: .init(stage: .waitingForResponse, item: "图片 1"))
+        let completedPriorityStages = await priorityStatuses.stageSnapshot()
+        precondition(completedPriorityStages == [.waitingForResponse, .downloadingImage, .completed], "All-complete is published once and completed tasks reject late statuses")
+
+        let tierStatuses = DownloadStatusRecorder()
+        let tierAggregator = DownloaderInfra.$statusHandler.withValue({ status in
+            await tierStatuses.record(status)
+        }) { DownloaderInfra.DownloadProgressAggregator(totalCount: 4, handler: nil) }
+        await tierAggregator.updateStatus(index: 0, status: .init(stage: .checkingFile, item: "图片 1"))
+        await tierAggregator.updateStatus(index: 1, status: .init(stage: .downloadingVideo, item: "视频"))
+        await tierAggregator.updateStatus(index: 2, status: .init(stage: .retrying, item: "图片 2"))
+        await tierAggregator.updateStatus(index: 3, status: .init(stage: .waitingClient, item: "实况 1"))
+        await tierAggregator.updateStatus(index: 2, status: .init(stage: .tryingAlternative, item: "图片 2"))
+        await tierAggregator.complete(index: 3)
+        await tierAggregator.complete(index: 2)
+        await tierAggregator.updateStatus(index: 0, status: .init(stage: .savingFile, item: "图片 1"))
+        await tierAggregator.complete(index: 1)
+        await tierAggregator.complete(index: 0)
+        let tierStages = await tierStatuses.stageSnapshot()
+        precondition(tierStages == [.checkingFile, .downloadingVideo, .retrying, .waitingClient, .tryingAlternative, .downloadingVideo, .savingFile, .completed],
+            "Typed waiting, retry, transfer and check/save stages must retain their priority independently of their displayed text")
+        let conciseStageLabels = DownloaderInfra.DownloadStage.allCases.map(\.text)
+        precondition(conciseStageLabels.allSatisfy { !$0.isEmpty && $0.count <= 10 && !$0.contains("\n") && !$0.contains("http") },
+            "Shared phase labels must remain concise, single-line and free of source URLs")
 
         // Cancel a real stalled request after its truthful waiting stage. No
         // backup, post-cancellation status, or staged file may remain.
@@ -913,7 +950,7 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
         }
         var observedWaiting = false
         for _ in 0..<120 {
-            if await cancelledStatuses.snapshot().contains(where: { $0.contains("仍在等待下载") }) { observedWaiting = true; break }
+            if await cancelledStatuses.stageSnapshot().contains(.waitingForResponse) { observedWaiting = true; break }
             try await Task.sleep(for: .milliseconds(50))
         }
         precondition(observedWaiting)
@@ -986,13 +1023,11 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
             let fallbackVideoBytes = try Data(contentsOf: failedCloudDestination)
             precondition(fallbackVideoBytes == expectedVideoBytes, "A client fallback must preserve source bytes without HDR remuxing")
             precondition(!FileManager.default.fileExists(atPath: failedCloudDestination.appendingPathExtension("part").path))
-            let fallbackVideoStages = await fallbackVideoStatuses.snapshot()
-            let expectedVideoStages = ["正在下载云端原视频", "正在校验云端原视频", "云端原视频不可用，正在读取客户端缓存",
-                "正在下载客户端缓存视频", "正在校验客户端缓存视频"]
-            let stageIndices = expectedVideoStages.map { fallbackVideoStages.firstIndex(of: $0) }
-            precondition(stageIndices.allSatisfy { $0 != nil } && stageIndices.compactMap { $0 } == stageIndices.compactMap { $0 }.sorted(),
+            let fallbackVideoStages = await fallbackVideoStatuses.stageSnapshot()
+            precondition(containsStagesInOrder(fallbackVideoStages, [.downloadingVideo, .checkingFile, .readingClient, .downloadingVideo, .checkingFile, .savingFile]),
                 "The progress stages must accurately show cloud validation failure followed by client source download and validation")
-            precondition(fallbackVideoStages.allSatisfy { !$0.contains("http") }, "Video progress must not expose signed source URLs")
+            let fallbackVideoMessages = await fallbackVideoStatuses.snapshot()
+            precondition(fallbackVideoMessages.allSatisfy { !$0.contains("http") }, "Video progress must not expose signed source URLs")
 
             var goodCloudVideo = originalVideo
             goodCloudVideo.originalVideoURL = goodVideoURL
@@ -1016,9 +1051,9 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
                 "A valid cloud original must finish without invoking client-cache lookup")
             let goodCloudBytes = try Data(contentsOf: goodCloudDestination)
             precondition(goodCloudBytes == expectedVideoBytes, "A cloud original must be delivered byte-for-byte without playback HDR remuxing")
-            let goodCloudStages = await goodCloudStatuses.snapshot()
-            precondition(goodCloudStages.contains("正在下载云端原视频") && goodCloudStages.contains("正在校验云端原视频"))
-            precondition(!goodCloudStages.contains { $0.contains("客户端缓存") })
+            let goodCloudStages = await goodCloudStatuses.stageSnapshot()
+            precondition(containsStagesInOrder(goodCloudStages, [.downloadingVideo, .checkingFile, .savingFile]))
+            precondition(!goodCloudStages.contains(.readingClient))
 
             var wrongCachedVideo = runtimeCachedVideo
             wrongCachedVideo.noteID = "ffffffffffffffffffffffff"
@@ -1087,11 +1122,98 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
             let outcome = try await D.download(.init(url:base.appendingPathComponent("bad.mp4"),destination:dir.appendingPathComponent("fallback.mp4"),alternateURLs:[base.appendingPathComponent("good.mp4")]),retries:0)
             precondition(outcome.usedFallback)
             try await MediaFileUtilities.validateMedia(outcome.fileURL,expectedSuffix:"mp4")
-            let outcomes = try await D.download([
-                .init(url:base.appendingPathComponent("good.mp4"),destination:dir.appendingPathComponent("one.mp4")),
-                .init(url:base.appendingPathComponent("good.mp4"),destination:dir.appendingPathComponent("two.mp4"))
-            ],maxConcurrentDownloads:2)
+            let douyinVideoStatuses = DownloadStatusRecorder()
+            let outcomes = try await DownloaderInfra.$statusHandler.withValue({ status in
+                await douyinVideoStatuses.record(status)
+            }) {
+                try await D.download([
+                    .init(url:base.appendingPathComponent("good.mp4"),destination:dir.appendingPathComponent("one.mp4")),
+                    .init(url:base.appendingPathComponent("good.mp4"),destination:dir.appendingPathComponent("two.mp4"))
+                ],maxConcurrentDownloads:2)
+            }
             precondition(outcomes.count == 2 && outcomes.allSatisfy { !$0.usedFallback })
+            let douyinVideoStages = await douyinVideoStatuses.stageSnapshot()
+            precondition(containsStagesInOrder(douyinVideoStages, [.downloadingVideo, .checkingFile, .savingFile, .completed]),
+                "Douyin's real HTTP transfer, validation, saving and completion must publish shared typed stages")
+
+            let dewuVideoStatuses = DownloadStatusRecorder()
+            let dewuVideoDestination = dir.appendingPathComponent("dewu-stage-video.mp4")
+            try await DownloaderInfra.$statusHandler.withValue({ status in
+                await dewuVideoStatuses.record(status)
+            }) {
+                try await DewuNativeDownloader.download([
+                    .init(url: goodVideoURL, destination: dewuVideoDestination)
+                ], maxConcurrentDownloads: 1)
+            }
+            let dewuVideoStages = await dewuVideoStatuses.stageSnapshot()
+            let dewuVideoBytes = try Data(contentsOf: dewuVideoDestination)
+            precondition(dewuVideoBytes == expectedVideoBytes)
+            precondition(containsStagesInOrder(dewuVideoStages, [.downloadingVideo, .checkingFile, .savingFile, .completed]),
+                "Dewu's real HTTP transfer, validation, saving and completion must publish the same shared stages")
+            for messages in [await douyinVideoStatuses.snapshot(), await dewuVideoStatuses.snapshot()] {
+                precondition(messages.allSatisfy { !$0.contains("http") }, "Platform stages must not expose source URLs")
+            }
+
+            // Large real fixtures permit two separate 128 KiB file-growth events.
+            // The server stalls between them, then keeps the response open while
+            // the shared monitor observes resumed growth for each platform.
+            if expectedVideoBytes.count > 256 * 1024 {
+                let waitingVideoURL = base.appendingPathComponent("waiting.mp4")
+                let slowDouyinStatuses = DownloadStatusRecorder()
+                let slowDouyinDestination = dir.appendingPathComponent("douyin-waiting-video.mp4")
+                let slowDouyinResults = try await DownloaderInfra.$statusHandler.withValue({ status in
+                    await slowDouyinStatuses.record(status)
+                }) {
+                    try await D.download([.init(url: waitingVideoURL, destination: slowDouyinDestination)], maxConcurrentDownloads: 1)
+                }
+                precondition(slowDouyinResults.count == 1)
+                let slowDouyinStages = await slowDouyinStatuses.stageSnapshot()
+                let slowDouyinBytes = try Data(contentsOf: slowDouyinDestination)
+                precondition(slowDouyinBytes == expectedVideoBytes)
+                precondition(containsStagesInOrder(slowDouyinStages, [.downloadingVideo, .waitingForResponse, .downloadingVideo, .checkingFile, .savingFile, .completed]),
+                    "A real slow Douyin video must resume its video stage instead of a generic file stage: \(slowDouyinStages)")
+                precondition(!slowDouyinStages.contains(.downloadingFile))
+
+                let slowDewuStatuses = DownloadStatusRecorder()
+                let slowDewuDestination = dir.appendingPathComponent("dewu-waiting-video.mp4")
+                try await DownloaderInfra.$statusHandler.withValue({ status in
+                    await slowDewuStatuses.record(status)
+                }) {
+                    try await DewuNativeDownloader.download([.init(url: waitingVideoURL, destination: slowDewuDestination)], maxConcurrentDownloads: 1)
+                }
+                let slowDewuStages = await slowDewuStatuses.stageSnapshot()
+                let slowDewuBytes = try Data(contentsOf: slowDewuDestination)
+                precondition(slowDewuBytes == expectedVideoBytes)
+                precondition(containsStagesInOrder(slowDewuStages, [.downloadingVideo, .waitingForResponse, .downloadingVideo, .checkingFile, .savingFile, .completed]),
+                    "A real slow Dewu video must retain its video stage across waiting and recovery: \(slowDewuStages)")
+                precondition(!slowDewuStages.contains(.downloadingFile))
+
+                // XHS short-link downloads delegate their direct-curl branch to
+                // this shared entry point; force that branch without a public CDN.
+                let directCurlStatuses = DownloadStatusRecorder()
+                let directCurlDestination = dir.appendingPathComponent("direct-curl-waiting-live.mp4")
+                let usesDirectCurl: @Sendable (URLRequest) -> Bool = { _ in true }
+                let directCurlSession = DownloaderHTTPCompatibility.makeDownloadSession()
+                defer { directCurlSession.invalidateAndCancel() }
+                try await DownloaderInfra.$statusHandler.withValue({ status in
+                    await directCurlStatuses.record(status)
+                }) {
+                    try await DownloaderInfra.downloadWithRetriesAsync(waitingVideoURL, to: directCurlDestination, retries: 1,
+                        validate: { try await MediaFileUtilities.validateMedia($0, expectedSuffix: "mp4") },
+                        userAgent: X.mobileUserAgent, session: directCurlSession, shouldUseDirectly: usesDirectCurl,
+                        stage: .downloadingLivePhoto)
+                }
+                let directCurlStages = await directCurlStatuses.stageSnapshot()
+                let directCurlBytes = try Data(contentsOf: directCurlDestination)
+                precondition(directCurlBytes == expectedVideoBytes)
+                precondition(containsStagesInOrder(directCurlStages, [.downloadingLivePhoto, .waitingForResponse, .downloadingLivePhoto, .checkingFile, .savingFile]),
+                    "The shared direct-curl branch must retain its media stage across waiting and recovery: \(directCurlStages)")
+                precondition(!directCurlStages.contains(.downloadingFile))
+                for file in [slowDouyinDestination, slowDewuDestination, directCurlDestination] {
+                    precondition(!FileManager.default.fileExists(atPath: file.appendingPathExtension("part").path))
+                }
+                print("PASS: real Douyin, Dewu and direct-curl transfer, waiting, recovery, validation and saving stages")
+            }
             if CommandLine.arguments.count > 3 {
                 let silent = base.appendingPathComponent("silent.mp4")
                 let good = base.appendingPathComponent("good.mp4")

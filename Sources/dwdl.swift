@@ -13,8 +13,10 @@ enum DewuNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async -> ToolRunResult {
         do {
+            await DownloaderInfra.reportStatus(.readingLink)
             let shareURL = try extractShareURL(from: shareText)
             if let progress { await progress(0.05) }
+            await DownloaderInfra.reportStatus(.findingMedia)
             let pageInfo = try await parseSharePage(shareURL)
             if let progress { await progress(0.15) }
             guard !pageInfo.contentID.isEmpty else {
@@ -47,7 +49,7 @@ enum DewuNativeDownloader {
                 for (index, source) in imageSources.enumerated() {
                     let url = source.url
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
-                    tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1)))
+                    tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1), isImage: true))
                 }
                 do {
                     let imageDownloadProgress: DownloaderInfra.ProgressHandler?
@@ -72,6 +74,7 @@ enum DewuNativeDownloader {
             var mediaPairs: [APIMediaPair] = []
             var videoURLs: [URL] = []
             var videoSource = "App 接口 JSON"
+            await DownloaderInfra.reportStatus(.readingClient)
             let roots = DewuLogStore.dataRoots()
             let recentDatabaseLimit = 3
             let databases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
@@ -102,6 +105,7 @@ enum DewuNativeDownloader {
                     lines.append("未找到得物 App 容器，使用分享页公开媒体兜底。")
                 } else {
                     lines.append(didFetchAPIDetail ? "App 接口未返回 Live Photo 视频，继续读取播放日志..." : "本机没有当前帖子的详情接口记录，正在后台打开得物 App 生成签名请求...")
+                    await DownloaderInfra.reportStatus(.waitingClient)
                     Task.detached { openDewuApp(shareURL) }
                     if !didFetchAPIDetail {
                         if let progress { await progress(0.30) }
@@ -110,6 +114,7 @@ enum DewuNativeDownloader {
                         })
                         if let progress { await progress(0.40) }
                         if mediaPairs.isEmpty {
+                            await DownloaderInfra.reportStatus(.readingClient)
                             mediaPairs = await fetchAPIMediaPairs(contentID: pageInfo.contentID, databases: DewuLogStore.logDatabases(roots: roots))
                         }
                         videoURLs = bestVideoVariants(mediaPairs.map(\.videoURL))
@@ -125,10 +130,13 @@ enum DewuNativeDownloader {
                         hasShareVideoURLs: !shareVideoURLs.isEmpty
                     ) {
                         if let progress { await progress(0.45) }
+                        await DownloaderInfra.reportStatus(.readingClient)
                         let recentDatabases = DewuLogStore.logDatabases(roots: roots, limit: recentDatabaseLimit)
+                        await DownloaderInfra.reportStatus(.waitingClient)
                         videoURLs = bestVideoVariants(await waitForMediaVideoURLs(contentID: pageInfo.contentID, databases: recentDatabases, timeout: min(max(waitSeconds, 1), 8)))
                         if let progress { await progress(0.50) }
                         if videoURLs.isEmpty {
+                            await DownloaderInfra.reportStatus(.readingClient)
                             let allDatabases = DewuLogStore.logDatabases(roots: roots)
                             videoURLs = bestVideoVariants(extractMediaVideoURLsFromLogs(contentID: pageInfo.contentID, databases: allDatabases))
                         }
@@ -138,6 +146,7 @@ enum DewuNativeDownloader {
             }
 
             if videoURLs.isEmpty, !shareVideoURLs.isEmpty {
+                await DownloaderInfra.reportStatus(.tryingAlternative)
                 videoURLs = shareVideoURLs
                 videoSource = "分享页视频"
             }
@@ -157,7 +166,7 @@ enum DewuNativeDownloader {
                     for (index, source) in imageSources.enumerated() {
                         let url = source.url
                         let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
-                        tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1)))
+                        tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1), isImage: true))
                     }
                     let apiImageDownloadProgress: DownloaderInfra.ProgressHandler?
                     if let progress {
@@ -191,7 +200,8 @@ enum DewuNativeDownloader {
                     } ?? []
                     let index = imageIndices.count == 1 ? imageIndices[0] + 1 : imageSources.count + offset + 1
                     tasks.append(DownloadTask(url: url, destination: destination,
-                        displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index)))
+                        displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index),
+                        isLivePhoto: !pageInfo.isVideoPost && stillURL != nil))
                 }
                 let videoDownloadProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
@@ -208,6 +218,7 @@ enum DewuNativeDownloader {
             }
 
             lines.append("完成。输出只保留媒体文件，不保存鉴权链接。")
+            await DownloaderInfra.reportStatus(.completed)
             return .success(lines.joined(separator: "\n"))
         } catch {
             return .failure(error.localizedDescription)
@@ -238,11 +249,18 @@ enum DewuNativeDownloader {
         var didFetchDetail: Bool
     }
 
-    private struct DownloadTask {
+    struct DownloadTask {
         var url: URL
         var destination: URL
         var fallbackURLs: [URL] = []
         var displayOrder: MediaDisplayOrder? = nil
+        // Presentation only; reliable media pairing remains unchanged.
+        var isLivePhoto = false
+        var isImage = false
+
+        var downloadStage: DownloaderInfra.DownloadStage {
+            isImage ? .downloadingImage : isLivePhoto ? .downloadingLivePhoto : .downloadingVideo
+        }
     }
 
     private static func extractShareURL(from text: String) throws -> URL {
@@ -588,7 +606,7 @@ enum DewuNativeDownloader {
         try await DownloaderInfra.requestAsync(url, headers: headers, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly)
     }
 
-    private static func download(
+    static func download(
         _ tasks: [DownloadTask],
         maxConcurrentDownloads requestedMaxConcurrentDownloads: Int? = nil,
         progress: DownloaderInfra.ProgressHandler? = nil
@@ -596,13 +614,37 @@ enum DewuNativeDownloader {
         guard !tasks.isEmpty else { return }
         let limit = max(1, requestedMaxConcurrentDownloads ?? maxConcurrentDownloads)
         let progressAggregator = DownloaderInfra.DownloadProgressAggregator(totalCount: tasks.count, handler: progress)
+        let reportsStatus = DownloaderInfra.statusHandler != nil
+        var imageNumber = 0
+        var liveNumber = 0
+        var videoNumber = 0
+        let labels = tasks.map { task -> String in
+            if task.isImage {
+                imageNumber += 1
+                return "图片 \(task.displayOrder?.index ?? imageNumber)"
+            }
+            if task.isLivePhoto {
+                liveNumber += 1
+                return "实况 \(task.displayOrder?.index ?? liveNumber)"
+            }
+            videoNumber += 1
+            return "视频 \(task.displayOrder?.index ?? videoNumber)"
+        }
         try await withThrowingTaskGroup(of: Void.self) { group in
             var iter = Array(tasks.enumerated()).makeIterator()
             for _ in 0..<min(limit, tasks.count) {
                 guard let t = iter.next() else { break }
                 group.addTask {
-                    try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
+                        }
+                    } else { scopedStatus = nil }
+                    try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                 }
@@ -610,8 +652,16 @@ enum DewuNativeDownloader {
             for try await _ in group {
                 guard let t = iter.next() else { continue }
                 group.addTask {
-                    try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
+                        }
+                    } else { scopedStatus = nil }
+                    try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                 }
@@ -619,11 +669,11 @@ enum DewuNativeDownloader {
         }
     }
 
-    private static func download(
+    static func download(
         _ task: DownloadTask,
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async throws {
-        try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, validate: { url in try await MediaFileUtilities.validateMedia(url, expectedSuffix: task.destination.pathExtension) }, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress)
+        try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, validate: { url in try await MediaFileUtilities.validateMedia(url, expectedSuffix: task.destination.pathExtension) }, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress, stage: task.downloadStage)
         task.displayOrder?.write(to: task.destination)
     }
 

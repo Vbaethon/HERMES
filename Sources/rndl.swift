@@ -174,6 +174,7 @@ enum XHSNativeDownloader {
         progress: DownloaderInfra.ProgressHandler? = nil
     ) async -> ToolRunResult {
         do {
+            await DownloaderInfra.reportStatus(.readingLink)
             let links = try await extractLinks(from: shareText)
             guard !links.isEmpty else {
                 return .failure("没有提取到小红书作品链接。")
@@ -287,6 +288,7 @@ enum XHSNativeDownloader {
                 ].compactMap { $0 }.joined(separator: "\n"))
             }
             lines.append("完成。输出只保留媒体文件，不保存鉴权链接。")
+            await DownloaderInfra.reportStatus(.completed)
             return .success(lines.joined(separator: "\n\n"))
         } catch {
             return .failure(error.localizedDescription)
@@ -356,6 +358,7 @@ enum XHSNativeDownloader {
     }
 
     private static func fetchNote(_ url: URL, progress: DownloaderInfra.ProgressHandler? = nil) async throws -> NoteInfo {
+        await DownloaderInfra.reportStatus(.findingMedia)
         var notes: [NoteInfo] = []
         var desktopMessage: String?
         var firstError: Error?
@@ -364,7 +367,6 @@ enum XHSNativeDownloader {
             var desktopResult = try await fetchNoteOnce(url, requestUserAgent: desktopUserAgent)
             if let progress { await progress(0.5) }
             desktopMessage = desktopResult.sourceMessage
-            if desktopResult.note.type == "video" { await DownloaderInfra.reportStatus("正在获取云端原视频地址") }
             if desktopResult.note.hasMedia || desktopResult.note.type == "video" {
                 desktopResult.note.requestUserAgent = desktopUserAgent
                 notes.append(desktopResult.note)
@@ -380,7 +382,6 @@ enum XHSNativeDownloader {
             var mobileResult = try await fetchNoteOnce(url, requestUserAgent: mobileUserAgent)
             if let progress { await progress(0.95) }
             mobileMessage = mobileResult.sourceMessage
-            if mobileResult.note.type == "video" { await DownloaderInfra.reportStatus("正在获取云端原视频地址") }
             if mobileResult.note.hasMedia || mobileResult.note.type == "video" {
                 mobileResult.note.requestUserAgent = mobileUserAgent
                 notes.append(mobileResult.note)
@@ -406,12 +407,13 @@ enum XHSNativeDownloader {
                 }
                 bestNote = preferredNote(notes + cached)
             }
+            await DownloaderInfra.reportStatus(.readingClient)
             mergeCache()
             // Refresh missing exact-ID client originals or motion sources; audio metadata is not a source criterion.
             // A bounded wait leaves the bare original available if the app is absent.
             if shouldRefreshClientCache(for: bestNote) {
                 try Task.checkCancellation()
-                await DownloaderInfra.reportStatus(bestNote?.type == "video" ? "未取得云端原视频地址，正在读取客户端缓存" : "正在读取客户端原图与实况来源")
+                await DownloaderInfra.reportStatus(.waitingClient)
                 try Task.checkCancellation()
                 if await XHSAppCache.openNote(identity, shareURL: url) {
                     for _ in 0..<8 {
@@ -1335,9 +1337,9 @@ enum XHSNativeDownloader {
         let labels = tasks.map { task -> String in
             if task.isImage {
                 imageNumber += 1
-                return "第 \(task.displayOrder?.index ?? imageNumber) 张图片"
+                return "图片 \(task.displayOrder?.index ?? imageNumber)"
             }
-            if task.isLivePhoto { return "第 \(task.displayOrder?.index ?? 1) 张实况视频" }
+            if task.isLivePhoto { return "实况 \(task.displayOrder?.index ?? 1)" }
             return "视频"
         }
         return try await withThrowingTaskGroup(of: DownloadResult.self) { group in
@@ -1348,8 +1350,8 @@ enum XHSNativeDownloader {
                 group.addTask {
                     let scopedStatus: DownloaderInfra.StatusHandler?
                     if reportsStatus {
-                        scopedStatus = { message in
-                            await progressAggregator.updateStatus(index: t.offset, message: "\(labels[t.offset])：\(message)")
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
                         }
                     } else { scopedStatus = nil }
                     let result = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
@@ -1367,8 +1369,8 @@ enum XHSNativeDownloader {
                 group.addTask {
                     let scopedStatus: DownloaderInfra.StatusHandler?
                     if reportsStatus {
-                        scopedStatus = { message in
-                            await progressAggregator.updateStatus(index: t.offset, message: "\(labels[t.offset])：\(message)")
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
                         }
                     } else { scopedStatus = nil }
                     let result = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
@@ -1400,23 +1402,12 @@ enum XHSNativeDownloader {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 for (sourceIndex, sourceURL) in task.urls.enumerated() {
                     do {
-                        if sourceURL == task.originalVideoURL {
-                            await DownloaderInfra.reportStatus("正在下载云端原视频")
-                        } else if task.usesClientVideoSource {
-                            await DownloaderInfra.reportStatus(sourceIndex == 0 ? "正在下载客户端缓存视频" : "正在尝试客户端缓存备用视频源")
-                        } else if sourceIndex == 0 {
-                            await DownloaderInfra.reportStatus(task.isImage ? "正在下载首选原图"
-                                : (task.originalLivePhotoURLs.contains(sourceURL) ? "正在下载云端原始实况" : "正在下载首选视频"))
-                        } else {
-                            await DownloaderInfra.reportStatus("正在切换备用源")
-                            let isWebPSource = sourceURL.absoluteString.lowercased().contains("webp")
-                            await DownloaderInfra.reportStatus(task.isImage
-                                ? (isWebPSource ? "正在下载备用图片（WebP 源）" : "正在下载备用图片")
-                                : "正在下载备用视频")
-                        }
+                        if sourceIndex > 0 { await DownloaderInfra.reportStatus(.tryingAlternative) }
+                        let stage: DownloaderInfra.DownloadStage = task.isImage ? .downloadingImage
+                            : task.isLivePhoto ? .downloadingLivePhoto : .downloadingVideo
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent,
-                                                    progress: progress, transferPolicy: transferPolicy)
-                        await DownloaderInfra.reportStatus(task.isImage ? "正在校验图片" : (task.originalVideoURL != nil ? "正在校验云端原视频" : task.usesClientVideoSource ? "正在校验客户端缓存视频" : "正在校验视频"))
+                                                    progress: progress, transferPolicy: transferPolicy, stage: stage)
+                        await DownloaderInfra.reportStatus(.checkingFile)
                         try await MediaFileUtilities.validateMedia(temporaryURL,
                             expectedSuffix: task.isImage ? "jpg" : task.destination.pathExtension)
                         let isOriginal = task.isLivePhoto && task.originalLivePhotoURLs.contains(sourceURL)
@@ -1427,7 +1418,7 @@ enum XHSNativeDownloader {
                             hasAudio = recoveredAudio
                         }
                         try Task.checkCancellation()
-                        await DownloaderInfra.reportStatus(task.isImage ? "图片校验完成，正在整理文件" : "视频校验完成，正在整理文件")
+                        await DownloaderInfra.reportStatus(.savingFile)
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                         let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                         try? FileManager.default.removeItem(at: finalURL)
@@ -1445,11 +1436,6 @@ enum XHSNativeDownloader {
                         if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                         lastError = error
                         try? FileManager.default.removeItem(at: temporaryURL)
-                        if sourceIndex + 1 < task.urls.count {
-                            await DownloaderInfra.reportStatus(sourceIndex == 0
-                                ? (task.isImage ? "首选原图失败，准备切换备用源" : "首选视频失败，准备切换备用源")
-                                : "备用源失败，准备尝试下一个备用源")
-                        }
                     }
                 }
             } catch {
@@ -1460,7 +1446,7 @@ enum XHSNativeDownloader {
             }
             try Task.checkCancellation()
             if attempt < retries {
-                await DownloaderInfra.reportStatus(task.isImage ? "图片源下载失败，正在重试" : "视频源下载失败，正在重试")
+                await DownloaderInfra.reportStatus(.retrying)
                 try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
             }
         }
@@ -1487,7 +1473,7 @@ enum XHSNativeDownloader {
                 try Task.checkCancellation()
                 if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
                 cloudError = error
-                await DownloaderInfra.reportStatus("云端原视频不可用，正在读取客户端缓存")
+                await DownloaderInfra.reportStatus(.readingClient)
             }
         }
         var cached: NoteInfo?
@@ -1513,6 +1499,7 @@ enum XHSNativeDownloader {
         fallback.videoHDRHint = nil
         fallback.originalVideoURL = nil
         fallback.usesClientVideoSource = true
+        if cloudError != nil { await DownloaderInfra.reportStatus(.tryingAlternative) }
         return try await download(fallback, progress: progress)
     }
 
@@ -1524,8 +1511,9 @@ enum XHSNativeDownloader {
             }.filter { $0.type == "video" })
         }
         try Task.checkCancellation()
+        await DownloaderInfra.reportStatus(.readingClient)
         if let cached = readCache(), cached.hasMedia { return cached }
-        await DownloaderInfra.reportStatus("正在等待客户端缓存视频来源")
+        await DownloaderInfra.reportStatus(.waitingClient)
         guard await XHSAppCache.openNote(noteID, shareURL: shareURL) else { return nil }
         for _ in 0..<8 {
             try Task.checkCancellation()
@@ -1579,15 +1567,15 @@ enum XHSNativeDownloader {
                 do {
                     switch source {
                     case .cloud:
-                        await DownloaderInfra.reportStatus("正在核验同图云端实况音轨")
-                        try await downloadOnceAsync(url, to: donor, requestUserAgent: task.requestUserAgent)
+                        await DownloaderInfra.reportStatus(.recoveringAudio)
+                        try await downloadOnceAsync(url, to: donor, requestUserAgent: task.requestUserAgent, stage: .recoveringAudio)
                     case .localCache:
+                        await DownloaderInfra.reportStatus(.recoveringAudio)
                         guard try XHSCachedMotionReader.copyMotion(for: url, cacheRoots: roots, to: donor) else { continue }
-                        await DownloaderInfra.reportStatus("正在读取同图实况的完整缓存音轨")
                     }
                     try await MediaFileUtilities.validateMedia(donor, expectedSuffix: "mp4")
                     guard try await livePhotoHasAudio(at: donor) else { continue }
-                    await DownloaderInfra.reportStatus("正在无损补入同图音轨")
+                    await DownloaderInfra.reportStatus(.recoveringAudio)
                     guard try await XHSLivePhotoAudioRecovery.addingAudio(from: donor, to: original, output: merged) else { continue }
                     try await MediaFileUtilities.validateMedia(merged, expectedSuffix: "mov")
                     guard try await livePhotoHasAudio(at: merged) else { continue }
@@ -1602,7 +1590,6 @@ enum XHSNativeDownloader {
                 }
             }
         }
-        await DownloaderInfra.reportStatus("未取得可用音轨，保留原始无声实况")
         return false
     }
 
@@ -1635,24 +1622,13 @@ enum XHSNativeDownloader {
         to destination: URL,
         requestUserAgent: String,
         progress: DownloaderInfra.ProgressHandler? = nil,
-        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil
+        transferPolicy: DownloaderHTTPCompatibility.TransferPolicy? = nil,
+        stage: DownloaderInfra.DownloadStage = .downloadingFile
     ) async throws {
         let requestURL = secureXHSURL(url)
-        var request = URLRequest(url: requestURL)
-        request.timeoutInterval = transferPolicy.map { TimeInterval($0.idleTimeout) } ?? 30
-        request.assumesHTTP3Capable = false
-        request.setValue(requestUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
-        if shouldUseDirectly(request) {
-            await progress?(0)
-            try await DownloaderHTTPCompatibility.downloadAsync(request, to: destination, transferPolicy: transferPolicy)
-            await progress?(1)
-            return
-        }
-        // DownloaderInfra already owns the native-to-curl fallback for this request.
         try await DownloaderInfra.downloadOnceAsync(requestURL, to: destination, userAgent: requestUserAgent,
             session: networkSession, shouldUseDirectly: shouldUseDirectly,
-            extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress, transferPolicy: transferPolicy)
+            extraHeaders: ["Referer": "https://www.xiaohongshu.com/"], progress: progress, transferPolicy: transferPolicy, stage: stage)
     }
 
     private static func secureXHSURL(_ url: URL) -> URL {

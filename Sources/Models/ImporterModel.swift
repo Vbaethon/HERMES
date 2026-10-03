@@ -237,12 +237,8 @@ final class ImporterModel: ObservableObject {
         let title: String
     }
 
-    /// 下载进度里程碑常量 — 集中定义进度条各阶段的锚点值，替换分散的硬编码魔术数字。
+    /// 留出收尾空间，避免文件还未保存时进度条先显示完成。
     private enum DownloadProgressMilestone {
-        /// 扫描阶段结束时的进度比例（缓存扫描 / 解析链接等前期工作）。
-        /// Douyin 缓存扫描会在此区间内实时上报真实进度。
-        static let scanEnd: CGFloat = 0.20
-        /// 下载阶段结束时的进度比例。剩余 0.04 留给"整理下载结果"阶段。
         static let downloadEnd: CGFloat = 0.96
     }
     private static let completedDownloadProgressHoldNanoseconds: UInt64 = 460_000_000
@@ -1065,7 +1061,7 @@ final class ImporterModel: ObservableObject {
         activeDownloadTask = task
         refreshLocalFileMonitoring()
         isDownloading = true
-        rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: "解析分享链接", activeUnitProgress: 0)
+        rebuildDownloadProgressItems(activeCompletedCount: 0, activeDetail: DownloaderInfra.DownloadStage.readingLink.text, activeUnitProgress: 0)
         activeDownloadRunnerTask = Task { await performQueuedDownloadTask(task) }
     }
 
@@ -1080,16 +1076,17 @@ final class ImporterModel: ObservableObject {
             activeDownloadStatusDetail = nil
             rebuildDownloadProgressItems(
                 activeCompletedCount: index,
-                activeDetail: Self.downloadProgressDetail(for: entry, fraction: 0),
+                activeDetail: DownloaderInfra.DownloadStage.readingLink.text,
                 activeUnitProgress: 0
             )
             let worker = Task.detached(priority: .userInitiated) {
-                let status: DownloaderInfra.StatusHandler = { detail in
+                let status: DownloaderInfra.StatusHandler = { status in
                     await MainActor.run {
                         guard !self.isPreparingToQuit, self.activeDownloadTask?.id == task.id,
                               self.activeDownloadEntryIndex == index else { return }
-                        self.activeDownloadStatusDetail = detail
-                        self.rebuildDownloadProgressItems(activeCompletedCount: index, activeDetail: detail)
+                        guard self.activeDownloadStatusDetail != status.text else { return }
+                        self.activeDownloadStatusDetail = status.text
+                        self.rebuildDownloadProgressItems(activeCompletedCount: index, activeDetail: status.text)
                     }
                 }
                 return await DownloaderInfra.$statusHandler.withValue(status) {
@@ -1097,7 +1094,7 @@ final class ImporterModel: ObservableObject {
                         await downloader(entry, task.outputRoot) { fraction in
                             let clampedFraction = min(max(fraction, 0), 1)
                             let unitProgress = clampedFraction * DownloadProgressMilestone.downloadEnd
-                            let detail = Self.downloadProgressDetail(for: entry, fraction: clampedFraction)
+                            let detail = DownloaderInfra.DownloadStage.downloadingFile.text
                             await MainActor.run {
                                 guard !self.isPreparingToQuit, self.activeDownloadTask?.id == task.id,
                                       self.activeDownloadEntryIndex == index else { return }
@@ -1127,9 +1124,14 @@ final class ImporterModel: ObservableObject {
             case .failure(let message):
                 failures.append(task.entries.count == 1 ? message : "第 \(index + 1) 个链接失败：\(message)")
             }
-            rebuildDownloadProgressItems(activeCompletedCount: index + 1, activeDetail: "整理下载结果", activeUnitProgress: 0)
+            let finalStage: DownloaderInfra.DownloadStage
+            if case .failure = result { finalStage = .failed } else { finalStage = .completed }
+            rebuildDownloadProgressItems(activeCompletedCount: index + 1, activeDetail: finalStage.text, activeUnitProgress: 0)
         }
 
+        if !failures.isEmpty {
+            rebuildDownloadProgressItems(activeCompletedCount: task.entries.count, activeDetail: DownloaderInfra.DownloadStage.failed.text, activeUnitProgress: 0)
+        }
         await holdCompletedDownloadProgress(for: task)
         guard !Task.isCancelled, !isPreparingToQuit else { return }
 
@@ -2141,36 +2143,6 @@ final class ImporterModel: ObservableObject {
             return "\(platform)链接"
         }
         return "\(platform)链接 \(entries.count) 条"
-    }
-
-    private nonisolated static func downloadProgressDownloadDetail(for entry: String) -> String {
-        if isDouyinShareText(entry) {
-            return "下载抖音媒体…"
-        } else if isXHSShareText(entry) {
-            return "下载小红书媒体…"
-        } else if isDewuShareText(entry) {
-            return "下载得物媒体…"
-        }
-        return "下载媒体文件…"
-    }
-
-    private nonisolated static func downloadProgressDetail(for entry: String, fraction: CGFloat) -> String {
-        if fraction < 0.04 {
-            return "解析链接…"
-        }
-        if fraction < 0.10 {
-            return "获取媒体信息…"
-        }
-        if fraction < DownloadProgressMilestone.scanEnd {
-            return "扫描本地缓存…"
-        }
-        if fraction < 0.50 {
-            return "准备下载资源…"
-        }
-        if fraction < DownloadProgressMilestone.downloadEnd {
-            return downloadProgressDownloadDetail(for: entry)
-        }
-        return "整理文件…"
     }
 
     private nonisolated static func downloadShareEntries(from text: String) -> [String] {

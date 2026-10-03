@@ -419,7 +419,7 @@ import Foundation
             func startedChild() { childStarted = true }
             func cancelledChild() { childCancelled = true }
             func finishedWorker() { workerFinished = true }
-            func sendLateCallbacks() async { await status?("已停止任务的迟到状态"); await progress?(1) }
+            func sendLateCallbacks() async { await status?(.init(stage: .completed)); await progress?(1) }
         }
         let downloadShutdown = try model("download-shutdown")
         let retainedDownload = downloadShutdown.downloadOutputFolder.appendingPathComponent("retained.jpg")
@@ -504,14 +504,14 @@ import Foundation
                 return await withCheckedContinuation { continuations.append($0) }
             }
             func call(_ index: Int) -> Call { calls[index] }
-            func releaseFirst() { continuations.removeFirst().resume(returning: .success("phase fixture completed")) }
+            func releaseFirst(_ result: ToolRunResult = .success("phase fixture completed")) { continuations.removeFirst().resume(returning: result) }
         }
         let phases = try model("download-stage-detail")
         let phaseGate = DownloadPhaseGate()
-        let firstStage = "正在读取第一条链接的本机缓存记录"
-        let secondStage = "正在等待第二条链接的图片源响应"
+        let firstStage = DownloaderInfra.DownloadStatus(stage: .readingClient)
+        let secondStage = DownloaderInfra.DownloadStatus(stage: .waitingForResponse)
         phases.shareDownloader = { entry, _, progress in
-            await DownloaderInfra.reportStatus(entry.contains("stage-first") ? firstStage : secondStage)
+            await DownloaderInfra.reportStatus(entry.contains("stage-first") ? firstStage.stage : secondStage.stage)
             await progress?(0.65)
             await progress?(0.2)
             return await phaseGate.suspend(progress: progress, status: DownloaderInfra.statusHandler)
@@ -520,22 +520,55 @@ import Foundation
         await phases.downloadShare()
         try await waitUntilAsync { await phaseGate.calls.count == 1 }
         let firstPhaseCall = await phaseGate.call(0)
-        expect(firstPhaseCall.status != nil && phases.downloadProgressItems.first?.detail == firstStage, "TaskLocal status must reach the detached worker and survive later fraction callbacks")
+        expect(firstPhaseCall.status != nil && phases.downloadProgressItems.first?.detail == firstStage.text, "TaskLocal status must reach the detached worker and survive later fraction callbacks")
         let firstPhaseProgress = phases.downloadProgressItems[0].currentUnitProgress
         await firstPhaseCall.progress?(0.1)
-        expect(phases.downloadProgressItems[0].detail == firstStage && phases.downloadProgressItems[0].currentUnitProgress == firstPhaseProgress, "backward fractions must keep specific stage text and monotonic progress")
-        await firstPhaseCall.status?("正在校验第一张图片")
-        expect(phases.downloadProgressItems[0].detail == "正在校验第一张图片", "a real stage change must update the visible detail")
+        expect(phases.downloadProgressItems[0].detail == firstStage.text && phases.downloadProgressItems[0].currentUnitProgress == firstPhaseProgress, "backward fractions must keep specific stage text and monotonic progress")
+        let checkingImage = DownloaderInfra.DownloadStatus(stage: .checkingFile, item: "图片 1")
+        await firstPhaseCall.status?(checkingImage)
+        expect(phases.downloadProgressItems[0].detail == checkingImage.text, "a real stage change must update the visible detail")
         await phaseGate.releaseFirst()
         try await waitUntilAsync { await phaseGate.calls.count == 2 }
         let secondPhaseProgress = phases.downloadProgressItems[0].currentUnitProgress
-        expect(phases.downloadProgressItems[0].detail == secondStage, "the next entry must replace the old stage")
-        await firstPhaseCall.status?("上一条链接的迟到阶段")
+        expect(phases.downloadProgressItems[0].detail == secondStage.text, "the next entry must replace the old stage")
+        await firstPhaseCall.status?(.init(stage: .readingLink))
         await firstPhaseCall.progress?(0.99)
-        expect(phases.downloadProgressItems[0].detail == secondStage && phases.downloadProgressItems[0].currentUnitProgress == secondPhaseProgress, "late callbacks from an earlier entry must not overwrite the current entry")
+        expect(phases.downloadProgressItems[0].detail == secondStage.text && phases.downloadProgressItems[0].currentUnitProgress == secondPhaseProgress, "late callbacks from an earlier entry must not overwrite the current entry")
         await phaseGate.releaseFirst()
         try await waitUntil { !phases.isDownloading }
         pass("specific download stages survive fraction changes and reject stale callbacks from an earlier entry")
+
+        let fractionOnly = try model("download-fractions-without-stage")
+        let fractionGate = DownloadPhaseGate()
+        fractionOnly.shareDownloader = { _, _, progress in
+            await progress?(0.05)
+            await progress?(0.99)
+            return await fractionGate.suspend(progress: progress, status: DownloaderInfra.statusHandler)
+        }
+        fractionOnly.downloadShareText = "https://v.douyin.com/fraction-only/"
+        await fractionOnly.downloadShare()
+        try await waitUntilAsync { await fractionGate.calls.count == 1 }
+        expect(fractionOnly.downloadProgressItems.first?.detail == DownloaderInfra.DownloadStage.downloadingFile.text,
+            "Numeric fractions alone must not invent parsing, checking or completion stages")
+        await fractionGate.releaseFirst()
+        try await waitUntil { !fractionOnly.isDownloading }
+
+        let failedPhase = try model("download-failed-final-stage")
+        let failedPhaseGate = DownloadPhaseGate()
+        failedPhase.shareDownloader = { _, _, progress in
+            await DownloaderInfra.reportStatus(.checkingFile)
+            await progress?(1)
+            return await failedPhaseGate.suspend(progress: progress, status: DownloaderInfra.statusHandler)
+        }
+        failedPhase.downloadShareText = "https://v.douyin.com/failed-final-stage/"
+        await failedPhase.downloadShare()
+        try await waitUntilAsync { await failedPhaseGate.calls.count == 1 }
+        await failedPhaseGate.releaseFirst(.failure("phase fixture failure"))
+        try await waitUntil { failedPhase.downloadProgressItems.first?.detail == DownloaderInfra.DownloadStage.failed.text }
+        expect(failedPhase.isDownloading && failedPhase.downloadProgressItems.first?.progress == 1,
+            "The final progress hold must show failure, rather than a successful completion stage")
+        try await waitUntil { !failedPhase.isDownloading }
+        pass("fractions do not guess stages and failed downloads retain a truthful final stage")
 
         let importShutdown = try model("photos-import-shutdown")
         let shutdownInput = try pair(root.appendingPathComponent("photos-import-shutdown-input"), "live")

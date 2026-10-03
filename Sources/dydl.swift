@@ -80,11 +80,18 @@ enum DouyinNativeDownloader {
         var fallbackURL: URL? = nil
         var alternateURLs: [URL] = []
         var displayOrder: MediaDisplayOrder? = nil
+        // Presentation only; source selection and transfer behavior are unchanged.
+        var isLivePhoto = false
+        var isImage = false
+
+        var downloadStage: DownloaderInfra.DownloadStage {
+            isImage ? .downloadingImage : isLivePhoto ? .downloadingLivePhoto : .downloadingVideo
+        }
     }
 
     static func livePhotoDownloadTask(_ item: MediaItem, destination: URL) -> DownloadTask? {
         guard let video = item.videoURL else { return nil }
-        return DownloadTask(url: video, destination: destination, alternateURLs: item.alternateURLs)
+        return DownloadTask(url: video, destination: destination, alternateURLs: item.alternateURLs, isLivePhoto: true)
     }
 
     struct DownloadOutcome: Sendable {
@@ -398,6 +405,7 @@ enum DouyinNativeDownloader {
                 if let progress {
                     await progress(linkFraction + 0.01 * linkWidth)
                 }
+                await DownloaderInfra.reportStatus(.readingLink)
                 let (resolvedURL, seedInfo) = try await resolveURL(link)
                 if debugEnabled { print("[DouyinDebug] run: resolved URL = \(resolvedURL.absoluteString)") }
                 if let progress {
@@ -444,7 +452,8 @@ enum DouyinNativeDownloader {
                         : info.awemeID
                     tasks.append(DownloadTask(
                         url: item.imageURL,
-                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).jpg", usedNames: &usedNames), displayOrder: order
+                        destination: FileNaming.uniqueDestination(in: outputFolder, name: "\(stem).jpg", usedNames: &usedNames), displayOrder: order,
+                        isImage: true
                     ))
                     if item.videoURL != nil {
                         var task = livePhotoDownloadTask(item, destination:
@@ -504,6 +513,7 @@ enum DouyinNativeDownloader {
                 lines.append(summary.joined(separator: "\n"))
             }
             lines.append("完成。输出只保留媒体文件，不下载背景音乐。")
+            await DownloaderInfra.reportStatus(.completed)
             return .success(lines.joined(separator: "\n\n"))
         } catch {
             if debugEnabled { print("[DouyinDebug] run: ERROR - \(error.localizedDescription)") }
@@ -764,6 +774,7 @@ enum DouyinNativeDownloader {
 
     private static func fetchAweme(awemeID: String, referer: URL, seedInfo: DouyinSeedInfo = DouyinSeedInfo(), progress: DownloaderInfra.ProgressHandler? = nil) async throws -> AwemeInfo {
         if debugEnabled { print("[DouyinDebug] fetchAweme: awemeID=\(awemeID)") }
+        await DownloaderInfra.reportStatus(.findingMedia)
         var publicInfo: AwemeInfo?
         if let progress { await progress(0.02) }
         let detailURL = URL(string: "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=\(awemeID)&aid=6383&device_platform=webapp")!
@@ -834,6 +845,7 @@ enum DouyinNativeDownloader {
         let needsDesktopCache = needsLivePhotoVideo || hasSuspiciousLivePhoto || publicInfo == nil || isVideoOnly
 
         if needsDesktopCache {
+            await DownloaderInfra.reportStatus(.readingClient)
             if debugEnabled { print("[DouyinDebug] fetchAweme: trying desktop cache (need hidden quality, LivePhoto video, or no public data)") }
             if (publicInfo?.images.isEmpty ?? true),
                let directInfo = await cachedDirectMediaAweme(awemeID: awemeID, seedInfo: seedInfo, fallbackInfo: publicInfo, videoIDs: publicVideoIDs, progress: { fraction in
@@ -918,6 +930,7 @@ enum DouyinNativeDownloader {
         // Mobile feed API — sometimes returns data when the web API is blocked.
         // Uses the same endpoint the mobile app uses, which may have different CDN routing.
         if publicInfo == nil || needsLivePhotoVideo || isVideoOnly {
+            await DownloaderInfra.reportStatus(.findingMedia)
             if debugEnabled { print("[DouyinDebug] fetchAweme: trying mobile feed API") }
             let mobileURL = URL(string: "https://api5-normal-c-lf.amemv.com/aweme/v1/feed/?aweme_id=\(awemeID)&version_code=170400&version_name=17.4.0&count=1")!
             if let info = try? await parseMobileFeedResponse(from: mobileURL, targetAwemeID: awemeID),
@@ -950,6 +963,7 @@ enum DouyinNativeDownloader {
 
     private static func resolveSourceVideo(_ info: AwemeInfo) async -> AwemeInfo? {
         guard info.images.isEmpty, info.videos.count == 1, let videoID = info.sourceVideoID else { return nil }
+        await DownloaderInfra.reportStatus(.findingMedia)
         do {
             guard let source = try await DouyinSourceResolver.resolve(videoID: videoID, userAgent: userAgent, session: networkSession) else { return nil }
             let old = info.videos[0]
@@ -1828,6 +1842,7 @@ enum DouyinNativeDownloader {
 	    /// to the mobile-identified URLSession path.
 	    /// Retries with an alternative configuration on PARSE_ERROR / NET_ERROR / TIMEOUT.
 	    private static func liveDesktopAweme(awemeID: String, electronURL: URL, progress: DownloaderInfra.ProgressHandler? = nil) async -> AwemeInfo? {
+	        await DownloaderInfra.reportStatus(.waitingClient)
 	        // Two configurations: primary (pc_client_type=3, Chrome UA) and fallback (pc_client_type=1, Safari UA).
 	        let configs: [(label: String, url: String, userAgent: String)] = [
 	            ("primary", "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=\(awemeID)&aid=6383&device_platform=webapp&version_code=170400&version_name=17.4.0&pc_client_type=3&pc_libra_divert=Mac&support_h265=1&support_dash=1", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.59 Safari/537.36"),
@@ -2868,14 +2883,38 @@ enum DouyinNativeDownloader {
         guard !tasks.isEmpty else { return [] }
         let limit = max(1, requestedMaxConcurrentDownloads ?? maxConcurrentDownloads)
         let progressAggregator = DownloaderInfra.DownloadProgressAggregator(totalCount: tasks.count, handler: progress)
+        let reportsStatus = DownloaderInfra.statusHandler != nil
+        var imageNumber = 0
+        var liveNumber = 0
+        var videoNumber = 0
+        let labels = tasks.map { task -> String in
+            if task.isImage {
+                imageNumber += 1
+                return "图片 \(task.displayOrder?.index ?? imageNumber)"
+            }
+            if task.isLivePhoto {
+                liveNumber += 1
+                return "实况 \(task.displayOrder?.index ?? liveNumber)"
+            }
+            videoNumber += 1
+            return "视频 \(task.displayOrder?.index ?? videoNumber)"
+        }
         return try await withThrowingTaskGroup(of: DownloadOutcome.self) { group in
             var outcomes: [DownloadOutcome] = []
             var iter = Array(tasks.enumerated()).makeIterator()
             for _ in 0..<min(limit, tasks.count) {
                 guard let t = iter.next() else { break }
                 group.addTask {
-                    let outcome = try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
+                        }
+                    } else { scopedStatus = nil }
+                    let outcome = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                     return outcome
@@ -2885,8 +2924,16 @@ enum DouyinNativeDownloader {
                 outcomes.append(outcome)
                 guard let t = iter.next() else { continue }
                 group.addTask {
-                    let outcome = try await download(t.element) { fraction in
-                        await progressAggregator.update(index: t.offset, fraction: fraction)
+                    let scopedStatus: DownloaderInfra.StatusHandler?
+                    if reportsStatus {
+                        scopedStatus = { status in
+                            await progressAggregator.updateStatus(index: t.offset, status: status.forItem(labels[t.offset]))
+                        }
+                    } else { scopedStatus = nil }
+                    let outcome = try await DownloaderInfra.$statusHandler.withValue(scopedStatus) {
+                        try await download(t.element) { fraction in
+                            await progressAggregator.update(index: t.offset, fraction: fraction)
+                        }
                     }
                     await progressAggregator.complete(index: t.offset)
                     return outcome
@@ -2908,9 +2955,11 @@ enum DouyinNativeDownloader {
         for attempt in 0...retries {
             do {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try await downloadOnceAsync(task.url, to: temporaryURL, progress: progress)
+                try await downloadOnceAsync(task.url, to: temporaryURL, progress: progress, stage: task.downloadStage)
+                await DownloaderInfra.reportStatus(.checkingFile)
                 try await MediaFileUtilities.validateMedia(temporaryURL, expectedSuffix: task.destination.pathExtension)
                 try Task.checkCancellation()
+                await DownloaderInfra.reportStatus(.savingFile)
                 let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
                 let finalURL = task.destination.deletingPathExtension().appendingPathExtension(suffix)
                 try? FileManager.default.removeItem(at: finalURL)
@@ -2918,6 +2967,7 @@ enum DouyinNativeDownloader {
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: finalURL.path)
                 task.displayOrder?.write(to: finalURL)
                 print("[HERMES] 媒体校验通过: \(finalURL.lastPathComponent), 来源主机: \(task.url.host ?? "unknown")")
+                await DownloaderInfra.reportStatus(.completed)
                 return DownloadOutcome(fileURL: finalURL, sourceHost: task.url.host ?? "unknown")
             } catch {
                 try Task.checkCancellation()
@@ -2925,13 +2975,16 @@ enum DouyinNativeDownloader {
                 lastError = error
                 try? FileManager.default.removeItem(at: task.destination.appendingPathExtension("part"))
                 if attempt < retries {
+                    await DownloaderInfra.reportStatus(.retrying)
                     try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 1_000_000_000)
                 }
             }
         }
         for alternate in task.alternateURLs where alternate != task.url {
             do {
-                var outcome = try await download(DownloadTask(url: alternate, destination: task.destination, displayOrder: task.displayOrder), retries: 0, progress: progress)
+                await DownloaderInfra.reportStatus(.tryingAlternative)
+                var outcome = try await download(DownloadTask(url: alternate, destination: task.destination, displayOrder: task.displayOrder,
+                    isLivePhoto: task.isLivePhoto, isImage: task.isImage), retries: 0, progress: progress)
                 outcome.usedFallback = true
                 return outcome
             } catch {
@@ -2942,7 +2995,9 @@ enum DouyinNativeDownloader {
         }
         if let fallback = task.fallbackURL {
             print("[HERMES] 当前候选失败，回退到保留的视频流。")
-            var outcome = try await download(DownloadTask(url: fallback, destination: task.destination, displayOrder: task.displayOrder), retries: 1, progress: progress)
+            await DownloaderInfra.reportStatus(.tryingAlternative)
+            var outcome = try await download(DownloadTask(url: fallback, destination: task.destination, displayOrder: task.displayOrder,
+                isLivePhoto: task.isLivePhoto, isImage: task.isImage), retries: 1, progress: progress)
             outcome.usedFallback = true
             return outcome
         }
@@ -2952,9 +3007,10 @@ enum DouyinNativeDownloader {
     private static func downloadOnceAsync(
         _ url: URL,
         to destination: URL,
-        progress: DownloaderInfra.ProgressHandler? = nil
+        progress: DownloaderInfra.ProgressHandler? = nil,
+        stage: DownloaderInfra.DownloadStage = .downloadingFile
     ) async throws {
-        try await DownloaderInfra.downloadOnceAsync(url, to: destination, userAgent: userAgent, session: networkSession, shouldUseDirectly: { _ in false }, extraHeaders: ["Referer": "https://www.douyin.com/"], progress: progress)
+        try await DownloaderInfra.downloadOnceAsync(url, to: destination, userAgent: userAgent, session: networkSession, shouldUseDirectly: { _ in false }, extraHeaders: ["Referer": "https://www.douyin.com/"], progress: progress, stage: stage)
     }
 
 
