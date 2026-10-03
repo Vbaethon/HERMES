@@ -7,10 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/script/project_config.sh"
 source "$ROOT_DIR/script/versioning.sh"
 BUILD_DIR="$ROOT_DIR/Build"
-prepare_build_paths
 PROJECT_FILE="$ROOT_DIR/$PROJECT_NAME/project.pbxproj"
-BUILT_APP="$PRODUCTS_DIR/$APP_NAME.app"
-STAGED_APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-/Applications}"
 FINAL_APP="$INSTALL_DIR/$APP_NAME.app"
 TEMP_APP="$INSTALL_DIR/.$APP_NAME.installing.$$.app"
@@ -82,6 +79,18 @@ bump_build_number() {
   perl -0pi -e "s/CURRENT_PROJECT_VERSION = \\d+;/CURRENT_PROJECT_VERSION = $next_build;/g" "$PROJECT_FILE"
 }
 
+remove_legacy_staged_app() {
+  local app="$BUILD_DIR/$APP_NAME.app" bundle_id custom_marker
+  [[ -d "$app" && ! -L "$app" ]] || return 0
+  [[ ! -e "$BUILD_DIR/.hermes-custom-products" ]] || return 0
+  custom_marker="$(/usr/bin/find "$app" -name .hermes-custom-products -print -quit 2>/dev/null)" || return 0
+  [[ -z "$custom_marker" ]] || return 0
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)" || return 0
+  if [[ "$bundle_id" == "$BUNDLE_ID" ]] && ! path_contains_running_app "$app"; then
+    rm -rf "$app"
+  fi
+}
+
 cleanup() {
   local exit_code=$?
   trap - EXIT HUP INT TERM
@@ -108,14 +117,24 @@ cleanup() {
   else
     rm -rf "$PREVIOUS_APP"
     rm -f "$PROJECT_FILE_BACKUP"
+    if ! prune_obsolete_managed_products "$PRODUCTS_DIR" || ! remove_legacy_staged_app; then
+      echo "HERMES was installed, but obsolete build products could not be fully removed." >&2
+      exit_code=1
+    fi
   fi
   rm -rf "$TEMP_APP"
+  if ! remove_current_managed_products; then
+    echo "Failed to remove temporary HERMES build products." >&2
+    exit_code=1
+  fi
   exit "$exit_code"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+prepare_build_paths
+BUILT_APP="$PRODUCTS_DIR/$APP_NAME.app"
 
 mkdir -p "$BUILD_DIR" "$DERIVED_DATA_DIR" "$PRODUCTS_DIR" "$INSTALL_DIR"
 
@@ -146,12 +165,10 @@ if app_is_running; then
   exit 1
 fi
 
-rm -rf "$STAGED_APP" "$TEMP_APP"
-ditto "$BUILT_APP" "$STAGED_APP"
-/usr/bin/find "$STAGED_APP" -name .DS_Store -delete
-xattr -cr "$STAGED_APP" || true
-
-ditto "$STAGED_APP" "$TEMP_APP"
+rm -rf "$TEMP_APP"
+ditto "$BUILT_APP" "$TEMP_APP"
+/usr/bin/find "$TEMP_APP" -name .DS_Store -delete
+xattr -cr "$TEMP_APP" || true
 # Staging can take time; recheck before touching the installed app.
 if app_is_running; then
   echo "HERMES is running; installation skipped to protect current downloads." >&2

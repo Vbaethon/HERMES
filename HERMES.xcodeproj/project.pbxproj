@@ -48,6 +48,8 @@
 		111111111111111111111143 /* DewuDownloadRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */; };
 		111111111111111111111147 /* SubprocessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111146 /* SubprocessRunner.swift */; };
 		111111111111111111111151 /* ThumbnailCompositionEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111150 /* ThumbnailCompositionEffect.swift */; };
+		111111111111111111111153 /* XHSLivePhotoAudioRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */; };
+		111111111111111111111155 /* XHSCachedMotionReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111154 /* XHSCachedMotionReader.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -118,6 +120,8 @@
 		111111111111111111111052 /* DewuDownloadRecoveryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DewuDownloadRecoveryPolicy.swift; sourceTree = "<group>"; };
 		111111111111111111111146 /* SubprocessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/SubprocessRunner.swift; sourceTree = "<group>"; };
 		111111111111111111111150 /* ThumbnailCompositionEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailCompositionEffect.swift; sourceTree = "<group>"; };
+		111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/XHSLivePhotoAudioRecovery.swift; sourceTree = "<group>"; };
+		111111111111111111111154 /* XHSCachedMotionReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/XHSCachedMotionReader.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -143,6 +147,8 @@
 			children = (
 				111111111111111111111029 /* HermesApp.swift */,
 				111111111111111111111146 /* SubprocessRunner.swift */,
+				111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */,
+				111111111111111111111154 /* XHSCachedMotionReader.swift */,
 				111111111111111111111148 /* DouyinSourceResolver.swift */,
 				111111111111111111111002 /* dwdl.swift */,
 				111111111111111111111003 /* rndl.swift */,
@@ -371,6 +377,8 @@
 				111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */,
 				11111111111111111111113F /* Views/Other/SystemWindowBackgroundController.swift in Sources */,
 				111111111111111111111151 /* ThumbnailCompositionEffect.swift in Sources */,
+				111111111111111111111153 /* XHSLivePhotoAudioRecovery.swift in Sources */,
+				111111111111111111111155 /* XHSCachedMotionReader.swift in Sources */,
 				111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */,
 				111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */,
 				11111111111111111111113D /* Views/CollectionViews/ThumbnailGridController.swift in Sources */,
@@ -538,7 +546,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 639;
+				CURRENT_PROJECT_VERSION = 642;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -550,7 +558,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 1.9.28;
+				MARKETING_VERSION = 2.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -572,7 +580,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 639;
+				CURRENT_PROJECT_VERSION = 642;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -584,7 +592,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 1.9.28;
+				MARKETING_VERSION = 2.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

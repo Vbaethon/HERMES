@@ -133,6 +133,15 @@ import AudioToolbox
         for length in 0..<heicBytes.count { _ = try? heicExifItemLocation(in: Data(heicBytes.prefix(length))) }
         print("PASS: valid HEIF ID round-trip and every truncated box boundary")
 
+        let orientedHEIC = root.appendingPathComponent("oriented.heic")
+        let orientedDestination = CGImageDestinationCreateWithURL(orientedHEIC as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(orientedDestination, bitmap.cgImage!, [kCGImagePropertyOrientation: 6,
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: "native orientation fixture"]] as CFDictionary)
+        expect(CGImageDestinationFinalize(orientedDestination), "Oriented HEIF fixture failed")
+        let identifiedOrientedHEIC = root.appendingPathComponent("oriented-identified.heic")
+        try writeHEICWithAssetID(sourceURL: orientedHEIC, outputURL: identifiedOrientedHEIC, assetID: originalID)
+        expect(imageOrientation(identifiedOrientedHEIC) == 6, "Fixture needs a non-normalized native orientation")
+
         let video = root.appendingPathComponent("sample.mov")
         try await generateMovie(video, codec: .h264, title: originalTitle)
         // Add a generated AAC audio track to the ordinary fixture movie.
@@ -252,3 +261,25 @@ with tempfile.TemporaryDirectory(prefix="hermes-tool-metadata-") as directory:
     assert all(Path(path).is_file() for path in output.values())
     assert not list((temp / "production-output").glob(".hermes-stage-*"))
     print("PASS: production helper recovers readable JPEG with bad EXIF and cleans staging")
+
+    oriented_image = temp / "oriented-identified.heic"
+    for label, movie, native in [
+        ("native-orientation", temp / "live.mov", True),
+        ("mismatched-native-id", temp / "copied.mov", False),
+        ("missing-native-timing", temp / "with-audio.mov", False),
+    ]:
+        destination = temp / label
+        result = subprocess.run([str(tool), str(oriented_image), str(movie), str(destination)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (label, result.returncode, result.stdout, result.stderr)
+        output = json.loads(next(line.removeprefix("HERMES_RESULT:") for line in result.stdout.splitlines()
+                                 if line.startswith("HERMES_RESULT:")))
+        image_output, movie_output = Path(output["imagePath"]), Path(output["moviePath"])
+        if native:
+            assert image_output.suffix == ".heic", "Native oriented HEIF must keep its original format"
+            assert image_output.read_bytes() == oriented_image.read_bytes(), "Native oriented HEIF was modified"
+            assert movie_output.read_bytes() == movie.read_bytes(), "Native timing, audio, video or metadata was modified"
+        else:
+            assert image_output.suffix == ".jpg", "Mismatched or incomplete pairs must use the existing conversion path"
+        assert not list(destination.glob(".hermes-stage-*"))
+    print("PASS: native HEIF orientation 6 retains every source byte; mismatched IDs and incomplete movies keep conversion checks")

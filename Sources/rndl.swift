@@ -80,7 +80,7 @@ enum XHSNativeDownloader {
     private static let maxConcurrentDownloads = DownloaderHTTPCompatibility.downloadConcurrencyLimit()
     private static let networkSession: URLSession = DownloaderHTTPCompatibility.makeDownloadSession()
 
-    struct NoteInfo {
+    struct NoteInfo: Sendable {
         var noteID = ""
         var title = ""
         var author = "unknown"
@@ -91,6 +91,8 @@ enum XHSNativeDownloader {
         var videoURLs: [URL] = []
         var videoScore: Int64 = 0
         var videoHDRHint: VideoHDRHint?
+        var originalVideoURL: URL?
+        var videoFromAppCache = false
         var requestUserAgent = mobileUserAgent
         var usedAppCache = false
 
@@ -99,7 +101,7 @@ enum XHSNativeDownloader {
         }
     }
 
-    struct MediaItem {
+    struct MediaItem: Sendable {
         var index: Int
         var imageURL: URL
         var imageURLs: [URL] = []
@@ -113,9 +115,25 @@ enum XHSNativeDownloader {
         var liveUserAgent: String?
         var livePhotoDeclared = false
         var liveFromAppCache = false
+        var livePhotoFileID: String? = nil
+        var liveOriginalURLs: [URL] = []
+        var liveAudioURLs: [URL] = []
         // Informational source metadata only; selection and validation use provenance and actual media.
         var liveHasAudio = false
         var audioURLs: Set<URL> = []
+
+        mutating func discardMotionSources() {
+            liveURL = nil
+            liveURLs = []
+            liveScore = 0
+            livePhotoFileID = nil
+            liveOriginalURLs = []
+            liveAudioURLs = []
+            liveUserAgent = nil
+            liveFromAppCache = false
+            liveHasAudio = false
+            audioURLs = []
+        }
     }
 
     struct DownloadTask {
@@ -125,15 +143,23 @@ enum XHSNativeDownloader {
         var videoHDRHint: VideoHDRHint?
         var isLivePhoto = false
         var isImage = false
+        var originalLivePhotoURLs: Set<URL> = []
+        var livePhotoAudioURLs: [URL] = []
         var displayOrder: MediaDisplayOrder? = nil
+        var usesClientVideoSource = false
+        var originalVideoURL: URL? = nil
     }
 
     struct DownloadResult: Sendable {
         var isLivePhoto: Bool
         var hasAudio: Bool
+        var usedOriginalLivePhoto = false
+        var recoveredAudio = false
+        var sourceURL: URL? = nil
+        var fromAppCache = false
     }
 
-    struct VideoHDRHint {
+    struct VideoHDRHint: Sendable {
         var sourceMarkedHDR = false
         var streamMarkedHDR = false
 
@@ -229,21 +255,32 @@ enum XHSNativeDownloader {
                 } else {
                     downloadProgress = nil
                 }
-                let results = try await download(tasks, progress: downloadProgress)
+                let results: [DownloadResult]
+                if note.type == "video", let task = tasks.first {
+                    results = [try await downloadVideo(note, task: task, shareURL: link, progress: downloadProgress)]
+                } else {
+                    results = try await download(tasks, progress: downloadProgress)
+                }
                 let liveCount = note.items.filter { $0.liveURL != nil }.count
                 let audioCount = results.filter { $0.isLivePhoto && $0.hasAudio }.count
+                let originalLiveCount = results.filter { $0.usedOriginalLivePhoto }.count
+                let recoveredAudioCount = results.filter { $0.recoveredAudio }.count
                 let missingLiveCount = note.items.filter { $0.livePhotoDeclared && $0.liveURL == nil }.count
                 let videoCount = note.videoURL == nil ? 0 : 1
+                let downloadedOriginal = note.originalVideoURL.map { original in results.contains { $0.sourceURL == original } } ?? false
                 lines.append([
                     "noteId: \(note.noteID)",
                     "用户: \(folderName)",
                     "分享链接: \(link.absoluteString)",
                     "下载原图: \(note.items.count) 张",
                     "下载视频: \(videoCount) 个",
-                    note.videoHDRHint?.sourceMarkedHDR == true ? "HDR: 源视频标记为 HDR，已优先保留最高规格视频流" : nil,
+                    videoCount > 0 ? (downloadedOriginal ? "视频来源：云端原始上传文件，保留源编码、分辨率与色彩信息。" : "视频来源：同笔记客户端缓存来源；本次未取得云端原始文件。") : nil,
                     "下载 Live Photo 视频: \(liveCount) 个",
+                    liveCount > 0 ? "云端原始实况: \(originalLiveCount)/\(liveCount) 个" : nil,
                     liveCount > 0 ? "已核验有音轨: \(audioCount)/\(liveCount) 个" : nil,
-                    note.usedAppCache ? "已读取本机小红书客户端的同笔记素材记录。" : nil,
+                    recoveredAudioCount > 0 ? "已从同图客户端源无损补入音轨: \(recoveredAudioCount) 个" : nil,
+                    liveCount > originalLiveCount ? "提示：\(liveCount - originalLiveCount) 段实况使用客户端最高规格备用流。" : nil,
+                    note.usedAppCache || results.contains(where: \.fromAppCache) ? "已读取本机小红书客户端的同笔记素材记录。" : nil,
                     liveCount > audioCount ? "提示：\(liveCount - audioCount) 段实况文件未检测到音轨。" : nil,
                     missingLiveCount > 0 ? "提示：\(missingLiveCount) 张实况尚未取得本机客户端动态源，请在小红书中打开该笔记后重试。" : nil,
                     "输出目录: \(outputFolder.path)"
@@ -327,7 +364,8 @@ enum XHSNativeDownloader {
             var desktopResult = try await fetchNoteOnce(url, requestUserAgent: desktopUserAgent)
             if let progress { await progress(0.5) }
             desktopMessage = desktopResult.sourceMessage
-            if desktopResult.note.hasMedia {
+            if desktopResult.note.type == "video" { await DownloaderInfra.reportStatus("正在获取云端原视频地址") }
+            if desktopResult.note.hasMedia || desktopResult.note.type == "video" {
                 desktopResult.note.requestUserAgent = desktopUserAgent
                 notes.append(desktopResult.note)
             }
@@ -342,7 +380,8 @@ enum XHSNativeDownloader {
             var mobileResult = try await fetchNoteOnce(url, requestUserAgent: mobileUserAgent)
             if let progress { await progress(0.95) }
             mobileMessage = mobileResult.sourceMessage
-            if mobileResult.note.hasMedia {
+            if mobileResult.note.type == "video" { await DownloaderInfra.reportStatus("正在获取云端原视频地址") }
+            if mobileResult.note.hasMedia || mobileResult.note.type == "video" {
                 mobileResult.note.requestUserAgent = mobileUserAgent
                 notes.append(mobileResult.note)
             }
@@ -359,7 +398,7 @@ enum XHSNativeDownloader {
         if let expectedID { notes = notes.filter { $0.noteID == expectedID } }
         var bestNote = preferredNote(notes)
         let identity = expectedID ?? bestNote?.noteID
-        if let identity, XHSAppCache.isNoteID(identity), bestNote?.type != "video" {
+        if let identity, XHSAppCache.isNoteID(identity) {
             var roots = XHSAppCache.cacheRoots()
             func mergeCache() {
                 let cached = XHSAppCache.notes(noteID: identity, roots: roots).compactMap {
@@ -372,7 +411,7 @@ enum XHSNativeDownloader {
             // A bounded wait leaves the bare original available if the app is absent.
             if shouldRefreshClientCache(for: bestNote) {
                 try Task.checkCancellation()
-                await DownloaderInfra.reportStatus("正在读取客户端原图与实况来源")
+                await DownloaderInfra.reportStatus(bestNote?.type == "video" ? "未取得云端原视频地址，正在读取客户端缓存" : "正在读取客户端原图与实况来源")
                 try Task.checkCancellation()
                 if await XHSAppCache.openNote(identity, shareURL: url) {
                     for _ in 0..<8 {
@@ -386,7 +425,10 @@ enum XHSNativeDownloader {
                 try Task.checkCancellation()
             }
         }
-        if let bestNote { return bestNote }
+        if let bestNote, bestNote.hasMedia { return bestNote }
+        if bestNote?.type == "video" {
+            throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "未取得云端原视频，客户端缓存也未找到同笔记的可用视频来源。请在小红书客户端打开该笔记后重试。"])
+        }
         if let firstError {
             throw firstError
         }
@@ -475,25 +517,49 @@ enum XHSNativeDownloader {
         }
 
         if info.type == "video" {
-            if let bestVideo = bestVideoCandidate(from: note) {
-                info.videoURLs = streamURLs(bestVideo.item)
-                info.videoURL = info.videoURLs.first
-                info.videoScore = streamScore(bestVideo)
-                info.videoHDRHint = videoHDRHint(from: bestVideo.item)
-            } else if let originKey = JSONValueUtilities.nonEmptyString(deepGet(note, keys: ["video", "consumer", "originVideoKey"])) {
-                info.videoURL = URL(string: "https://sns-video-bd.xhscdn.com/\(MediaFileUtilities.formatURL(originKey))")
-                info.videoHDRHint = videoHDRHint(from: note)
+            // Ordinary videos download the exact upload key, never a web playback
+            // rendition or an unbound local player cache. Live Photos keep their
+            // separate client-cache path above.
+            guard let rawKey = deepGet(note, keys: ["video", "consumer", "originVideoKey"]) as? String,
+                  let key = JSONValueUtilities.nonEmptyString(rawKey),
+                  key.range(of: #"^[A-Za-z0-9_/-]+$"#, options: .regularExpression) != nil,
+                  !key.hasPrefix("/"),
+                  let original = URL(string: "https://sns-video-bd.xhscdn.com/\(key)") else {
+                return info
             }
+            info.originalVideoURL = original
+            info.videoURL = original
+            info.videoURLs = [original]
+            // Preserve the upload bytes. Playback-stream HDR hints must not cause
+            // the original file to be remuxed or its color metadata to be inferred.
+            info.videoHDRHint = nil
         }
         return info
     }
 
     static func parseAppNote(_ note: [String: Any], expectedID: String, fallbackURL: URL) -> NoteInfo? {
-        guard JSONValueUtilities.string(note["id"]) == expectedID,
-              note["type"] as? String == "normal",
+        guard XHSAppCache.isNoteID(expectedID), JSONValueUtilities.string(note["id"]) == expectedID else { return nil }
+        if note["type"] as? String == "video" {
+            var normalized = note
+            normalized["noteId"] = expectedID
+            guard var parsed = try? parseNote(normalized, fallbackURL: fallbackURL),
+                  let candidate = bestVideoCandidate(from: note), let url = streamURLs(candidate.item).first else { return nil }
+            parsed.videoURL = url
+            parsed.videoURLs = streamURLs(candidate.item)
+            parsed.videoScore = regularVideoScore(candidate)
+            parsed.videoHDRHint = nil
+            parsed.videoFromAppCache = true
+            parsed.usedAppCache = true
+            return parsed
+        }
+        guard note["type"] as? String == "normal",
               let images = note["images_list"] as? [[String: Any]], !images.isEmpty else { return nil }
         let ids = images.compactMap { JSONValueUtilities.nonEmptyString($0["fileid"]) }
         guard ids.count == images.count, Set(ids).count == ids.count else { return nil }
+        // A motion key belongs to exactly one still in this response. Never bind
+        // a duplicated key to two different images, even if their array indices agree.
+        let liveKeys = images.compactMap { originalLivePhotoFileID($0["live_photo_file_id"]) }
+        let keyCounts = Dictionary(liveKeys.map { ($0, 1) }, uniquingKeysWith: +)
         var normalized = note
         normalized["noteId"] = expectedID
         normalized["imageList"] = images.map { image -> [String: Any] in
@@ -509,8 +575,20 @@ enum XHSNativeDownloader {
         // Only this exact image's original field supplies a client fallback.
         for i in parsed.items.indices {
             parsed.items[i].imageQuality = -1
-            parsed.items[i].liveFromAppCache = parsed.items[i].liveURL != nil
             guard let image = images.first(where: { $0["fileid"] as? String == parsed.items[i].fileID }) else { continue }
+            if let key = originalLivePhotoFileID(image["live_photo_file_id"]), keyCounts[key] == 1 {
+                let originals = originalLivePhotoURLs(for: key)
+                parsed.items[i].livePhotoFileID = key
+                parsed.items[i].liveOriginalURLs = originals
+                parsed.items[i].liveURLs = orderedUniqueURLs(originals + parsed.items[i].liveURLs)
+                parsed.items[i].liveURL = parsed.items[i].liveURLs.first
+                parsed.items[i].livePhotoDeclared = true
+                // Stream audio metadata describes the playback rendition, not
+                // the original object. Probe the chosen file after downloading.
+                parsed.items[i].liveHasAudio = false
+            }
+            parsed.items[i].liveFromAppCache = parsed.items[i].liveURL != nil
+            parsed.items[i].liveAudioURLs = livePhotoAudioSourceURLs(from: image)
             parsed.items[i].appOriginalURLs = appOriginalURL(from: image, fileID: parsed.items[i].fileID).map { [$0] } ?? []
             parsed.items[i].imageURLs = orderedUniqueURLs([parsed.items[i].imageURL]
                 + parsed.items[i].appOriginalURLs)
@@ -518,9 +596,23 @@ enum XHSNativeDownloader {
         return parsed
     }
 
+    private static func originalLivePhotoFileID(_ value: Any?) -> String? {
+        guard let key = JSONValueUtilities.nonEmptyString(value),
+              key.range(of: #"^livephoto/[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { return nil }
+        return key
+    }
+
+    private static func originalLivePhotoURLs(for key: String) -> [URL] {
+        // These endpoints have been verified against the same exact cloud object.
+        // Use GET: the primary CDN can return 404 to HEAD for an available MOV.
+        ["sns-video-bd.xhscdn.com", "sns-bak-v6.xhscdn.com"].compactMap {
+            URL(string: "https://\($0)/\(key)")
+        }
+    }
+
     static func shouldRefreshClientCache(for note: NoteInfo?) -> Bool {
         guard let note else { return true }
-        guard note.type != "video" else { return false }
+        guard note.type != "video" else { return note.originalVideoURL == nil && !note.videoFromAppCache }
         return note.items.isEmpty || note.items.contains {
             $0.appOriginalURLs.isEmpty || ($0.livePhotoDeclared && !$0.liveFromAppCache)
         }
@@ -546,6 +638,8 @@ enum XHSNativeDownloader {
     private struct StreamCandidate {
         var codec: String
         var item: [String: Any]
+        var streamHDRScore: Int? = nil
+        var streamFPSScore: Int? = nil
     }
 
     private struct ImageCandidate {
@@ -557,6 +651,20 @@ enum XHSNativeDownloader {
 
     private static func bestVideoCandidate(from note: [String: Any]) -> StreamCandidate? {
         var candidates: [StreamCandidate] = []
+        // Legacy ordinary-video client details contain explicit playable variants.
+        if let video = note["video"] as? [String: Any] {
+            let variants = video["url_info_list"] as? [[String: Any]] ?? []
+            for variant in variants.isEmpty ? [video] : variants {
+                guard let url = JSONValueUtilities.nonEmptyString(variant["url"]) else { continue }
+                var item = variant
+                item["master_url"] = url
+                item["format"] = variant["desc"] ?? variant["format"]
+                let hdr = videoHDRHint(urlText: url, meta: item)
+                let desc = (JSONValueUtilities.string(variant["desc"]) ?? "").lowercased()
+                candidates.append(StreamCandidate(codec: desc.contains("265") ? "h265" : "h264", item: item,
+                    streamHDRScore: hdr, streamFPSScore: regularVideoFPSHint(item)))
+            }
+        }
         let inheritedVideoMeta = deepGet(note, keys: ["video", "media", "video"]) as? [String: Any] ?? [:]
         if let stream = deepGet(note, keys: ["video", "media", "stream"]) as? [String: Any] {
             candidates.append(contentsOf: streamCandidates(from: stream, inheritedMeta: inheritedVideoMeta))
@@ -585,10 +693,17 @@ enum XHSNativeDownloader {
             }
         }
 
-        return candidates.max(by: { streamScore($0) < streamScore($1) })
+        return candidates.filter { candidate in
+            let urls = streamURLs(candidate.item)
+            return !urls.isEmpty && urls.allSatisfy { ["http", "https"].contains($0.scheme?.lowercased() ?? "") }
+        }.max(by: { regularVideoScore($0) < regularVideoScore($1) })
     }
 
     private static func bestLivePhotoCandidate(from item: [String: Any]) -> StreamCandidate? {
+        livePhotoCandidates(from: item).max { streamScore($0) < streamScore($1) }
+    }
+
+    private static func livePhotoCandidates(from item: [String: Any]) -> [StreamCandidate] {
         // WEB_LIVEPHOTO_19 is a separately encoded, potentially watermarked rendition.
         // A watermark query parameter cannot remove a logo already encoded in its frames.
         let candidates = nestedStreamCandidates(in: item).compactMap { candidate -> StreamCandidate? in
@@ -603,7 +718,21 @@ enum XHSNativeDownloader {
             clean.item["backupUrls"] = urls.dropFirst().map(\.absoluteString)
             return clean
         }
-        return candidates.max { streamScore($0) < streamScore($1) }
+        return candidates
+    }
+
+    private static func livePhotoAudioSourceURLs(from item: [String: Any]) -> [URL] {
+        let candidates = livePhotoCandidates(from: item).sorted { lhs, rhs in
+            // Metadata orders candidates only. Actual downloaded tracks decide
+            // whether any audio can be used; absent flags never discard a source.
+            let leftAudio = streamHasAudio(lhs.item), rightAudio = streamHasAudio(rhs.item)
+            if leftAudio != rightAudio { return leftAudio }
+            let leftBitrate = JSONValueUtilities.intValue(value(in: lhs.item, keys: ["audioBitrate", "audio_bitrate"]))
+            let rightBitrate = JSONValueUtilities.intValue(value(in: rhs.item, keys: ["audioBitrate", "audio_bitrate"]))
+            if leftBitrate != rightBitrate { return leftBitrate > rightBitrate }
+            return streamScore(lhs) > streamScore(rhs)
+        }
+        return orderedUniqueURLs(candidates.flatMap { streamURLs($0.item) })
     }
 
     private static func isWatermarkedLivePhotoURL(_ url: URL) -> Bool {
@@ -642,26 +771,82 @@ enum XHSNativeDownloader {
     static func preferredNote(_ notes: [NoteInfo]) -> NoteInfo? {
         // Do not compare or combine different works returned by inconsistent pages.
         guard let identity = notes.first?.noteID else { return nil }
-        let matching = notes.filter { $0.noteID == identity }.map { note in
+        var matching = notes.filter { $0.noteID == identity }.map { note in
             var localOnly = note
             for i in localOnly.items.indices where !localOnly.items[i].liveFromAppCache {
                 localOnly.items[i].livePhotoDeclared = localOnly.items[i].livePhotoDeclared || localOnly.items[i].liveURL != nil
-                localOnly.items[i].liveURL = nil
-                localOnly.items[i].liveURLs = []
-                localOnly.items[i].liveScore = 0
-                localOnly.items[i].liveUserAgent = nil
-                localOnly.items[i].liveHasAudio = false
-                localOnly.items[i].audioURLs = []
+                localOnly.items[i].discardMotionSources()
             }
             return localOnly
+        }
+        var keyImageIDs: [String: Set<String>] = [:]
+        for note in matching {
+            for item in note.items {
+                if let key = item.livePhotoFileID { keyImageIDs[key, default: []].insert(item.fileID) }
+            }
+        }
+        for noteIndex in matching.indices {
+            for itemIndex in matching[noteIndex].items.indices {
+                guard let key = matching[noteIndex].items[itemIndex].livePhotoFileID,
+                      keyImageIDs[key, default: []].count > 1 else { continue }
+                var item = matching[noteIndex].items[itemIndex]
+                let originals = Set(item.liveOriginalURLs)
+                item.liveURLs.removeAll { originals.contains($0) }
+                item.liveURL = item.liveURLs.first
+                item.liveOriginalURLs = []
+                item.livePhotoFileID = nil
+                item.liveFromAppCache = item.liveURL != nil
+                matching[noteIndex].items[itemIndex] = item
+            }
+        }
+        var latestMotionKeys: [String: String] = [:]
+        for note in matching {
+            for item in note.items {
+                if let key = item.livePhotoFileID, latestMotionKeys[item.fileID] == nil {
+                    latestMotionKeys[item.fileID] = key
+                }
+            }
+        }
+        // A changed upload key is a different motion revision. Reject all its
+        // playback and audio sources before selecting a base snapshot, so an
+        // older high-score record cannot supply sound to the newer original.
+        for noteIndex in matching.indices {
+            for itemIndex in matching[noteIndex].items.indices {
+                let item = matching[noteIndex].items[itemIndex]
+                if let key = item.livePhotoFileID, latestMotionKeys[item.fileID] != key {
+                    matching[noteIndex].items[itemIndex].discardMotionSources()
+                }
+            }
         }
         // A client response supplements the web image order, even when its codec
         // has a higher score or its image array arrives in a different order.
         let webNotes = matching.filter { !$0.usedAppCache }
         guard var result = (webNotes.isEmpty ? matching : webNotes).max(by: noteIsLessComplete) else { return nil }
-        guard !identity.isEmpty, result.type != "video" else { return result }
+        if result.type == "video" {
+            let cached = matching.filter { $0.type == "video" && $0.videoFromAppCache }.max { $0.videoScore < $1.videoScore }
+            let original = matching.compactMap(\.originalVideoURL).first
+            result.originalVideoURL = original
+            result.videoURL = original ?? cached?.videoURL
+            result.videoURLs = orderedUniqueURLs((original.map { [$0] } ?? []) + (cached?.videoURLs ?? []))
+            result.videoFromAppCache = cached != nil
+            result.usedAppCache = cached != nil
+            result.videoHDRHint = nil
+            if let cached { result.videoScore = cached.videoScore; result.requestUserAgent = cached.requestUserAgent }
+            return result
+        }
+        guard !identity.isEmpty else { return result }
         // Cache records arrive newest first; collect their originals in that order.
-        for i in result.items.indices { result.items[i].appOriginalURLs = [] }
+        for i in result.items.indices {
+            result.items[i].appOriginalURLs = []
+            result.items[i].livePhotoFileID = nil
+            result.items[i].liveOriginalURLs = []
+        }
+        var originalURLsByFileID: [String: Set<URL>] = [:]
+        for note in matching {
+            for item in note.items {
+                originalURLsByFileID[item.fileID, default: []].formUnion(item.liveOriginalURLs)
+            }
+        }
         for note in matching where note.type == result.type {
             for item in note.items where !item.fileID.isEmpty {
                 guard note.items.filter({ $0.fileID == item.fileID }).count == 1 else { continue }
@@ -701,6 +886,25 @@ enum XHSNativeDownloader {
                         result.items[i].liveURLs.append(contentsOf: item.liveURLs.filter { !result.items[i].liveURLs.contains($0) })
                         result.items[i].audioURLs.formUnion(item.audioURLs)
                     }
+                    // Original provenance outranks any playback score, audio
+                    // flag, codec or advertised dimensions. Snapshots arrive
+                    // newest first; retain that exact key if older ones disagree.
+                    if item.liveFromAppCache, let key = item.livePhotoFileID,
+                       result.items[i].livePhotoFileID == nil || result.items[i].livePhotoFileID == key {
+                        result.items[i].livePhotoFileID = key
+                        result.items[i].liveOriginalURLs = orderedUniqueURLs(result.items[i].liveOriginalURLs + item.liveOriginalURLs)
+                    }
+                    if !result.items[i].liveOriginalURLs.isEmpty {
+                        let allOriginals = originalURLsByFileID[item.fileID] ?? []
+                        result.items[i].liveURLs = orderedUniqueURLs(result.items[i].liveOriginalURLs
+                            + result.items[i].liveURLs.filter { !allOriginals.contains($0) })
+                        result.items[i].liveURL = result.items[i].liveURLs.first
+                        result.items[i].liveFromAppCache = true
+                        result.items[i].liveHasAudio = false
+                    }
+                    if item.liveFromAppCache {
+                        result.items[i].liveAudioURLs = orderedUniqueURLs(result.items[i].liveAudioURLs + item.liveAudioURLs)
+                    }
                     result.items[i].livePhotoDeclared = result.items[i].livePhotoDeclared || item.livePhotoDeclared
                 } else if indices.isEmpty, !result.items.contains(where: { $0.index == item.index }) {
                     var extra = item
@@ -736,7 +940,9 @@ enum XHSNativeDownloader {
                 candidates.append(contentsOf: values.map {
                     var item = $0
                     inheritVideoHDRMetadata(from: inheritedMeta, into: &item)
-                    return StreamCandidate(codec: key, item: item)
+                    return StreamCandidate(codec: key, item: item,
+                        streamHDRScore: videoHDRHint(urlText: streamURL($0)?.absoluteString ?? "", meta: $0),
+                        streamFPSScore: regularVideoFPSHint($0))
                 })
             }
         }
@@ -868,6 +1074,39 @@ enum XHSNativeDownloader {
         }
         var seen = Set<String>()
         return values.compactMap { URL(string: MediaFileUtilities.formatURL($0)) }.filter { seen.insert($0.absoluteString).inserted }
+    }
+
+    private static func regularVideoScore(_ candidate: StreamCandidate) -> Int64 {
+        let item = candidate.item
+        let width = min(max(JSONValueUtilities.intValue(item["width"]), 0), 16_384)
+        let height = min(max(JSONValueUtilities.intValue(item["height"]), 0), 16_384)
+        let bitrate = min(max(JSONValueUtilities.intValue(value(in: item, keys: ["videoBitrate", "video_bitrate", "avgBitrate", "avg_bitrate"])), 0), 1_000_000_000)
+        let hdr = min(max(candidate.streamHDRScore ?? 0, 0), 4)
+        let fps = min(max(candidate.streamFPSScore ?? 0, 0), 240)
+        // Rank stream-level HDR, resolution, frame rate, then bitrate. Bounds
+        // keep every tier separate and the total safely within Int64.
+        return Int64(hdr) * 1_000_000_000_000_000_000
+            + Int64(width) * Int64(height) * 1_000_000_000
+            + Int64(fps) * 1_000_001 + Int64(bitrate / 1_000)
+    }
+
+    private static func regularVideoFPSHint(_ item: [String: Any]) -> Int {
+        var values: [Int] = []
+        for key in ["fps", "frameRate", "frame_rate"] {
+            if let value = Double(JSONValueUtilities.string(item[key]) ?? ""),
+               value.isFinite, value >= 1, value <= 240 {
+                values.append(Int(value.rounded()))
+            }
+        }
+        if let fps = values.max() { return fps }
+        let text = ["desc", "format", "streamDesc", "stream_desc", "fpsType"].compactMap {
+            JSONValueUtilities.nonEmptyString(item[$0])
+        }.joined(separator: " ").lowercased()
+        values = RegexUtilities.allMatches(#"\d{2,3}\s*fps"#, in: text).compactMap {
+            guard let fps = Int($0.filter(\.isNumber)), fps <= 240 else { return nil }
+            return fps
+        }
+        return values.max() ?? 0
     }
 
     private static func streamScore(_ candidate: StreamCandidate) -> Int64 {
@@ -1078,7 +1317,9 @@ enum XHSNativeDownloader {
         // All primary and backup URLs belong to this exact client motion source.
         return DownloadTask(urls: urls,
                             destination: destination, requestUserAgent: item.liveUserAgent ?? userAgent,
-                            videoHDRHint: nil, isLivePhoto: true)
+                            videoHDRHint: nil, isLivePhoto: true,
+                            originalLivePhotoURLs: Set(item.liveOriginalURLs),
+                            livePhotoAudioURLs: item.liveAudioURLs)
     }
 
     static func download(
@@ -1159,8 +1400,13 @@ enum XHSNativeDownloader {
                 try FileManager.default.createDirectory(at: task.destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 for (sourceIndex, sourceURL) in task.urls.enumerated() {
                     do {
-                        if sourceIndex == 0 {
-                            await DownloaderInfra.reportStatus(task.isImage ? "正在下载首选原图" : "正在下载首选视频")
+                        if sourceURL == task.originalVideoURL {
+                            await DownloaderInfra.reportStatus("正在下载云端原视频")
+                        } else if task.usesClientVideoSource {
+                            await DownloaderInfra.reportStatus(sourceIndex == 0 ? "正在下载客户端缓存视频" : "正在尝试客户端缓存备用视频源")
+                        } else if sourceIndex == 0 {
+                            await DownloaderInfra.reportStatus(task.isImage ? "正在下载首选原图"
+                                : (task.originalLivePhotoURLs.contains(sourceURL) ? "正在下载云端原始实况" : "正在下载首选视频"))
                         } else {
                             await DownloaderInfra.reportStatus("正在切换备用源")
                             let isWebPSource = sourceURL.absoluteString.lowercased().contains("webp")
@@ -1170,10 +1416,16 @@ enum XHSNativeDownloader {
                         }
                         try await downloadOnceAsync(sourceURL, to: temporaryURL, requestUserAgent: task.requestUserAgent,
                                                     progress: progress, transferPolicy: transferPolicy)
-                        await DownloaderInfra.reportStatus(task.isImage ? "正在校验图片" : "正在校验视频")
+                        await DownloaderInfra.reportStatus(task.isImage ? "正在校验图片" : (task.originalVideoURL != nil ? "正在校验云端原视频" : task.usesClientVideoSource ? "正在校验客户端缓存视频" : "正在校验视频"))
                         try await MediaFileUtilities.validateMedia(temporaryURL,
                             expectedSuffix: task.isImage ? "jpg" : task.destination.pathExtension)
-                        let hasAudio = task.isLivePhoto ? try await livePhotoHasAudio(at: temporaryURL) : false
+                        let isOriginal = task.isLivePhoto && task.originalLivePhotoURLs.contains(sourceURL)
+                        var hasAudio = task.isLivePhoto ? try await livePhotoHasAudio(at: temporaryURL) : false
+                        var recoveredAudio = false
+                        if task.isLivePhoto, !hasAudio {
+                            recoveredAudio = try await recoverLivePhotoAudio(task, at: temporaryURL, excluding: sourceURL)
+                            hasAudio = recoveredAudio
+                        }
                         try Task.checkCancellation()
                         await DownloaderInfra.reportStatus(task.isImage ? "图片校验完成，正在整理文件" : "视频校验完成，正在整理文件")
                         let suffix = MediaFileUtilities.sniffSuffix(temporaryURL, defaultSuffix: task.destination.pathExtension.isEmpty ? "bin" : task.destination.pathExtension)
@@ -1185,7 +1437,9 @@ enum XHSNativeDownloader {
                             try? await remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
                         }
                         task.displayOrder?.write(to: finalURL)
-                        return DownloadResult(isLivePhoto: task.isLivePhoto, hasAudio: hasAudio)
+                        return DownloadResult(isLivePhoto: task.isLivePhoto, hasAudio: hasAudio,
+                            usedOriginalLivePhoto: isOriginal, recoveredAudio: recoveredAudio,
+                            sourceURL: sourceURL, fromAppCache: task.usesClientVideoSource)
                     } catch {
                         try Task.checkCancellation()
                         if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
@@ -1213,9 +1467,143 @@ enum XHSNativeDownloader {
         throw lastError ?? NSError(domain: "XHSDownloader", code: 7, userInfo: [NSLocalizedDescriptionKey: "下载失败：\(task.destination.lastPathComponent)"])
     }
 
+    /// Ordinary videos try the upload first. Only a detail record bound to this
+    /// exact note can supply a client fallback; public playback variants never do.
+    static func downloadVideo(
+        _ note: NoteInfo, task: DownloadTask, shareURL: URL,
+        progress: DownloaderInfra.ProgressHandler? = nil,
+        cacheLoader: (@Sendable () async throws -> NoteInfo?)? = nil
+    ) async throws -> DownloadResult {
+        try Task.checkCancellation()
+        var cloudError: Error?
+        if let original = note.originalVideoURL {
+            var primary = task
+            primary.urls = [original]
+            primary.originalVideoURL = original
+            primary.usesClientVideoSource = false
+            primary.videoHDRHint = nil
+            do { return try await download(primary, retries: 0, progress: progress) }
+            catch {
+                try Task.checkCancellation()
+                if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
+                cloudError = error
+                await DownloaderInfra.reportStatus("云端原视频不可用，正在读取客户端缓存")
+            }
+        }
+        var cached: NoteInfo?
+        if note.videoFromAppCache {
+            var existing = note
+            existing.videoURLs = note.videoURLs.filter { $0 != note.originalVideoURL }
+            existing.videoURL = existing.videoURLs.first
+            if existing.hasMedia { cached = existing }
+        }
+        if cached == nil {
+            if let cacheLoader { cached = try await cacheLoader() }
+            else { cached = try await loadClientVideo(noteID: note.noteID, shareURL: shareURL) }
+        }
+        try Task.checkCancellation()
+        guard let cached, cached.noteID == note.noteID, cached.type == "video", cached.videoFromAppCache,
+              !cached.videoURLs.isEmpty else {
+            let detail = cloudError.map { "（\($0.localizedDescription)）" } ?? ""
+            throw NSError(domain: "XHSDownloader", code: 8, userInfo: [NSLocalizedDescriptionKey: "云端原视频不可用\(detail)，客户端缓存也没有同笔记的可用视频来源。请在小红书客户端打开该笔记后重试。"])
+        }
+        var fallback = task
+        fallback.urls = cached.videoURLs
+        fallback.requestUserAgent = cached.requestUserAgent
+        fallback.videoHDRHint = nil
+        fallback.originalVideoURL = nil
+        fallback.usesClientVideoSource = true
+        return try await download(fallback, progress: progress)
+    }
+
+    private static func loadClientVideo(noteID: String, shareURL: URL) async throws -> NoteInfo? {
+        guard XHSAppCache.isNoteID(noteID) else { return nil }
+        func readCache() -> NoteInfo? {
+            preferredNote(XHSAppCache.notes(noteID: noteID, roots: XHSAppCache.cacheRoots()).compactMap {
+                parseAppNote($0, expectedID: noteID, fallbackURL: shareURL)
+            }.filter { $0.type == "video" })
+        }
+        try Task.checkCancellation()
+        if let cached = readCache(), cached.hasMedia { return cached }
+        await DownloaderInfra.reportStatus("正在等待客户端缓存视频来源")
+        guard await XHSAppCache.openNote(noteID, shareURL: shareURL) else { return nil }
+        for _ in 0..<8 {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .seconds(1))
+            if let cached = readCache(), cached.hasMedia { return cached }
+        }
+        try Task.checkCancellation()
+        return nil
+    }
+
     static func livePhotoHasAudio(at url: URL) async throws -> Bool {
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetOutOfBandMIMETypeKey": "video/mp4"])
+        let suffix = MediaFileUtilities.sniffSuffix(url, defaultSuffix: "mp4")
+        let asset = AVURLAsset(url: url, options: [AVURLAssetOverrideMIMETypeKey: suffix == "mov" ? "video/quicktime" : "video/mp4"])
         return try await !asset.loadTracks(withMediaType: .audio).isEmpty
+    }
+
+    static func recoverLivePhotoAudio(_ task: DownloadTask, at original: URL, excluding selectedURL: URL,
+                                     cacheRoots: [URL]? = nil) async throws -> Bool {
+        let candidates = orderedUniqueURLs(task.livePhotoAudioURLs + task.urls)
+            .filter { !task.originalLivePhotoURLs.contains($0) }
+        guard !candidates.isEmpty else { return false }
+        let donor = task.destination.appendingPathExtension("audio-source.part")
+        let merged = task.destination.appendingPathExtension("audio-merged.part")
+        defer {
+            try? FileManager.default.removeItem(at: donor)
+            try? FileManager.default.removeItem(at: merged)
+        }
+        enum Source { case cloud, localCache }
+        // Try every cloud donor before reading a local one. A successful download
+        // can still lack usable audio; the selected client URL can have a cache
+        // donor even when no other playback URL exists.
+        for source in [Source.cloud, .localCache] {
+            let urls: [URL]
+            let roots: [URL]
+            switch source {
+            case .cloud:
+                urls = candidates.filter { $0 != selectedURL }
+                roots = []
+            case .localCache:
+                urls = candidates
+                roots = cacheRoots ?? XHSAppCache.cacheRoots().map {
+                    $0.deletingLastPathComponent().appendingPathComponent("com.xiaohongshu.livephoto_netcache")
+                }
+            }
+            for url in urls {
+                try Task.checkCancellation()
+                defer {
+                    try? FileManager.default.removeItem(at: donor)
+                    try? FileManager.default.removeItem(at: merged)
+                }
+                do {
+                    switch source {
+                    case .cloud:
+                        await DownloaderInfra.reportStatus("正在核验同图云端实况音轨")
+                        try await downloadOnceAsync(url, to: donor, requestUserAgent: task.requestUserAgent)
+                    case .localCache:
+                        guard try XHSCachedMotionReader.copyMotion(for: url, cacheRoots: roots, to: donor) else { continue }
+                        await DownloaderInfra.reportStatus("正在读取同图实况的完整缓存音轨")
+                    }
+                    try await MediaFileUtilities.validateMedia(donor, expectedSuffix: "mp4")
+                    guard try await livePhotoHasAudio(at: donor) else { continue }
+                    await DownloaderInfra.reportStatus("正在无损补入同图音轨")
+                    guard try await XHSLivePhotoAudioRecovery.addingAudio(from: donor, to: original, output: merged) else { continue }
+                    try await MediaFileUtilities.validateMedia(merged, expectedSuffix: "mov")
+                    guard try await livePhotoHasAudio(at: merged) else { continue }
+                    try Task.checkCancellation()
+                    _ = try FileManager.default.replaceItemAt(original, withItemAt: merged)
+                    return true
+                } catch {
+                    try Task.checkCancellation()
+                    if DownloaderHTTPCompatibility.isCancellation(error) { throw error }
+                    // A failed donor never replaces the original visual track
+                    // or makes a naturally silent Live Photo fail.
+                }
+            }
+        }
+        await DownloaderInfra.reportStatus("未取得可用音轨，保留原始无声实况")
+        return false
     }
 
     private static func remuxHDRVideoIfNeeded(at url: URL, hint: VideoHDRHint) async throws {

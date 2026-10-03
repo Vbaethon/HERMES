@@ -26,8 +26,57 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
     }
 }
 
+/// Read compressed track samples to detect a video or audio re-encode during
+/// passthrough composition. Container offsets and atom ordering may differ.
+private func compressedTrackSamples(at url: URL, mediaType: AVMediaType) async throws -> [Data] {
+    let asset = AVURLAsset(url: url)
+    guard let track = try await asset.loadTracks(withMediaType: mediaType).first else { return [] }
+    let reader = try AVAssetReader(asset: asset)
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+    output.alwaysCopiesSampleData = false
+    reader.add(output)
+    guard reader.startReading() else { throw reader.error ?? NSError(domain: "RegressionSampleReader", code: 1) }
+    var samples: [Data] = []
+    while let sample = output.copyNextSampleBuffer() {
+        let count = CMSampleBufferGetNumSamples(sample)
+        if count == 0 { continue } // Native timed-metadata markers can have no payload.
+        guard let buffer = CMSampleBufferGetDataBuffer(sample) else {
+            throw NSError(domain: "RegressionSampleReader", code: 2)
+        }
+        var offset = 0
+        // AVAssetReader may batch AAC packets differently for MP4 and MOV.
+        // Compare packets rather than the arbitrary sample-buffer boundaries.
+        for index in 0..<count {
+            let dataLength = CMSampleBufferGetSampleSize(sample, at: index)
+            guard dataLength > 0 else { throw NSError(domain: "RegressionSampleReader", code: 4) }
+            var data = Data(count: dataLength)
+            let status = data.withUnsafeMutableBytes { bytes in
+                CMBlockBufferCopyDataBytes(buffer, atOffset: offset, dataLength: dataLength, destination: bytes.baseAddress!)
+            }
+            guard status == noErr else { throw NSError(domain: "RegressionSampleReader", code: Int(status)) }
+            samples.append(data)
+            offset += dataLength
+        }
+    }
+    if reader.status == .failed { throw reader.error ?? NSError(domain: "RegressionSampleReader", code: 3) }
+    return samples
+}
+
+private func livePhotoContentIdentifier(at url: URL) async throws -> String? {
+    let metadata = try await AVURLAsset(url: url).load(.metadata)
+    guard let item = metadata.first(where: { $0.identifier?.rawValue == "mdta/com.apple.quicktime.content.identifier" }) else { return nil }
+    return try await item.load(.stringValue)
+}
+
+private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
+    guard let track = try await AVURLAsset(url: url).loadTracks(withMediaType: .audio).first,
+          let format = try await track.load(.formatDescriptions).first else { return nil }
+    return CMFormatDescriptionGetMediaSubType(format)
+}
+
 @main struct DownloadRegression {
     static func main() async throws {
+        try XHSCachedMotionRegression.run()
         typealias D = DouyinNativeDownloader
         let a = URL(string: "https://example.com/a.mp4")!
         let b = URL(string: "https://example.com/b.mp4")!
@@ -97,10 +146,188 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         precondition(richer.items[0].imageURL == highQuality.items[0].imageURL)
         var videoDesktop = X.NoteInfo(noteID:"video",type:"video",videoURL:a,videoScore:100)
         videoDesktop.requestUserAgent = X.desktopUserAgent
+        videoDesktop.videoFromAppCache = true
+        videoDesktop.usedAppCache = true
         var videoMobile = videoDesktop
         videoMobile.requestUserAgent = X.mobileUserAgent
         videoMobile.videoScore = 1
         precondition(X.preferredNote([videoDesktop,videoMobile])!.requestUserAgent == X.desktopUserAgent)
+
+        // Ordinary videos use their cloud upload key even when playback metadata
+        // advertises a smaller web rendition or a highly scored HDR variant.
+        let originVideoID = "fedcba987654321001234567"
+        let originFallback = URL(string: "https://www.xiaohongshu.com/discovery/item/\(originVideoID)")!
+        let webPlaybackURL = "https://sns-video.xhscdn.com/stream/1/web-720p.mp4"
+        let hdrPlaybackURL = "https://sns-video.xhscdn.com/playback-hdr10.mp4"
+        func originVideoNote(_ key: Any?) -> [String: Any] {
+            var consumer: [String: Any] = [:]
+            if let key { consumer["originVideoKey"] = key }
+            return ["noteId": originVideoID, "type": "video", "hdr_type": 2,
+                "user": ["nickname": "Video fixture author", "redId": "video.fixture.account"],
+                "video": ["consumer": consumer, "media": ["video": ["hdr_type": 2], "stream": [
+                    "h264": [["masterUrl": webPlaybackURL, "backupUrls": ["https://sns-bak.xhscdn.com/web-720p.mp4"],
+                        "width": 720, "height": 1280, "videoBitrate": 900_000]],
+                    "h265": [["masterUrl": hdrPlaybackURL, "width": 2160, "height": 3840,
+                        "videoBitrate": 20_000_000, "hdrType": 2, "dynamicRange": "HDR10", "fps": 60]]
+                ]]]]
+        }
+        for key in ["1040g0_fixture-raw", "spectrum/1040g0_fixture-raw"] {
+            let cloudVideo = try X.parseNote(originVideoNote(key), fallbackURL: originFallback)
+            let expectedOriginal = URL(string: "https://sns-video-bd.xhscdn.com/" + key)!
+            precondition(cloudVideo.originalVideoURL == expectedOriginal && cloudVideo.videoURL == expectedOriginal && cloudVideo.videoURLs == [expectedOriginal],
+                "The exact original upload key must be the only video source; web and HDR playback renditions cannot be fallbacks")
+            precondition(cloudVideo.items.isEmpty && cloudVideo.videoHDRHint == nil,
+                "Playback HDR hints must not trigger remuxing or infer color information for the untouched upload")
+            precondition(!cloudVideo.usedAppCache && !X.shouldRefreshClientCache(for: cloudVideo),
+                "An available cloud original satisfies source discovery without a forced client-cache refresh")
+        }
+        let invalidOriginKeys: [Any?] = [nil, "", "/leading-slash", "../other", "spectrum/../other",
+            "https://sns-video.xhscdn.com/other", "key?rendition=720", "key#fragment", "key with spaces",
+            "key\nwith-newline", 12345, true, NSNull(), ["url": webPlaybackURL], ["wrong-key"]]
+        for key in invalidOriginKeys {
+            let unavailableOriginal = try X.parseNote(originVideoNote(key), fallbackURL: originFallback)
+            precondition(unavailableOriginal.noteID == originVideoID && unavailableOriginal.type == "video")
+            precondition(!unavailableOriginal.hasMedia && unavailableOriginal.originalVideoURL == nil
+                && unavailableOriginal.videoURL == nil && unavailableOriginal.videoURLs.isEmpty,
+                "Missing or malformed original keys must preserve identity for exact-note cache lookup without accepting a playback or arbitrary URL")
+            precondition(X.shouldRefreshClientCache(for: unavailableOriginal),
+                "A regular video without an original or exact-note cache source must refresh the client cache")
+        }
+        let cache1080URL = URL(string: "https://sns-video.xhscdn.com/cache-video-1080p.mp4")!
+        let cache1080Backup = URL(string: "https://sns-video-bak.xhscdn.com/cache-video-1080p.mp4")!
+        let cache720URL = URL(string: "https://sns-video.xhscdn.com/stream/1/cache-video-720p.mp4")!
+        func appVideoSnapshot(_ identity: String = originVideoID, highResolution: Bool = true) -> [String: Any] {
+            var renditions: [[String: Any]] = [["url": cache720URL.absoluteString, "width": 720, "height": 1280,
+                "avg_bitrate": 1_000_000, "desc": "720P H264"]]
+            if highResolution {
+                renditions.append(["url": cache1080URL.absoluteString, "backup_urls": [cache1080Backup.absoluteString],
+                    "width": 1080, "height": 1920, "avg_bitrate": 2_500_000, "desc": "1080P H264"])
+            }
+            return ["id": identity, "type": "video", "video": ["url": cache720URL.absoluteString, "url_info_list": renditions]]
+        }
+        let cachedVideo = X.parseAppNote(appVideoSnapshot(), expectedID: originVideoID, fallbackURL: originFallback)!
+        precondition(cachedVideo.usedAppCache && cachedVideo.videoFromAppCache && cachedVideo.originalVideoURL == nil)
+        precondition(cachedVideo.videoURL == cache1080URL && cachedVideo.videoURLs == [cache1080URL, cache1080Backup],
+            "A cached 1080p video must outrank a /stream/1/ 720p variant and retain only its explicit backups")
+        var smallerCachedVideo = X.parseAppNote(appVideoSnapshot(highResolution: false), expectedID: originVideoID, fallbackURL: originFallback)!
+        smallerCachedVideo.requestUserAgent = X.desktopUserAgent
+        precondition(X.preferredNote([smallerCachedVideo, cachedVideo])!.videoURL == cache1080URL,
+            "Desktop provenance and playback path bonuses must not make a smaller cache video win")
+        let noOriginalVideo = try X.parseNote(originVideoNote(nil), fallbackURL: originFallback)
+        let cacheOnlyVideo = X.preferredNote([noOriginalVideo, cachedVideo])!
+        precondition(cacheOnlyVideo.videoURL == cache1080URL && cacheOnlyVideo.videoURLs == [cache1080URL, cache1080Backup]
+            && cacheOnlyVideo.videoFromAppCache && cacheOnlyVideo.usedAppCache,
+            "An unavailable original must use only the highest-quality exact-note client-cache rendition")
+        precondition(cacheOnlyVideo.author == "Video fixture author" && cacheOnlyVideo.userID == "video.fixture.account",
+            "Client video selection must preserve author and account metadata from the matching web note")
+        precondition(!X.shouldRefreshClientCache(for: cacheOnlyVideo))
+        let originalVideo = try X.parseNote(originVideoNote("spectrum/original_fixture"), fallbackURL: originFallback)
+        let preferredOriginal = X.preferredNote([originalVideo, smallerCachedVideo, cachedVideo])!
+        precondition(preferredOriginal.originalVideoURL == originalVideo.originalVideoURL
+            && preferredOriginal.videoURL == originalVideo.videoURL
+            && preferredOriginal.videoURLs == [originalVideo.videoURL!, cache1080URL, cache1080Backup],
+            "The cloud original must remain first with only the best exact-note client rendition as its fallback")
+        precondition(preferredOriginal.videoHDRHint == nil, "Cached playback metadata must not trigger remuxing of raw original bytes")
+        for forbidden in [webPlaybackURL, hdrPlaybackURL, cache720URL.absoluteString] {
+            precondition(!preferredOriginal.videoURLs.contains(URL(string: forbidden)!))
+        }
+        precondition(X.parseAppNote(appVideoSnapshot(), expectedID: "ffffffffffffffffffffffff", fallbackURL: originFallback) == nil)
+        let unrelatedVideo = X.parseAppNote(appVideoSnapshot("ffffffffffffffffffffffff"),
+            expectedID: "ffffffffffffffffffffffff", fallbackURL: originFallback)!
+        precondition(X.preferredNote([originalVideo, unrelatedVideo])!.videoURLs == originalVideo.videoURLs,
+            "A cached video belonging to another note must never become an original's fallback")
+        for malformedVideo: [String: Any] in [[:], ["url_info_list": []], ["url": "file:///tmp/unrelated.mp4"],
+            ["url_info_list": [["url": "not a video URL", "width": 1080, "height": 1920]]]] {
+            precondition(X.parseAppNote(["id": originVideoID, "type": "video", "video": malformedVideo],
+                expectedID: originVideoID, fallbackURL: originFallback) == nil,
+                "Malformed client video records must not count as fallback sources")
+        }
+        let slowVideoURL = URL(string: "https://sns-video.xhscdn.com/client-variant-slow.mp4")!
+        let fastVideoURL = URL(string: "https://sns-video.xhscdn.com/client-variant-fast.mp4")!
+        func frameRateVariant(_ url: URL, bitrate: Int, fpsKey: String? = nil, fps: Int? = nil,
+            description: String = "1080P H265 HDR10") -> [String: Any] {
+            var item: [String: Any] = ["url": url.absoluteString, "master_url": url.absoluteString,
+                "width": 1080, "height": 1920, "avg_bitrate": bitrate, "desc": description, "format": "HDR10"]
+            if let fpsKey, let fps { item[fpsKey] = fps }
+            return item
+        }
+        func frameRateClient(_ variants: [[String: Any]], legacy: Bool = false,
+            sourceMeta: [String: Any] = [:]) -> X.NoteInfo {
+            let video: [String: Any] = legacy ? ["url_info_list": variants]
+                : ["media": ["video": sourceMeta, "stream": ["h265": variants]]]
+            return X.parseAppNote(["id": originVideoID, "type": "video", "video": video],
+                expectedID: originVideoID, fallbackURL: originFallback)!
+        }
+        for fpsKey in ["fps", "frameRate", "frame_rate"] {
+            let highFrameRate = frameRateClient([
+                frameRateVariant(slowVideoURL, bitrate: 8_000_000, fpsKey: fpsKey, fps: 30),
+                frameRateVariant(fastVideoURL, bitrate: 1_000_000, fpsKey: fpsKey, fps: 60)
+            ])
+            precondition(highFrameRate.videoURL == fastVideoURL && highFrameRate.videoURLs == [fastVideoURL],
+                "At equal stream HDR and resolution, explicit 60fps must outrank 30fps even when the latter has a higher bitrate")
+        }
+        let legacyHighFrameRate = frameRateClient([
+            frameRateVariant(slowVideoURL, bitrate: 8_000_000, description: "1080P H265 HDR10 30FPS"),
+            frameRateVariant(fastVideoURL, bitrate: 1_000_000, description: "1080P H265 HDR10 60FPS")
+        ], legacy: true)
+        precondition(legacyHighFrameRate.videoURL == fastVideoURL,
+            "Legacy url_info_list desc must supply a stream's 60FPS hint without relying on URL filenames")
+        for textKey in ["format", "streamDesc", "stream_desc", "fpsType"] {
+            var slowText = frameRateVariant(slowVideoURL, bitrate: 8_000_000)
+            var fastText = frameRateVariant(fastVideoURL, bitrate: 1_000_000)
+            slowText[textKey] = "HDR10 30FPS"
+            fastText[textKey] = "HDR10 60FPS"
+            precondition(frameRateClient([slowText, fastText]).videoURL == fastVideoURL,
+                "A stream's format/description/type FPS hints must participate in ordinary video selection")
+        }
+        let explicitFPSWins = frameRateClient([
+            frameRateVariant(slowVideoURL, bitrate: 8_000_000, fpsKey: "fps", fps: 30, description: "1080P H265 HDR10 240FPS"),
+            frameRateVariant(fastVideoURL, bitrate: 1_000_000, fpsKey: "fps", fps: 60, description: "1080P H265 HDR10 30FPS")
+        ])
+        precondition(explicitFPSWins.videoURL == fastVideoURL,
+            "A valid explicit stream frame rate must take precedence over conflicting description text")
+        for invalidFPS: Any in ["unknown", "NaN", Double.nan, Double.infinity, "1e100", -1, 0, 999_999, NSNull()] {
+            var unknownFPS = frameRateVariant(slowVideoURL, bitrate: 8_000_000)
+            unknownFPS["fps"] = invalidFPS
+            precondition(frameRateClient([
+                unknownFPS, frameRateVariant(fastVideoURL, bitrate: 1_000_000, fpsKey: "fps", fps: 60)
+            ]).videoURL == fastVideoURL,
+                "Unknown, non-finite and out-of-range FPS must not crash or outrank a valid 60fps stream")
+        }
+        var smallHighFPS = frameRateVariant(fastVideoURL, bitrate: 8_000_000, fpsKey: "fps", fps: 120)
+        smallHighFPS["width"] = 720
+        smallHighFPS["height"] = 1280
+        precondition(frameRateClient([
+            smallHighFPS, frameRateVariant(slowVideoURL, bitrate: 1_000_000, fpsKey: "fps", fps: 30)
+        ]).videoURL == slowVideoURL, "At equal stream HDR, resolution must outrank FPS")
+        let sourceFPSOnly = frameRateClient([
+            frameRateVariant(slowVideoURL, bitrate: 8_000_000),
+            frameRateVariant(fastVideoURL, bitrate: 1_000_000, fpsKey: "fps", fps: 60)
+        ], sourceMeta: ["fps": 120, "frameRate": 120, "frame_rate": 120, "hdr_type": 2])
+        precondition(sourceFPSOnly.videoURL == fastVideoURL,
+            "An upload-level 120fps marker must not be inherited by a stream whose own frame rate is unknown")
+        var sourceOnlySDR = frameRateVariant(fastVideoURL, bitrate: 8_000_000, fpsKey: "fps", fps: 60, description: "1080P H265 SDR")
+        sourceOnlySDR["format"] = "SDR"
+        let actualHDRStream = frameRateClient([
+            sourceOnlySDR, frameRateVariant(slowVideoURL, bitrate: 1_000_000, fpsKey: "fps", fps: 30)
+        ], sourceMeta: ["hdr_type": 2, "dynamic_range": "HDR10", "fps": 120])
+        precondition(actualHDRStream.videoURL == slowVideoURL,
+            "Stream HDR must outrank FPS; a source-only HDR marker must not promote the SDR 60fps stream")
+        let originalWith60FPSFallback = X.preferredNote([originalVideo, legacyHighFrameRate])!
+        precondition(originalWith60FPSFallback.videoURL == originalVideo.videoURL
+            && originalWith60FPSFallback.videoURLs == [originalVideo.videoURL!, fastVideoURL]
+            && originalWith60FPSFallback.videoHDRHint == nil,
+            "A 60fps HDR cache candidate must remain a fallback behind the same note's untouched cloud original")
+        var otherNote60FPS = legacyHighFrameRate
+        otherNote60FPS.noteID = "ffffffffffffffffffffffff"
+        var otherNoteOriginal = try X.parseNote(originVideoNote("spectrum/other_note_original"), fallbackURL: originFallback)
+        otherNoteOriginal.noteID = otherNote60FPS.noteID
+        precondition(X.preferredNote([originalVideo, otherNoteOriginal, otherNote60FPS])!.videoURLs == originalVideo.videoURLs,
+            "An unrelated note's original and 60fps HDR cache stream must never be treated as versions of this work")
+        precondition(!X.preferredNote([noOriginalVideo, otherNote60FPS])!.hasMedia,
+            "A missing original cannot be rescued by another note's higher-specification client video")
+        print("PASS: XHS client video FPS ranks after stream HDR/resolution and before bitrate; stream-only hints and exact-note original priority")
+        print("PASS: XHS regular video prefers the exact cloud original, then highest-quality exact-note client cache without web fallback")
 
         // Client snapshots use a different schema and carry the AAC motion source.
         // All images in the real response report index=0; bind only by unique fileid.
@@ -154,6 +381,172 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         let watermarked = X.parseAppNote(["id":noteID,"type":"normal","images_list":[misleading]],expectedID:noteID,fallbackURL:fallback)!
         precondition(watermarked.items[0].liveURL == nil && watermarked.items[0].livePhotoDeclared)
         print("PASS: exact-ID client Live Photos with or without audio metadata; no web motion fallback or watermarked rendition")
+
+        // The client's upload key is a separate source from its playback stream.
+        // Keep that key bound to the same note and unique still-image fileid.
+        let sourceKeys = [
+            "livephoto/1040g398325rhvd944q8g5onncaqnqnmqsnpi001",
+            "livephoto/1040g398325rhvd944q8g5onncaqnqnmqsnpi002"
+        ]
+        func liveOriginalURLs(_ key: String) -> [URL] {
+            [URL(string: "https://sns-video-bd.xhscdn.com/" + key)!,
+             URL(string: "https://sns-bak-v6.xhscdn.com/" + key)!]
+        }
+        func originalAppImage(_ number: Int, stream: Bool = true, audio: Bool = false) -> [String: Any] {
+            var image = appImage(number, audio: audio)
+            image["live_photo_file_id"] = sourceKeys[number - 1]
+            if !stream { image.removeValue(forKey: "live_photo") }
+            return image
+        }
+        func originalClient(_ images: [[String: Any]], identity: String? = nil) -> X.NoteInfo? {
+            let exactID = identity ?? noteID
+            return X.parseAppNote(["id": exactID, "type": "normal", "images_list": images],
+                expectedID: exactID, fallbackURL: fallback)
+        }
+        let sourceClient = originalClient([originalAppImage(2), originalAppImage(1)])!
+        for media in sourceClient.items {
+            let number = media.fileID == "image-1" ? 1 : 2
+            let originals = liveOriginalURLs(sourceKeys[number - 1])
+            precondition(media.livePhotoFileID == sourceKeys[number - 1])
+            precondition(media.liveOriginalURLs == originals && media.liveURL == originals[0])
+            precondition(Array(media.liveURLs.prefix(originals.count)) == originals,
+                "Upload originals must precede the exact client's playback stream")
+            precondition(media.liveURLs.contains(URL(string: "https://sns-video.xhscdn.com/client-\(number).mp4")!))
+            precondition(media.liveFromAppCache && media.livePhotoDeclared && !media.liveHasAudio,
+                "A silent upload source is usable without inventing audio metadata")
+            let task = X.livePhotoDownloadTask(media, destination: URL(fileURLWithPath: "/tmp/source-\(number).mp4"))!
+            precondition(task.urls == media.liveURLs && task.originalLivePhotoURLs == Set(originals),
+                "The transfer must distinguish upload originals from playback fallbacks")
+        }
+        let keyOnlyClient = originalClient([originalAppImage(1, stream: false)])!
+        let keyOnly = keyOnlyClient.items[0]
+        precondition(keyOnly.liveURL == liveOriginalURLs(sourceKeys[0])[0] && keyOnly.livePhotoDeclared)
+        precondition(keyOnly.liveURLs == liveOriginalURLs(sourceKeys[0]) && keyOnly.liveFromAppCache)
+        precondition(!X.shouldRefreshClientCache(for: keyOnlyClient),
+            "An exact upload key is a complete motion source even when stream metadata is absent")
+        precondition(X.livePhotoDownloadTask(keyOnly, destination: URL(fileURLWithPath: "/tmp/key-only.mp4")) != nil)
+
+        let highSilentStream = URL(string: "https://sns-video.xhscdn.com/high-silent.mp4")!
+        let lowerAudioStream = URL(string: "https://sns-video.xhscdn.com/lower-audio.mp4")!
+        let forbiddenAudioStream = URL(string: "https://sns-video.xhscdn.com/stream/1/10/19/audio-watermarked.mp4")!
+        var donorImage = originalAppImage(1)
+        donorImage["live_photo"] = ["media": ["stream": [
+            "h265": [["master_url": highSilentStream.absoluteString, "width": 1440, "height": 2560, "audio_channels": 0]],
+            "h264": [
+                ["master_url": lowerAudioStream.absoluteString, "width": 720, "height": 1280, "audio_channels": 2],
+                ["master_url": forbiddenAudioStream.absoluteString, "width": 4000, "height": 4000, "stream_type": 19, "audio_channels": 2]]]]]
+        let parsedDonors = originalClient([donorImage])!.items[0]
+        precondition(parsedDonors.liveAudioURLs.contains(highSilentStream) && parsedDonors.liveAudioURLs.contains(lowerAudioStream),
+            "Every exact client rendition must remain available for actual audio probing, including absent audio metadata")
+        precondition(!parsedDonors.liveAudioURLs.contains(forbiddenAudioStream),
+            "A web watermarked rendition must not become an audio donor")
+        donorImage.removeValue(forKey: "live_photo_file_id")
+        let keylessDonors = originalClient([donorImage])!.items[0]
+        precondition(keylessDonors.liveURL == highSilentStream && keylessDonors.liveOriginalURLs.isEmpty)
+        precondition(keylessDonors.liveAudioURLs.contains(lowerAudioStream),
+            "A lower-resolution audio donor must not replace the best keyless client video")
+
+        // A later, larger playback rendition cannot erase an older upload key.
+        // Reversed client image arrays and sparse snapshots must preserve web order.
+        for snapshots in [[web, highQualityClient, sourceClient], [web, sourceClient, highQualityClient]] {
+            let originalsPreferred = X.preferredNote(snapshots)!
+            precondition(originalsPreferred.items.map(\.fileID) == web.items.map(\.fileID))
+            for (offset, media) in originalsPreferred.items.enumerated() {
+                let originals = liveOriginalURLs(sourceKeys[offset])
+                precondition(media.livePhotoFileID == sourceKeys[offset] && media.liveOriginalURLs == originals)
+                precondition(media.liveURL == originals[0] && Array(media.liveURLs.prefix(2)) == originals,
+                    "Original provenance must outrank playback pixels in either snapshot order")
+            }
+            precondition(originalsPreferred.items[0].liveURLs.contains(highQualityClient.items[0].liveURL!),
+                "The higher-quality exact client stream remains available after original-source failure")
+        }
+        let sparseSource = originalClient([originalAppImage(2, stream: false)])!
+        let sparseSourcesMerged = X.preferredNote([web, highQualityClient, sparseSource])!
+        precondition(sparseSourcesMerged.items[0].liveOriginalURLs.isEmpty)
+        precondition(sparseSourcesMerged.items[0].liveURL == highQualityClient.items[0].liveURL)
+        precondition(sparseSourcesMerged.items[1].liveOriginalURLs == liveOriginalURLs(sourceKeys[1]),
+            "Sparse upload keys bind by fileid rather than snapshot array position")
+        let olderKey = "livephoto/1040g398325rhvd944q8g5onncaqnqnmqsnpi009"
+        let olderPlayback = URL(string: "https://sns-video.xhscdn.com/older-revision.mp4")!
+        let olderPlaybackBackup = URL(string: "https://sns-bak.xhscdn.com/older-revision.mp4")!
+        var olderKeyImage = originalAppImage(1)
+        olderKeyImage["live_photo_file_id"] = olderKey
+        olderKeyImage["live_photo"] = ["media": ["stream": ["h265": [[
+            "master_url": olderPlayback.absoluteString, "backup_urls": [olderPlaybackBackup.absoluteString],
+            "width": 4000, "height": 4000, "audio_channels": 2, "audio_bitrate": 128000]]]]]
+        let olderKeyClient = originalClient([olderKeyImage])!
+        let rejectedRevisionURLs = Set(liveOriginalURLs(olderKey) + [olderPlayback, olderPlaybackBackup])
+        func assertLatestMotionRevision(_ media: X.MediaItem) {
+            precondition(media.livePhotoFileID == sourceKeys[0] && media.liveOriginalURLs == liveOriginalURLs(sourceKeys[0]))
+            precondition(media.liveURL == liveOriginalURLs(sourceKeys[0])[0])
+            precondition(!media.liveURLs.contains(where: { rejectedRevisionURLs.contains($0) }),
+                "An older changed upload key must not contribute any original or playback fallback")
+            precondition(!media.liveAudioURLs.contains(where: { rejectedRevisionURLs.contains($0) }),
+                "An older changed upload key must not donate sound to the latest motion revision")
+        }
+        let conflictingSnapshots = X.preferredNote([web, sourceClient, olderKeyClient])!
+        assertLatestMotionRevision(conflictingSnapshots.items[0])
+        let latestKeyClient = originalClient([originalAppImage(1)])!
+        precondition(X.noteIsLessComplete(latestKeyClient, olderKeyClient),
+            "The older revision must have a higher raw score to expose cache-only base contamination")
+        let cacheOnlyRevisions = X.preferredNote([latestKeyClient, olderKeyClient])!
+        assertLatestMotionRevision(cacheOnlyRevisions.items[0])
+        let keylessPlayback = URL(string: "https://sns-video.xhscdn.com/trusted-keyless.mp4")!
+        var trustedKeylessImage = appImage(1)
+        trustedKeylessImage["live_photo"] = ["media": ["stream": ["h265": [[
+            "master_url": keylessPlayback.absoluteString, "width": 2000, "height": 3000,
+            "audio_channels": 2, "audio_bitrate": 96000]]]]]
+        let trustedKeylessClient = originalClient([trustedKeylessImage])!
+        let revisionsWithKeyless = X.preferredNote([web, latestKeyClient, olderKeyClient, trustedKeylessClient])!
+        assertLatestMotionRevision(revisionsWithKeyless.items[0])
+        precondition(revisionsWithKeyless.items[0].liveURLs.contains(keylessPlayback)
+            && revisionsWithKeyless.items[0].liveAudioURLs.contains(keylessPlayback),
+            "A same-fileid snapshot without a conflicting key remains a trusted playback and audio source")
+        print("PASS: changed upload keys isolate playback/audio revisions before web or cache-only base selection; trusted keyless sources remain usable")
+        let unrelatedSource = originalClient([originalAppImage(1)], identity: "ffffffffffffffffffffffff")!
+        precondition(X.preferredNote([web, unrelatedSource])!.items.allSatisfy { $0.liveOriginalURLs.isEmpty },
+            "A key from another note must never repair this note")
+        var differentStill = originalAppImage(1)
+        differentStill["fileid"] = "different-still"
+        differentStill["original"] = "https://sns-img.xhscdn.com/different-still"
+        let differentStillClient = originalClient([differentStill])!
+        precondition(X.preferredNote([web, differentStillClient])!.items.allSatisfy { $0.liveOriginalURLs.isEmpty },
+            "A key for another image must not be borrowed by matching array index")
+
+        let invalidSourceKeys = [
+            "../" + sourceKeys[0], "livephoto/../other", "livephoto/./other",
+            "livephoto/%2e%2e/other", "livephoto/a%2fb", "livephoto/a\\b",
+            "livephoto/", "livephoto/a/b", "livephoto/a?sign=foreign", "livephoto/a#fragment",
+            "/" + sourceKeys[0], "https://sns-video-bd.xhscdn.com/" + sourceKeys[0],
+            "//sns-video-bd.xhscdn.com/" + sourceKeys[0], "stream/1/10/66/foreign.mp4",
+            "notes_pre_post/foreign", "livephoto/with space", "livephoto/\nforeign"
+        ]
+        for invalidKey in invalidSourceKeys {
+            var image = appImage(1)
+            image["live_photo_file_id"] = invalidKey
+            let rejectedKey = originalClient([image])!
+            precondition(rejectedKey.items[0].livePhotoFileID == nil && rejectedKey.items[0].liveOriginalURLs.isEmpty,
+                "Malformed source keys must not construct arbitrary CDN paths: \(invalidKey)")
+            precondition(rejectedKey.items[0].liveURL == client.items[1].liveURL,
+                "A rejected key must retain its own valid client playback fallback")
+        }
+        var duplicatedKeyImage = originalAppImage(2)
+        duplicatedKeyImage["live_photo_file_id"] = sourceKeys[0]
+        let duplicateKeySnapshot = originalClient([originalAppImage(1), duplicatedKeyImage])
+        precondition(duplicateKeySnapshot == nil || duplicateKeySnapshot!.items.allSatisfy { $0.liveOriginalURLs.isEmpty },
+            "One upload key claimed by different stills is ambiguous and cannot be bound to either")
+        let ambiguousSnapshots = X.preferredNote([
+            web, originalClient([originalAppImage(1)])!, originalClient([duplicatedKeyImage])!
+        ])!
+        precondition(ambiguousSnapshots.items.allSatisfy { $0.livePhotoFileID == nil && $0.liveOriginalURLs.isEmpty },
+            "A key reused by different stills across separate snapshots must remain unbound")
+        precondition(ambiguousSnapshots.items.map(\.liveURL) == combined.items.map(\.liveURL),
+            "Rejecting an ambiguous cross-snapshot key must retain each still's own client stream")
+        let plainStill = originalClient([["fileid": "image-1", "original": "https://sns-img.xhscdn.com/image-1"]])!
+        precondition(plainStill.items[0].livePhotoFileID == nil && plainStill.items[0].liveOriginalURLs.isEmpty)
+        precondition(plainStill.items[0].liveURL == nil && !plainStill.items[0].livePhotoDeclared,
+            "An ordinary still must not acquire synthetic motion")
+        print("PASS: upload Live Photo source priority, key-only/silent originals, identity-safe snapshot merge and malformed/ambiguous key rejection")
         let signedWebURLs = (1...4).map { number in
             URL(string: "https://sns-webpic-qc.xhscdn.com/202610011200/web-signature/notes_pre_post/still-\(number)!web-display")!
         }
@@ -199,7 +592,7 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         }
         precondition(X.shouldRefreshClientCache(for: nil))
         precondition(X.shouldRefreshClientCache(for: ordinaryWeb), "Ordinary stills missing client originals require the same bounded cache refresh as Live Photos")
-        precondition(!X.shouldRefreshClientCache(for: videoDesktop), "Video notes must not trigger still-image cache refresh")
+        precondition(!X.shouldRefreshClientCache(for: videoDesktop), "A regular video with client source provenance satisfies cache refresh")
         let originalsReady = X.preferredNote([ordinaryWeb, stillClient])!
         precondition(!X.shouldRefreshClientCache(for: originalsReady), "All exact client originals satisfy an ordinary still-image refresh")
         precondition(X.shouldRefreshClientCache(for: stillCombined), "Having image originals must not bypass the missing client motion refresh")
@@ -558,6 +951,113 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
         }
         if CommandLine.arguments.count > 2 {
             let base = URL(string: CommandLine.arguments[2])!
+            let goodVideoURL = base.appendingPathComponent("good.mp4")
+            let badVideoURL = base.appendingPathComponent("bad.mp4")
+            let expectedVideoBytes = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+            actor VideoCacheLoadCounter {
+                private var calls = 0
+                func called() { calls += 1 }
+                func count() -> Int { calls }
+            }
+            var fixtureCachedVideo = cachedVideo
+            fixtureCachedVideo.videoURL = goodVideoURL
+            fixtureCachedVideo.videoURLs = [goodVideoURL]
+            let runtimeCachedVideo = fixtureCachedVideo
+            var failedCloudVideo = originalVideo
+            failedCloudVideo.originalVideoURL = badVideoURL
+            failedCloudVideo.videoURL = badVideoURL
+            failedCloudVideo.videoURLs = [badVideoURL]
+            let failedCloudDestination = dir.appendingPathComponent("xhs-video-cache-fallback.mp4")
+            let failedCloudTask = X.DownloadTask(urls: [badVideoURL], destination: failedCloudDestination,
+                requestUserAgent: X.mobileUserAgent, videoHDRHint: .init(sourceMarkedHDR: true, streamMarkedHDR: true))
+            let fallbackVideoStatuses = DownloadStatusRecorder()
+            let fallbackVideoLoads = VideoCacheLoadCounter()
+            let fallbackVideoResult = try await DownloaderInfra.$statusHandler.withValue({ message in
+                await fallbackVideoStatuses.record(message)
+            }) {
+                try await X.downloadVideo(failedCloudVideo, task: failedCloudTask, shareURL: originFallback, cacheLoader: {
+                    await fallbackVideoLoads.called()
+                    return runtimeCachedVideo
+                })
+            }
+            precondition(fallbackVideoResult.sourceURL == goodVideoURL && fallbackVideoResult.fromAppCache && !fallbackVideoResult.isLivePhoto)
+            let fallbackVideoCalls = await fallbackVideoLoads.count()
+            precondition(fallbackVideoCalls == 1, "A failed cloud upload should load the exact-note cache once")
+            let fallbackVideoBytes = try Data(contentsOf: failedCloudDestination)
+            precondition(fallbackVideoBytes == expectedVideoBytes, "A client fallback must preserve source bytes without HDR remuxing")
+            precondition(!FileManager.default.fileExists(atPath: failedCloudDestination.appendingPathExtension("part").path))
+            let fallbackVideoStages = await fallbackVideoStatuses.snapshot()
+            let expectedVideoStages = ["正在下载云端原视频", "正在校验云端原视频", "云端原视频不可用，正在读取客户端缓存",
+                "正在下载客户端缓存视频", "正在校验客户端缓存视频"]
+            let stageIndices = expectedVideoStages.map { fallbackVideoStages.firstIndex(of: $0) }
+            precondition(stageIndices.allSatisfy { $0 != nil } && stageIndices.compactMap { $0 } == stageIndices.compactMap { $0 }.sorted(),
+                "The progress stages must accurately show cloud validation failure followed by client source download and validation")
+            precondition(fallbackVideoStages.allSatisfy { !$0.contains("http") }, "Video progress must not expose signed source URLs")
+
+            var goodCloudVideo = originalVideo
+            goodCloudVideo.originalVideoURL = goodVideoURL
+            goodCloudVideo.videoURL = goodVideoURL
+            goodCloudVideo.videoURLs = [goodVideoURL]
+            let goodCloudDestination = dir.appendingPathComponent("xhs-video-cloud-original.mp4")
+            let goodCloudTask = X.DownloadTask(urls: [goodVideoURL, badVideoURL], destination: goodCloudDestination,
+                requestUserAgent: X.mobileUserAgent, videoHDRHint: .init(sourceMarkedHDR: true, streamMarkedHDR: true))
+            let goodCloudLoads = VideoCacheLoadCounter()
+            let goodCloudStatuses = DownloadStatusRecorder()
+            let goodCloudResult = try await DownloaderInfra.$statusHandler.withValue({ message in
+                await goodCloudStatuses.record(message)
+            }) {
+                try await X.downloadVideo(goodCloudVideo, task: goodCloudTask, shareURL: originFallback, cacheLoader: {
+                    await goodCloudLoads.called()
+                    return runtimeCachedVideo
+                })
+            }
+            let goodCloudCalls = await goodCloudLoads.count()
+            precondition(goodCloudResult.sourceURL == goodVideoURL && !goodCloudResult.fromAppCache && goodCloudCalls == 0,
+                "A valid cloud original must finish without invoking client-cache lookup")
+            let goodCloudBytes = try Data(contentsOf: goodCloudDestination)
+            precondition(goodCloudBytes == expectedVideoBytes, "A cloud original must be delivered byte-for-byte without playback HDR remuxing")
+            let goodCloudStages = await goodCloudStatuses.snapshot()
+            precondition(goodCloudStages.contains("正在下载云端原视频") && goodCloudStages.contains("正在校验云端原视频"))
+            precondition(!goodCloudStages.contains { $0.contains("客户端缓存") })
+
+            var wrongCachedVideo = runtimeCachedVideo
+            wrongCachedVideo.noteID = "ffffffffffffffffffffffff"
+            let wrongCacheDestination = dir.appendingPathComponent("xhs-video-wrong-cache.mp4")
+            let wrongCacheTask = X.DownloadTask(urls: [], destination: wrongCacheDestination,
+                requestUserAgent: X.mobileUserAgent, videoHDRHint: nil)
+            do {
+                _ = try await X.downloadVideo(noOriginalVideo, task: wrongCacheTask, shareURL: originFallback, cacheLoader: { [wrongCachedVideo] in wrongCachedVideo })
+                preconditionFailure("A playable client source from another note must not be published")
+            } catch let error as NSError {
+                precondition(error.domain == "XHSDownloader" && error.code == 8)
+            }
+            precondition(!FileManager.default.fileExists(atPath: wrongCacheDestination.path)
+                && !FileManager.default.fileExists(atPath: wrongCacheDestination.appendingPathExtension("part").path))
+
+            for noteToCancel in [goodCloudVideo, noOriginalVideo] {
+                let cancelledVideoLoads = VideoCacheLoadCounter()
+                let cancelledVideoDestination = dir.appendingPathComponent("xhs-video-cancelled-" + UUID().uuidString + ".mp4")
+                let cancelledVideoTask = X.DownloadTask(urls: [goodVideoURL], destination: cancelledVideoDestination,
+                    requestUserAgent: X.mobileUserAgent, videoHDRHint: nil)
+                let cancelledVideo = Task {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    do {
+                        _ = try await X.downloadVideo(noteToCancel, task: cancelledVideoTask, shareURL: originFallback, cacheLoader: {
+                            await cancelledVideoLoads.called()
+                            return runtimeCachedVideo
+                        })
+                        return false
+                    } catch { return DownloaderHTTPCompatibility.isCancellation(error) }
+                }
+                let cancelledBeforeLookup = await cancelledVideo.value
+                let cancelledLookupCalls = await cancelledVideoLoads.count()
+                precondition(cancelledBeforeLookup && cancelledLookupCalls == 0,
+                    "Cancellation must return before a cache lookup whether or not an original URL is available")
+                precondition(!FileManager.default.fileExists(atPath: cancelledVideoDestination.path)
+                    && !FileManager.default.fileExists(atPath: cancelledVideoDestination.appendingPathExtension("part").path))
+            }
+            print("PASS: XHS runtime cloud-original priority, cache fallback byte identity, exact-note rejection, cancellation and source progress stages")
+
             // Start at a fixed API response, then use the same task builder as run().
             var fixture = try JSONSerialization.jsonObject(with: liveData) as! [String: Any]
             var images = fixture["images"] as! [[String: Any]]
@@ -596,9 +1096,10 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
                 let silent = base.appendingPathComponent("silent.mp4")
                 let good = base.appendingPathComponent("good.mp4")
                 var localItem = combined.items[0]
-                // Metadata can claim audio even when the actual client file is silent.
+                localItem.liveAudioURLs = [] // This fixture replaces every production donor URL.
+                // Metadata can claim audio even when all actual client files are silent.
                 localItem.liveURL = silent
-                localItem.liveURLs = [silent, good]
+                localItem.liveURLs = [silent, base.appendingPathComponent("silent-fallback.mp4")]
                 let destination = dir.appendingPathComponent("xhs-silent.mp4")
                 var localTask = X.livePhotoDownloadTask(localItem, destination:destination)!
                 localTask.displayOrder = displayOrder
@@ -608,6 +1109,17 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
                 let expectedSilent = try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[3]))
                 let downloadedSilent = try Data(contentsOf:destination)
                 precondition(downloadedSilent == expectedSilent)
+                // Without an upload key, supplement the selected client video's
+                // audio while preserving its higher-quality compressed video.
+                localItem.liveURLs = [silent, good]
+                let supplementedClientDestination = dir.appendingPathComponent("xhs-client-supplemented.mp4")
+                let supplementedClientResult = try await X.download(X.livePhotoDownloadTask(localItem, destination: supplementedClientDestination)!, retries: 0)
+                let supplementedClientMOV = supplementedClientDestination.deletingPathExtension().appendingPathExtension("mov")
+                precondition(supplementedClientResult.isLivePhoto && supplementedClientResult.hasAudio)
+                let silentClientVideo = try await compressedTrackSamples(at: URL(fileURLWithPath: CommandLine.arguments[3]), mediaType: .video)
+                let supplementedClientVideo = try await compressedTrackSamples(at: supplementedClientMOV, mediaType: .video)
+                precondition(!silentClientVideo.isEmpty && supplementedClientVideo == silentClientVideo,
+                    "A keyless client video must retain its compressed samples when another exact source supplies audio")
                 // Invalid content can fall back only to another exact client source.
                 localItem.liveURL = base.appendingPathComponent("bad.mp4")
                 localItem.liveURLs = [localItem.liveURL!,good]
@@ -636,6 +1148,191 @@ private func stopFixtureServer(_ process: Process, terminated: DispatchSemaphore
                 precondition(!FileManager.default.fileExists(atPath:rejected.path))
                 precondition(!FileManager.default.fileExists(atPath:rejected.appendingPathExtension("part").path))
                 print("PASS: silent client bytes preserved, actual client audio preserved, client backup recovery and failed-source cleanup")
+                if CommandLine.arguments.count > 4 {
+                    func fixtureRequestCounts() async throws -> [String: Int] {
+                        let (data, _) = try await URLSession.shared.data(from: base.appendingPathComponent("requests.json"))
+                        return try JSONSerialization.jsonObject(with: data) as! [String: Int]
+                    }
+                    let original = base.appendingPathComponent("original.mov")
+                    let originalBackup = base.appendingPathComponent("original-backup.mov")
+                    let invalidOriginal = base.appendingPathComponent("missing-original.mov")
+                    let expectedOriginal = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[4]))
+                    var originalItem = keyOnly
+                    originalItem.liveURL = original
+                    originalItem.liveOriginalURLs = [original, originalBackup]
+                    originalItem.liveURLs = [original, originalBackup, good]
+                    let originalDestination = dir.appendingPathComponent("xhs-upload.mp4")
+                    let originalTask = X.livePhotoDownloadTask(originalItem, destination: originalDestination)!
+                    let countsBeforeOriginal = try await fixtureRequestCounts()
+                    let originalResult = try await X.download(originalTask, retries: 0)
+                    let publishedOriginal = originalDestination.deletingPathExtension().appendingPathExtension("mov")
+                    let originalDownloadedBytes = try Data(contentsOf: publishedOriginal)
+                    precondition(originalResult.isLivePhoto)
+                    precondition(originalDownloadedBytes == expectedOriginal,
+                        "Upload MOV bytes and native pairing metadata must survive transfer unchanged")
+                    precondition(!FileManager.default.fileExists(atPath: originalDestination.path),
+                        "A QuickTime upload source must retain its actual MOV container suffix")
+                    let countsAfterOriginal = try await fixtureRequestCounts()
+                    if originalResult.hasAudio {
+                        precondition(countsAfterOriginal["/good.mp4", default: 0] == countsBeforeOriginal["/good.mp4", default: 0],
+                            "An original with actual audio must not download an audio donor")
+                    }
+
+                    // An unavailable primary upload key first retries that key's
+                    // backup, then only its exact client playback alternatives.
+                    originalItem.liveURL = invalidOriginal
+                    originalItem.liveOriginalURLs = [invalidOriginal, originalBackup]
+                    originalItem.liveURLs = [invalidOriginal, originalBackup, good]
+                    let backupDestination = dir.appendingPathComponent("xhs-upload-backup.mp4")
+                    _ = try await X.download(X.livePhotoDownloadTask(originalItem, destination: backupDestination)!, retries: 0)
+                    let publishedBackup = backupDestination.deletingPathExtension().appendingPathExtension("mov")
+                    let backupDownloadedBytes = try Data(contentsOf: publishedBackup)
+                    precondition(backupDownloadedBytes == expectedOriginal,
+                        "A working original backup must win before a playable client stream")
+                    originalItem.liveOriginalURLs = [invalidOriginal]
+                    originalItem.liveURLs = [invalidOriginal, good]
+                    let playbackDestination = dir.appendingPathComponent("xhs-upload-unavailable.mp4")
+                    let playbackResult = try await X.download(X.livePhotoDownloadTask(originalItem, destination: playbackDestination)!, retries: 0)
+                    precondition(playbackResult.isLivePhoto && playbackResult.hasAudio)
+                    let playbackDownloadedBytes = try Data(contentsOf: playbackDestination)
+                    precondition(playbackDownloadedBytes == expectedAudio,
+                        "After original-source failure, preserve the exact client's validated playback bytes")
+
+                    // When every exact source is silent, retain the successful
+                    // original instead of treating absent audio as a failure.
+                    originalItem.liveURL = silent
+                    originalItem.liveOriginalURLs = [silent]
+                    originalItem.liveURLs = [silent, base.appendingPathComponent("silent-fallback.mp4")]
+                    let silentOriginalDestination = dir.appendingPathComponent("xhs-silent-upload.mp4")
+                    let silentOriginalResult = try await X.download(X.livePhotoDownloadTask(originalItem, destination: silentOriginalDestination)!, retries: 0)
+                    precondition(silentOriginalResult.isLivePhoto && !silentOriginalResult.hasAudio)
+                    let silentOriginalBytes = try Data(contentsOf: silentOriginalDestination)
+                    precondition(silentOriginalBytes == expectedSilent,
+                        "When no exact source has audio, preserve the silent upload original bytes")
+
+                    if CommandLine.arguments.count > 5 {
+                        let silentNativeURL = URL(fileURLWithPath: CommandLine.arguments[5])
+                        let silentNativeSource = base.appendingPathComponent("silent-original.mov")
+                        originalItem.liveURL = silentNativeSource
+                        originalItem.liveOriginalURLs = [silentNativeSource]
+                        originalItem.liveURLs = [silentNativeSource, good]
+                        let supplementedDestination = dir.appendingPathComponent("xhs-upload-supplemented.mp4")
+                        let supplementedResult = try await X.download(X.livePhotoDownloadTask(originalItem, destination: supplementedDestination)!, retries: 0)
+                        let supplementedMOV = supplementedDestination.deletingPathExtension().appendingPathExtension("mov")
+                        precondition(supplementedResult.isLivePhoto && supplementedResult.hasAudio,
+                            "An actual audio-bearing exact client stream must supplement a silent upload original")
+                        let originalVideo = try await compressedTrackSamples(at: silentNativeURL, mediaType: .video)
+                        let supplementedVideo = try await compressedTrackSamples(at: supplementedMOV, mediaType: .video)
+                        precondition(!originalVideo.isEmpty && supplementedVideo == originalVideo,
+                            "Audio supplementation must preserve every compressed original video sample")
+                        let donorAudio = try await compressedTrackSamples(at: URL(fileURLWithPath: CommandLine.arguments[1]), mediaType: .audio)
+                        let supplementedAudio = try await compressedTrackSamples(at: supplementedMOV, mediaType: .audio)
+                        precondition(!supplementedAudio.isEmpty && supplementedAudio.count <= donorAudio.count)
+                        precondition(supplementedAudio == Array(donorAudio.prefix(supplementedAudio.count)),
+                            "Donor audio must be copied without re-encoding, clipped only to the original duration")
+                        let originalIdentifier = try await livePhotoContentIdentifier(at: silentNativeURL)
+                        let supplementedIdentifier = try await livePhotoContentIdentifier(at: supplementedMOV)
+                        precondition(originalIdentifier == supplementedIdentifier,
+                            "Audio supplementation must preserve the source's existing native Live Photo identifier")
+                        let originalMetadataTracks = try await AVURLAsset(url: silentNativeURL).loadTracks(withMediaType: .metadata)
+                        let supplementedMetadataTracks = try await AVURLAsset(url: supplementedMOV).loadTracks(withMediaType: .metadata)
+                        precondition(originalMetadataTracks.count == supplementedMetadataTracks.count,
+                            "Native timed metadata tracks must survive audio supplementation")
+                        let originalSilentBytes = try Data(contentsOf: silentNativeURL)
+                        originalItem.liveURLs = [silentNativeSource, base.appendingPathComponent("silent-fallback.mp4")]
+                        let entirelySilentDestination = dir.appendingPathComponent("xhs-upload-no-audio.mp4")
+                        let entirelySilentResult = try await X.download(X.livePhotoDownloadTask(originalItem, destination: entirelySilentDestination)!, retries: 0)
+                        let entirelySilentMOV = entirelySilentDestination.deletingPathExtension().appendingPathExtension("mov")
+                        let entirelySilentBytes = try Data(contentsOf: entirelySilentMOV)
+                        precondition(entirelySilentResult.isLivePhoto && !entirelySilentResult.hasAudio)
+                        precondition(entirelySilentBytes == originalSilentBytes,
+                            "When the upload original and client stream are both silent, preserve the native MOV bytes")
+
+                        // Inject only isolated fixture roots into the production
+                        // recovery helper. The selected CDN identity is excluded
+                        // from cloud requests but remains eligible for local audio.
+                        let cachedSelected = URL(string: "https://sns-video-qc.xhscdn.com/stream/1/10/66/regression_selected_66.mp4?sign=fixture")!
+                        let cachedIdentity = "stream_1_10_66_regression_selected_66"
+                        func writeAudioCache(_ name: String, payload: Data) throws -> URL {
+                            let cache = dir.appendingPathComponent("audio-cache-" + name, isDirectory: true)
+                            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+                            let padded = payload + Data(repeating: 0, count: 64)
+                            try padded.write(to: cache.appendingPathComponent(cachedIdentity))
+                            let map = "total_file_size:\(payload.count)\ncache_file_size:\(payload.count)\ncache_period_size:\(padded.count)\nentry_logical_pos:0\nentry_data_amount:\(payload.count)\nentry_physical_pos:0\nentry_info_flush\n"
+                            try Data(map.utf8).write(to: cache.appendingPathComponent(cachedIdentity + "-map"))
+                            return cache
+                        }
+                        func recoveryFixture(_ name: String, cloud: [URL]) throws -> (X.DownloadTask, URL) {
+                            let destination = dir.appendingPathComponent("recovery-" + name + ".mp4")
+                            let motion = dir.appendingPathComponent("recovery-" + name + ".mov")
+                            try originalSilentBytes.write(to: motion)
+                            return (X.DownloadTask(urls: [cachedSelected] + cloud, destination: destination,
+                                requestUserAgent: X.mobileUserAgent, videoHDRHint: nil, isLivePhoto: true), motion)
+                        }
+                        let voicedCache = try writeAudioCache("voiced", payload: expectedAudio)
+                        let (silentCloudTask, silentCloudMotion) = try recoveryFixture("silent-cloud", cloud: [silent])
+                        let recoveredFromLocal = try await X.recoverLivePhotoAudio(silentCloudTask, at: silentCloudMotion,
+                            excluding: cachedSelected, cacheRoots: [voicedCache])
+                        precondition(recoveredFromLocal,
+                            "A successful silent cloud response must still allow exact local audio from the selected client source")
+                        let localPackets = try await compressedTrackSamples(at: silentCloudMotion, mediaType: .audio)
+                        precondition(!localPackets.isEmpty && localPackets == Array(donorAudio.prefix(localPackets.count)),
+                            "Selected-source cache audio must be copied without re-encoding")
+
+                        let lpcmCache = try writeAudioCache("lpcm", payload: expectedOriginal)
+                        let sourceAudioSubtype = try await audioTrackSubtype(at: URL(fileURLWithPath: CommandLine.arguments[4]))
+                        let cloudAudioSubtype = try await audioTrackSubtype(at: URL(fileURLWithPath: CommandLine.arguments[1]))
+                        precondition(sourceAudioSubtype != nil && cloudAudioSubtype != nil && sourceAudioSubtype != cloudAudioSubtype,
+                            "Distinct cached LPCM and cloud AAC codecs must expose donor-priority mistakes")
+                        let (voicedCloudTask, voicedCloudMotion) = try recoveryFixture("voiced-cloud", cloud: [good])
+                        let recoveredFromCloud = try await X.recoverLivePhotoAudio(voicedCloudTask, at: voicedCloudMotion,
+                            excluding: cachedSelected, cacheRoots: [lpcmCache])
+                        precondition(recoveredFromCloud)
+                        let chosenSubtype = try await audioTrackSubtype(at: voicedCloudMotion)
+                        precondition(chosenSubtype == cloudAudioSubtype,
+                            "Every usable cloud donor must take priority over cached audio")
+                        let chosenPackets = try await compressedTrackSamples(at: voicedCloudMotion, mediaType: .audio)
+                        precondition(!chosenPackets.isEmpty && chosenPackets == Array(donorAudio.prefix(chosenPackets.count)))
+
+                        let silentCache = try writeAudioCache("silent", payload: expectedSilent)
+                        let (noAudioTask, noAudioMotion) = try recoveryFixture("no-audio", cloud: [silent])
+                        let allSilentRecovery = try await X.recoverLivePhotoAudio(noAudioTask, at: noAudioMotion,
+                            excluding: cachedSelected, cacheRoots: [silentCache])
+                        precondition(!allSilentRecovery)
+                        let untouchedSilentMotion = try Data(contentsOf: noAudioMotion)
+                        precondition(untouchedSilentMotion == originalSilentBytes,
+                            "Silent cloud and local sources must leave the selected original unchanged")
+
+                        let (onlySelectedTask, onlySelectedMotion) = try recoveryFixture("only-selected", cloud: [])
+                        let onlySelectedRecovery = try await X.recoverLivePhotoAudio(onlySelectedTask, at: onlySelectedMotion,
+                            excluding: cachedSelected, cacheRoots: [voicedCache])
+                        precondition(onlySelectedRecovery,
+                            "An empty cloud candidate list must still probe the exact selected client's local audio")
+                        for task in [silentCloudTask, voicedCloudTask, noAudioTask, onlySelectedTask] {
+                            for suffix in ["audio-source.part", "audio-merged.part"] {
+                                precondition(!FileManager.default.fileExists(atPath: task.destination.appendingPathExtension(suffix).path),
+                                    "Cloud and local recovery must clean temporary donors and compositions")
+                            }
+                        }
+                        print("PASS: cloud audio before local cache, silent-cloud fallback to exact selected cache, all-silent byte preservation and selected-only local recovery")
+                        print("PASS: silent original receives lossless donor audio with untouched video/native metadata; wholly silent sources preserve original MOV")
+                    }
+
+                    originalItem.liveURL = invalidOriginal
+                    originalItem.liveOriginalURLs = [invalidOriginal]
+                    originalItem.liveURLs = [invalidOriginal, base.appendingPathComponent("bad.mp4")]
+                    let failedOriginalDestination = dir.appendingPathComponent("xhs-upload-rejected.mp4")
+                    do {
+                        _ = try await X.download(X.livePhotoDownloadTask(originalItem, destination: failedOriginalDestination)!, retries: 0)
+                        fatalError("failed upload and client sources must not publish media")
+                    } catch { }
+                    for path in [failedOriginalDestination,
+                                 failedOriginalDestination.deletingPathExtension().appendingPathExtension("mov"),
+                                 failedOriginalDestination.appendingPathExtension("part")] {
+                        precondition(!FileManager.default.fileExists(atPath: path.path))
+                    }
+                    print("PASS: original MOV byte/metadata preservation, native suffix, original backup before stream, wholly silent original preservation and failed-source cleanup")
+                }
             }
         }
         let remaining = try FileManager.default.contentsOfDirectory(atPath:dir.path)

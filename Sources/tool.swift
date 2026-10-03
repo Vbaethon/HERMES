@@ -364,6 +364,19 @@ func copyMovieReplacingAssetIDIfPossible(sourceURL: URL, outputURL: URL, assetID
     return true
 }
 
+func copyNativeHEICLivePhotoPairIfPossible(imageURL: URL, movieURL: URL, outputImageURL: URL, outputMovieURL: URL) async throws -> Bool {
+    guard ["heic", "heif"].contains(imageURL.pathExtension.lowercased()),
+          let imageAssetID = try? extractAssetIDFromTIFF(extractHEICExifData(from: imageURL)),
+          (try? await extractAssetIDFromMovie(movieURL)) == imageAssetID,
+          try await copyMovieReplacingAssetIDIfPossible(sourceURL: movieURL, outputURL: outputMovieURL, assetID: imageAssetID) else {
+        return false
+    }
+    // A matching native pair already carries its display orientation and timing.
+    // Keep the HEIF payload, gain map, and metadata instead of normalizing to JPEG.
+    try FileManager.default.copyItem(at: imageURL, to: outputImageURL)
+    return true
+}
+
 func jpegDimensions(_ data: Data) -> (width: UInt32, height: UInt32) {
     var offset = 2
     while offset + 9 < data.count, data[offset] == 0xff {
@@ -1251,6 +1264,7 @@ struct Main {
 
             try? FileManager.default.removeItem(at: outputJPEG)
             let lowerExtension = stillExtension.lowercased()
+            var copiedNativeMovie = false
             if lowerExtension == "jpg" || lowerExtension == "jpeg" {
                 if stillHasAssetID {
                     if imageOrientation(jpegURL) == 1 {
@@ -1279,7 +1293,11 @@ struct Main {
                     }
                 }
             } else if lowerExtension == "heic" || lowerExtension == "heif" {
-                if stillHasAssetID {
+                if providedAssetID == nil,
+                   try await copyNativeHEICLivePhotoPairIfPossible(imageURL: jpegURL, movieURL: videoURL,
+                       outputImageURL: outputJPEG, outputMovieURL: outputMOV) {
+                    copiedNativeMovie = true
+                } else if stillHasAssetID {
                     if imageOrientation(jpegURL) == 1 {
                         try FileManager.default.copyItem(at: jpegURL, to: outputJPEG)
                     } else {
@@ -1324,7 +1342,9 @@ struct Main {
                     try FileManager.default.copyItem(at: jpegURL, to: outputJPEG)
                 }
             }
-            try await makeLivePhotoMovie(sourceURL: videoURL, outputURL: outputMOV, assetID: assetID)
+            if !copiedNativeMovie {
+                try await makeLivePhotoMovie(sourceURL: videoURL, outputURL: outputMOV, assetID: assetID)
+            }
             let completedDate = Date()
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputJPEG.path)
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputMOV.path)

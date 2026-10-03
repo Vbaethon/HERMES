@@ -24,8 +24,24 @@ case "$MODE" in
   run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify) ;;
   *) usage; exit 2 ;;
 esac
+cleanup_failed_build() {
+  local exit_code=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ "$exit_code" -ne 0 ]]; then
+    remove_current_managed_products
+  fi
+  exit "$exit_code"
+}
+trap cleanup_failed_build EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 prepare_build_paths
 export HERMES_PRODUCTS_DIR="$PRODUCTS_DIR"
+if [[ "$PRODUCTS_DIR_IS_MANAGED" == true ]]; then
+  export HERMES_MANAGED_PRODUCTS_DIR="$PRODUCTS_DIR"
+fi
 build_app
 if app_is_running; then
   echo "HERMES is running; kept current tasks intact. New build: $APP_PATH" >&2

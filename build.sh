@@ -49,8 +49,35 @@ if [[ "$SHOULD_CLEAN" == true ]]; then
     echo "HERMES is running; clean was skipped to protect current tasks. Quit the app before cleaning." >&2
     exit 1
   fi
+  if derived_data_has_protected_products "${HERMES_DERIVED_DATA_DIR:-$HOME/Library/Developer/Xcode/DerivedData/HERMES-Codex}"; then
+    echo "Clean was skipped: the build cache contains custom products or an active build." >&2
+    exit 1
+  fi
   rm -rf "${HERMES_DERIVED_DATA_DIR:-$HOME/Library/Developer/Xcode/DerivedData/HERMES-Codex}"
 fi
+BUILD_SUCCEEDED=false
+
+cleanup_build_products() {
+  local exit_code=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ "$BUILD_SUCCEEDED" == true ]]; then
+    if ! prune_obsolete_managed_products "$PRODUCTS_DIR"; then
+      echo "Failed to remove obsolete HERMES build products." >&2
+      exit_code=1
+    fi
+  else
+    if ! remove_current_managed_products; then
+      echo "Failed to remove incomplete HERMES build products." >&2
+      exit_code=1
+    fi
+  fi
+  exit "$exit_code"
+}
+trap cleanup_build_products EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 prepare_build_paths
 
 echo "Building $SCHEME ($CONFIGURATION)..."
@@ -72,6 +99,7 @@ if [[ ! -d "$APP_PATH" ]]; then
   echo "missing built app: $APP_PATH" >&2
   exit 1
 fi
+BUILD_SUCCEEDED=true
 
 echo "Build complete: $APP_PATH"
 
