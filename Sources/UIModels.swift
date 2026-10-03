@@ -86,6 +86,7 @@ struct PairItem: Identifiable, Hashable, Sendable {
     let videoURL: URL
     var status: Status = .waiting
     var message: String = ""
+    var replacementOutput: CompositionReplacement? = nil
     var id: String { imageURL.standardizedFileURL.path + "\n" + videoURL.standardizedFileURL.path }
 
     enum Status: Hashable {
@@ -94,6 +95,19 @@ struct PairItem: Identifiable, Hashable, Sendable {
         case finished
         case failed
     }
+}
+
+struct CompositionReplacement: Codable, Hashable, Sendable {
+    let imagePath: String
+    let moviePath: String
+    let revision: MediaPairRevision
+    var superseded: [CompositionOutput]? = nil
+}
+
+struct CompositionOutput: Codable, Hashable, Sendable {
+    let imagePath: String
+    let moviePath: String
+    let revision: MediaPairRevision
 }
 
 struct CompletedItem: Identifiable, Hashable, Codable {
@@ -106,8 +120,23 @@ struct CompletedItem: Identifiable, Hashable, Codable {
     var sourceVideoPath: String?
     var sourceRevision: MediaPairRevision?
     var displayOrder: MediaDisplayOrder?
+    var sourceResourceID: String? = nil
 
     var standaloneRevision: MediaFileRevision?
+
+    func hasSameCompositionSource(as other: CompletedItem) -> Bool {
+        guard moviePath != nil, other.moviePath != nil,
+              imageURL.deletingLastPathComponent().standardizedFileURL == other.imageURL.deletingLastPathComponent().standardizedFileURL,
+              let image = sourceImagePath, let video = sourceVideoPath,
+              let otherImage = other.sourceImagePath, let otherVideo = other.sourceVideoPath else { return false }
+        if let sourceResourceID, let otherID = other.sourceResourceID { return sourceResourceID == otherID }
+        if let order = displayOrder, let otherOrder = other.displayOrder,
+           order.postID != otherOrder.postID || order.index != otherOrder.index { return false }
+        // Container upgrades retain the source's identity, while same-named
+        // resources in different input directories remain independent.
+        return URL(fileURLWithPath: image).standardizedFileURL.deletingPathExtension() == URL(fileURLWithPath: otherImage).standardizedFileURL.deletingPathExtension()
+            && URL(fileURLWithPath: video).standardizedFileURL.deletingPathExtension() == URL(fileURLWithPath: otherVideo).standardizedFileURL.deletingPathExtension()
+    }
 
     var mediaKind: ThumbnailMediaKind {
         moviePath != nil ? .livePhoto : (FileSystemUtilities.isVideo(imageURL) ? .video : .photo)

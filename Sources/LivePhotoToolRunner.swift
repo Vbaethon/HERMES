@@ -3,7 +3,12 @@ import Foundation
 enum LivePhotoToolRunner {
     static func run(for pair: PairItem, outputFolder: URL) async -> ToolRunResult {
         await Task.detached(priority: .userInitiated) {
-            switch runTool(arguments: [pair.imageURL.path, pair.videoURL.path, outputFolder.path], creates: outputFolder) {
+            var arguments = [pair.imageURL.path, pair.videoURL.path, outputFolder.path]
+            if let replacement = pair.replacementOutput,
+               let data = try? JSONEncoder().encode(replacement), let json = String(data: data, encoding: .utf8) {
+                arguments += ["--replace-pair", json]
+            }
+            switch runTool(arguments: arguments, creates: outputFolder) {
             case .success(let output):
                 return .success(output)
             case .failure(let message):

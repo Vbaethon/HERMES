@@ -1527,7 +1527,32 @@ final class ImporterModel: ObservableObject {
         let ids = Set(targets.map(\.id))
         if fromDownloads { setDownloadPairStatus(for: ids, status: .running); rebuildVisibleDownloadItems() }
         else { setPairStatus(for: ids, status: .running) }
-        let results = await runCompositionTasks(for: targets, outputFolder: folder)
+        let plannedTargets = targets.map { pair -> PairItem in
+            var planned = pair
+            var identity = CompletedItem(imagePath: folder.appendingPathComponent(pair.imageURL.lastPathComponent).path, moviePath: "pending")
+            identity.sourceImagePath = pair.imageURL.standardizedFileURL.path
+            identity.sourceVideoPath = pair.videoURL.standardizedFileURL.path
+            identity.displayOrder = MediaDisplayOrder.read(from: pair.imageURL)
+            if let receipt = MediaSourceProvenance.read(from: pair.imageURL) {
+                identity.sourceResourceID = "xhs:" + receipt.noteID + "\n" + receipt.imageFileID
+            }
+            let candidates = Dictionary((completed + downloadCompleted).filter {
+                $0.hasSameCompositionSource(as: identity) && $0.outputIsCurrent
+                    && $0.imageURL != pair.imageURL && $0.movieURL != pair.videoURL
+            }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }).values.sorted { $0.modifiedTime > $1.modifiedTime }
+            let previous = candidates.first
+            if let previous, let moviePath = previous.moviePath, let revision = previous.revision,
+               previous.imageURL != pair.imageURL, previous.movieURL != pair.videoURL {
+                let superseded = candidates.dropFirst().compactMap { old -> CompositionOutput? in
+                    guard let moviePath = old.moviePath, let revision = old.revision else { return nil }
+                    return CompositionOutput(imagePath: old.imagePath, moviePath: moviePath, revision: revision)
+                }
+                planned.replacementOutput = CompositionReplacement(imagePath: previous.imagePath, moviePath: moviePath,
+                    revision: revision, superseded: superseded)
+            }
+            return planned
+        }
+        let results = await runCompositionTasks(for: plannedTargets, outputFolder: folder)
         var failures = 0
         for result in results {
             let pair = result.pair
@@ -1546,6 +1571,9 @@ final class ImporterModel: ObservableObject {
                 item.sourceImagePath = pair.imageURL.standardizedFileURL.path
                 item.sourceVideoPath = pair.videoURL.standardizedFileURL.path
                 item.sourceRevision = originalRevision
+                if let receipt = MediaSourceProvenance.read(from: pair.imageURL) {
+                    item.sourceResourceID = "xhs:" + receipt.noteID + "\n" + receipt.imageFileID
+                }
                 item.displayOrder = MediaDisplayOrder.read(from: pair.imageURL)
                     ?? .legacy(for: pair.imageURL, downloadedAt: originalRevision.image.modified)
                 item.displayOrder?.write(to: item.imageURL)
@@ -1673,7 +1701,8 @@ final class ImporterModel: ObservableObject {
     }
 
     private static func merging(_ item: CompletedItem, into records: [CompletedItem]) -> [CompletedItem] {
-        var byID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var byID = Dictionary(records.filter { $0.id == item.id || !$0.hasSameCompositionSource(as: item) }
+            .map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var next = item
         if let previous = byID[item.id], item.hasSameRevision(as: previous) {
             next.importedToPhotos = previous.importedToPhotos || item.importedToPhotos
@@ -1850,6 +1879,7 @@ final class ImporterModel: ObservableObject {
                     mergedItem.sourceImagePath = existingItem.sourceImagePath
                     mergedItem.sourceVideoPath = existingItem.sourceVideoPath
                     mergedItem.sourceRevision = existingItem.sourceRevision
+                    mergedItem.sourceResourceID = existingItem.sourceResourceID
                     if mergedItem.displayOrder == nil {
                         mergedItem.displayOrder = existingItem.displayOrder
                         if let source = existingItem.sourceImagePath {
@@ -1868,11 +1898,46 @@ final class ImporterModel: ObservableObject {
                 self.saveCompletedRecords()
                 self.retainVisibleCompletedSelection()
             }
+            self.removeVerifiedDuplicateCompositions(in: folder)
             self.reconcileCompletedHistoryWithLocalFiles()
             self.rebuildVisibleDownloadItems()
             self.refreshDownloads()
             self.resumeCompletedRefreshIfNeeded()
         }
+    }
+
+    /// Repair old suffixed exports using saved source identity and exact output
+    /// revisions. Untracked/edited/shared files never qualify for cleanup.
+    private func removeVerifiedDuplicateCompositions(in folder: URL) {
+        guard !isPreparingToQuit, !fileOperationsBusy else { return }
+        let parent = folder.standardizedFileURL
+        let records = completed.filter {
+            $0.moviePath != nil && $0.sourceImagePath != nil && $0.sourceVideoPath != nil
+                && $0.imageURL.deletingLastPathComponent().standardizedFileURL == parent && $0.outputIsCurrent
+        }.sorted { $0.modifiedTime > $1.modifiedTime }
+        var kept: [CompletedItem] = []
+        var removed = Set<CompletedItem.ID>()
+        for record in records {
+            guard let winner = kept.first(where: { $0.hasSameCompositionSource(as: record) }),
+                  let movie = record.movieURL else { kept.append(record); continue }
+            let oldURLs = [record.imageURL, movie]
+            let protectedURLs = [winner.imageURL] + (winner.movieURL.map { [$0] } ?? [])
+                + [record.sourceImagePath, record.sourceVideoPath, winner.sourceImagePath, winner.sourceVideoPath]
+                    .compactMap { $0.map { URL(fileURLWithPath: $0) } }
+            let physicalProtected = Set(protectedURLs.map { $0.resolvingSymlinksInPath().standardizedFileURL })
+            guard oldURLs.allSatisfy({ !physicalProtected.contains($0.resolvingSymlinksInPath().standardizedFileURL)
+                && (try? $0.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true }),
+                  downloadFilesAvailableForAction(oldURLs), record.outputIsCurrent, winner.outputIsCurrent else { continue }
+            if let error = Self.withSecurityScopedAccess(to: folder, { trashFiles(oldURLs) }) {
+                appendOperationNotice("重复合成文件整理失败：" + error, for: .completed)
+            } else { removed.insert(record.id) }
+        }
+        guard !removed.isEmpty else { return }
+        completedMutationVersion += 1
+        completed.removeAll { removed.contains($0.id) }
+        downloadCompleted.removeAll { removed.contains($0.id) }
+        saveCompletedRecords(); saveDownloadCompletedRecords()
+        retainVisibleCompletedSelection()
     }
 
     func retainVisibleCompletedSelection() {

@@ -201,6 +201,127 @@ import AudioToolbox
         expect(try await bytes(of: fallback, mediaType: .audio) == originalAudioBytes, "Fallback changed audio")
         print("PASS: actual MOV content ID, exact lossless edit, unchanged unrelated UUID/title, audio and video, safe remux fallback")
 
+        // Cross-fill on a native pair without remuxing or rewriting pixels.
+        let locatedMovie = root.appendingPathComponent("located.mov")
+        try FileManager.default.copyItem(at: live, to: locatedMovie)
+        try movieFillingMetadata([
+            "com.apple.quicktime.location.ISO6709": "+28.9534+118.8718+072.355/",
+            "com.apple.quicktime.location.accuracy.horizontal": "4.419511",
+            "com.apple.quicktime.make": "Fixture Camera",
+            "com.apple.quicktime.creationdate": "2025-12-30T16:01:42+0800"], at: locatedMovie)
+        let locatedPhoto = root.appendingPathComponent("located.heic")
+        try FileManager.default.copyItem(at: identifiedHEIC, to: locatedPhoto)
+        let unlocatedPhotoBytes = try Data(contentsOf: locatedPhoto)
+        let beforeMaker = try extractAssetIDFromTIFF(extractHEICExifData(from: locatedPhoto))
+        _ = try await mergeLivePhotoPairMetadata(still: locatedPhoto, movie: locatedMovie)
+        func imageProperties(_ url: URL) -> [String: Any] {
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
+            return CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as! [String: Any]
+        }
+        let locatedProperties = imageProperties(locatedPhoto)
+        let gps = locatedProperties[kCGImagePropertyGPSDictionary as String] as! [String: Any]
+        let newLocation = pairImageLocation(locatedProperties)!
+        expect(abs(newLocation.latitude - 28.9534) < 0.000001 && abs(newLocation.longitude - 118.8718) < 0.000001, "Video GPS did not reach the photo")
+        expect(abs(newLocation.altitude! - 72.355) < 0.00001 && abs(newLocation.accuracy! - 4.419511) < 0.000001, "Altitude or horizontal accuracy was rounded/lost")
+        expect((gps[kCGImagePropertyGPSLatitudeRef as String] as? String) == "N", "GPS hemisphere changed")
+        expect(try extractAssetIDFromTIFF(extractHEICExifData(from: locatedPhoto)) == beforeMaker, "Metadata overlay changed opaque MakerNote/Live Photo identity")
+        let mergedExif = locatedProperties[kCGImagePropertyExifDictionary as String] as! [String: Any]
+        expect(mergedExif[kCGImagePropertyExifUserComment as String] as? String == "offline fixture", "Original auxiliary EXIF was lost")
+        expect(mergedExif[kCGImagePropertyExifOffsetTimeOriginal as String] as? String == "+08:00", "UTC offset was invented or lost")
+        let locatedPhotoBytes = try Data(contentsOf: locatedPhoto)
+        func mediaDataBoxes(_ data: Data) throws -> [Data] {
+            try isoBoxes(in: data, range: 0..<data.count).filter { $0.isType("mdat") }.map { Data(data[$0.payload]) }
+        }
+        let originalImageData = try mediaDataBoxes(unlocatedPhotoBytes)
+        expect(Array(try mediaDataBoxes(locatedPhotoBytes).prefix(originalImageData.count)) == originalImageData, "HEIF compressed image items changed")
+        let locatedVideoSamples = try await bytes(of: locatedMovie, mediaType: .video)
+        let locatedAudioSamples = try await bytes(of: locatedMovie, mediaType: .audio)
+        expect(locatedVideoSamples == originalVideoBytes && locatedAudioSamples == originalAudioBytes, "GPS metadata edit remuxed samples")
+        let reversedMovie = root.appendingPathComponent("reversed.mov")
+        try FileManager.default.copyItem(at: live, to: reversedMovie)
+        let movieBeforeMerge = try Data(contentsOf: reversedMovie)
+        func trackBoxes(_ data: Data) throws -> [Data] {
+            let movie = try isoBoxes(in: data, range: 0..<data.count).first { $0.isType("moov") }!
+            return try isoBoxes(in: data, range: movie.payload).filter { $0.isType("trak") }.map { Data(data[$0.range]) }
+        }
+        _ = try await mergeLivePhotoPairMetadata(still: locatedPhoto, movie: reversedMovie)
+        let reversedBytes = try Data(contentsOf: reversedMovie)
+        expect(try trackBoxes(reversedBytes) == trackBoxes(movieBeforeMerge) && mediaDataBoxes(reversedBytes) == mediaDataBoxes(movieBeforeMerge), "Movie merge changed tracks, timing, sample offsets or media payload")
+        let reverseLocationRange = try movieMetadataValueRanges(in: reversedBytes, key: "com.apple.quicktime.location.ISO6709")[0]
+        let reverseLocation = PairLocation.iso6709(String(decoding: reversedBytes[reverseLocationRange], as: UTF8.self))!
+        expect(reverseLocation.sameCoordinates(as: newLocation), "Photo GPS did not reach the movie")
+        let photoBeforeSecondMerge = try Data(contentsOf: locatedPhoto)
+        expect(try await mergeLivePhotoPairMetadata(still: locatedPhoto, movie: reversedMovie).isEmpty, "Metadata merge is not idempotent")
+        expect(try Data(contentsOf: reversedMovie) == reversedBytes && Data(contentsOf: locatedPhoto) == photoBeforeSecondMerge, "Repeated merge changed bytes")
+        let conflictMovie = root.appendingPathComponent("conflicting.mov")
+        try FileManager.default.copyItem(at: live, to: conflictMovie)
+        try movieFillingMetadata(["com.apple.quicktime.location.ISO6709": "-33.8650+151.2094-004.250/",
+            "com.apple.quicktime.make": "Other Camera"], at: conflictMovie)
+        _ = try await mergeLivePhotoPairMetadata(still: locatedPhoto, movie: conflictMovie)
+        expect(pairImageLocation(imageProperties(locatedPhoto)) == newLocation, "Conflicting video GPS overwrote photo GPS")
+        let conflictBytes = try Data(contentsOf: conflictMovie)
+        let conflictRange = try movieMetadataValueRanges(in: conflictBytes, key: "com.apple.quicktime.location.ISO6709")[0]
+        expect(String(decoding: conflictBytes[conflictRange], as: UTF8.self) == "-33.8650+151.2094-004.250/", "Photo GPS overwrote conflicting video GPS")
+        let unlocatedMovie = root.appendingPathComponent("unlocated.mov")
+        let unlocatedPhoto = root.appendingPathComponent("unlocated.heic")
+        try FileManager.default.copyItem(at: live, to: unlocatedMovie)
+        try FileManager.default.copyItem(at: identifiedHEIC, to: unlocatedPhoto)
+        _ = try await mergeLivePhotoPairMetadata(still: unlocatedPhoto, movie: unlocatedMovie)
+        expect(pairImageLocation(imageProperties(unlocatedPhoto)) == nil, "A pair without GPS acquired fabricated coordinates")
+        expect(try movieMetadataValueRanges(in: Data(contentsOf: unlocatedMovie), key: "com.apple.quicktime.location.ISO6709").isEmpty, "Silent/no-GPS source acquired location metadata")
+        for invalid in ["+91.0000+118.0000/", "+28.0000+181.0000/", "28.0,118.0", "+NaN+118.0000/", "+28.0000+118.0000/CRSWGS84"] {
+            expect(PairLocation.iso6709(invalid) == nil, "Invalid/unknown coordinate representation was accepted")
+        }
+        let negative = PairLocation.iso6709("-33.8650+151.2094-004.250/")!
+        expect(negative.latitude < 0 && negative.altitude == -4.25, "Southern hemisphere or below-sea-level altitude changed")
+        // TIFF overlay reads both byte orders, retaining existing next-IFD pointers.
+        let littleTIFF = Data([0x49, 0x49, 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        var little = try TIFFMetadataOverlay(littleTIFF)
+        expect(try little.filling(tiff: [:], exif: [:], focal35mm: nil, location: negative, existingLocation: nil), "Little-endian GPS overlay failed")
+        expect(little.data.prefix(2) == Data("II".utf8), "Overlay changed TIFF byte order")
+        _ = try little.entries(at: Int(little.integer(4, width: 4)))
+        print("PASS: two-way GPS/date/camera metadata, exact accuracy, conflict preservation, no fabricated GPS, idempotence, opaque EXIF, unchanged HEIF/MOV payload and both TIFF byte orders")
+
+        // Recomposition replaces only exact, revision-checked prior exports.
+        let publication = root.appendingPathComponent("publication", isDirectory: true)
+        try FileManager.default.createDirectory(at: publication, withIntermediateDirectories: true)
+        func publicationFile(_ name: String, _ text: String) throws -> URL {
+            let url = publication.appendingPathComponent(name)
+            try Data(text.utf8).write(to: url)
+            return url
+        }
+        let oldStill = try publicationFile("owned.jpg", "old still")
+        let oldMovie = try publicationFile("owned.mov", "old movie")
+        let duplicateStill = try publicationFile("owned (2).jpg", "older duplicate still")
+        let duplicateMovie = try publicationFile("owned (2).mov", "older duplicate movie")
+        let unrelated = try publicationFile("unrelated.jpg", "unrelated")
+        let stageStill = try publicationFile("stage.heic", "new original still")
+        let stageMovie = try publicationFile("stage.mov", "new original movie")
+        let oldToken = ToolPairRevision(image: ToolFileRevision(oldStill)!, movie: ToolFileRevision(oldMovie)!)
+        let duplicateToken = ToolPairRevision(image: ToolFileRevision(duplicateStill)!, movie: ToolFileRevision(duplicateMovie)!)
+        let replacement = ToolCompositionReplacement(imagePath: oldStill.path, moviePath: oldMovie.path, revision: oldToken,
+            superseded: [ToolCompositionOutput(imagePath: duplicateStill.path, moviePath: duplicateMovie.path, revision: duplicateToken)])
+        let replaced = try publishLivePhoto(still: stageStill, movie: stageMovie, to: publication, baseName: "stage", replacement: replacement)
+        expect(replaced.0.lastPathComponent == "owned.heic" && replaced.1 == oldMovie, "Recomposition created another suffixed export")
+        expect(!FileManager.default.fileExists(atPath: oldStill.path) && !FileManager.default.fileExists(atPath: duplicateStill.path)
+            && !FileManager.default.fileExists(atPath: duplicateMovie.path), "Superseded same-source containers/exports remained")
+        expect(try Data(contentsOf: unrelated) == Data("unrelated".utf8), "Recomposition touched unrelated files")
+        let staleStill = try publicationFile("stale.heic", "stale still")
+        let staleMovie = try publicationFile("stale.mov", "stale movie")
+        expectError { _ = try publishLivePhoto(still: staleStill, movie: staleMovie, to: publication, baseName: "stage", replacement: replacement) }
+        expect(try Data(contentsOf: replaced.0) == Data("new original still".utf8), "A stale concurrent replacement overwrote the winner")
+        let current = ToolCompositionReplacement(imagePath: replaced.0.path, moviePath: replaced.1.path,
+            revision: ToolPairRevision(image: ToolFileRevision(replaced.0)!, movie: ToolFileRevision(replaced.1)!), superseded: nil)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: staleStill.path)
+        defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: staleStill.path) }
+        expectError { _ = try publishLivePhoto(still: staleStill, movie: staleMovie, to: publication, baseName: "stage", replacement: current) }
+        expect(try Data(contentsOf: replaced.0) == Data("new original still".utf8), "Failed publication did not restore the old photo")
+        expect(try Data(contentsOf: replaced.1) == Data("new original movie".utf8), "Failed publication did not restore the old video")
+        expect(try FileManager.default.contentsOfDirectory(atPath: publication.path).allSatisfy { !$0.hasPrefix(".hermes-replacement-") }, "Successful rollback left a transaction folder")
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: staleStill.path)
+        expectError { _ = try publishLivePhoto(still: staleStill, movie: staleMovie, to: publication, baseName: "stage", replacement: current, inputURLs: [replaced.0]) }
+        print("PASS: same-source recomposition, container upgrades, old-duplicate cleanup, unrelated/input protection, stale revision rejection and complete rollback")
+
         // Synthetic container makes the allowed four-byte mutation unambiguous.
         let sampleEntry = box("hev1", Data(repeating: 0, count: 78) + box("hvcC", Data([1])))
         var stsd = Data(repeating: 0, count: 4); appendUInt32BE(1, to: &stsd); stsd.append(sampleEntry)

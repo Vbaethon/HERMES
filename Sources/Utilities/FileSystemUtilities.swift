@@ -1,7 +1,59 @@
 import Foundation
 import Darwin
+import CryptoKit
 
-/// Presentation metadata only. It never participates in media pairing or validation.
+/// A local receipt, never an authenticated URL. It survives scans and restarts
+/// without changing the downloaded media's data fork.
+struct MediaSourceProvenance: Codable, Hashable, Sendable {
+    enum State: String, Codable, Sendable {
+        case cloudOriginal, originalWithRecoveredAudio, playbackBackup, unconfirmed
+    }
+    var state: State
+    let noteID: String
+    let imageFileID: String
+    let objectKey: String
+    let sourceHost: String
+    let sourceField: String?
+    let sha256: String?
+    var size: Int64? = nil
+    var modifiedAt: TimeInterval? = nil
+    private static let attribute = "com.codex.hermes.source.v1"
+
+    func write(to url: URL) {
+        var receipt = self
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        receipt.size = values?.fileSize.map(Int64.init)
+        receipt.modifiedAt = values?.contentModificationDate?.timeIntervalSince1970
+        guard let data = try? JSONEncoder().encode(receipt), data.count <= 8192 else { return }
+        _ = data.withUnsafeBytes { setxattr(url.path, Self.attribute, $0.baseAddress, $0.count, 0, 0) }
+    }
+
+    static func read(from url: URL) -> Self? {
+        let size = getxattr(url.path, attribute, nil, 0, 0, 0)
+        guard size > 0, size <= 8192 else { return nil }
+        var data = Data(count: size)
+        guard data.withUnsafeMutableBytes({ getxattr(url.path, attribute, $0.baseAddress, size, 0, 0) }) == size,
+              var receipt = try? JSONDecoder().decode(Self.self, from: data), !receipt.noteID.isEmpty else { return nil }
+        let current = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        if current?.fileSize.map(Int64.init) != receipt.size || current?.contentModificationDate?.timeIntervalSince1970 != receipt.modifiedAt {
+            receipt.state = .unconfirmed
+        }
+        return receipt
+    }
+
+    static func hash(of url: URL) -> String? {
+        guard let file = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? file.close() }
+        var hash = SHA256()
+        do {
+            while let bytes = try file.read(upToCount: 1_048_576), !bytes.isEmpty { hash.update(data: bytes) }
+            return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch { return nil }
+    }
+}
+
+/// Display order and provenance for downloaded files. Provenance can constrain
+/// replacement cleanup; it never determines media pairing or source validity.
 struct MediaDisplayOrder: Codable, Hashable, Sendable {
     let postID: String
     let downloadedAt: TimeInterval

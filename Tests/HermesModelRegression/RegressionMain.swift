@@ -176,6 +176,83 @@ import Foundation
         expect(deletion.completed.count == 1 && deletion.operationNotices[.completed]?.contains("测试拒绝删除") == true, "failed deletion must retain record and visible error")
         pass("deletion failure retains record and details")
 
+        let recomposition = try model("recomposition")
+        let repeatedSource = try pair(recomposition.downloadOutputFolder, "resource")
+        let firstExport = try pair(recomposition.outputFolder, "resource")
+        let oldDuplicate = try pair(recomposition.outputFolder, "resource (2)")
+        let unrelatedSource = try pair(root.appendingPathComponent("unrelated-input"), "resource")
+        let unrelatedExport = try pair(recomposition.outputFolder, "unrelated-resource")
+        var firstRecord = record(firstExport, source: repeatedSource)
+        firstRecord.importedToPhotos = true
+        let duplicateRecord = record(oldDuplicate, source: repeatedSource)
+        let unrelatedRecord = record(unrelatedExport, source: unrelatedSource)
+        recomposition.completed = [firstRecord, duplicateRecord, unrelatedRecord]
+        recomposition.downloadCompleted = [firstRecord, duplicateRecord]
+        try Data("redownloaded original still".utf8).write(to: repeatedSource.imageURL, options: .atomic)
+        try Data("redownloaded original movie".utf8).write(to: repeatedSource.videoURL, options: .atomic)
+        recomposition.downloadPairs = [repeatedSource]
+        recomposition.compositionRunner = { planned, _ in
+            guard let replacement = planned.replacementOutput, replacement.superseded?.count == 1 else {
+                return .failure("Repeated source did not supply exact previous exports")
+            }
+            let image = URL(fileURLWithPath: replacement.imagePath)
+            let movie = URL(fileURLWithPath: replacement.moviePath)
+            for old in replacement.superseded ?? [] {
+                try? FileManager.default.removeItem(atPath: old.imagePath)
+                try? FileManager.default.removeItem(atPath: old.moviePath)
+            }
+            try? Data("updated original photo".utf8).write(to: image, options: .atomic)
+            try? Data("updated original movie".utf8).write(to: movie, options: .atomic)
+            let message = "HERMES_RESULT:" + String(decoding: try! JSONEncoder().encode(["imagePath": image.path, "moviePath": movie.path]), as: UTF8.self)
+            return .success(message)
+        }
+        await recomposition.processDownloadPairs()
+        expect(recomposition.completed.count == 2 && recomposition.downloadCompleted.count == 1,
+            "Repeated composition must replace same-resource records rather than append another completed tile")
+        expect(recomposition.completed.contains { $0.id == unrelatedRecord.id }, "Same-name inputs from another directory must retain their completed record")
+        expect(recomposition.downloadCompleted.first?.importedToPhotos == false, "A replaced output must not inherit the old version's imported flag")
+        recomposition.refreshCompleted()
+        try await Task.sleep(for: .milliseconds(200))
+        expect(recomposition.completed.count == 2, "Directory refresh resurrected an obsolete duplicate export")
+        let repeatedReload = ImporterModel(refreshOnInit: false)
+        expect(repeatedReload.completed.count == 2 && repeatedReload.downloadCompleted.count == 1, "Deduplication was not persisted across restart")
+        var changedContainerRecord = recomposition.downloadCompleted[0]
+        changedContainerRecord.sourceImagePath = repeatedSource.imageURL.deletingPathExtension().appendingPathExtension("heic").path
+        changedContainerRecord.sourceVideoPath = repeatedSource.videoURL.deletingPathExtension().appendingPathExtension("mp4").path
+        expect(changedContainerRecord.hasSameCompositionSource(as: recomposition.downloadCompleted[0]), "Container upgrades lost the resource identity")
+        var otherPostRecord = changedContainerRecord
+        otherPostRecord.displayOrder = MediaDisplayOrder(postID: "xhs:another-note", downloadedAt: 1, index: 1)
+        changedContainerRecord.displayOrder = MediaDisplayOrder(postID: "xhs:this-note", downloadedAt: 1, index: 1)
+        expect(!otherPostRecord.hasSameCompositionSource(as: changedContainerRecord), "Same-name resources from different notes were deduplicated")
+        pass("recomposition updates exact outputs and persisted history, cleans prior duplicates, resets import state and protects unrelated identities")
+
+        let historicalDuplicates = try model("historical-duplicates")
+        let historicSource = try pair(historicalDuplicates.downloadOutputFolder, "same")
+        let historicOld = try pair(historicalDuplicates.outputFolder, "same")
+        let historicNew = try pair(historicalDuplicates.outputFolder, "same (2)")
+        let historicOldRecord = record(historicOld, source: historicSource)
+        let historicNewRecord = record(historicNew, source: historicSource)
+        historicalDuplicates.completed = [historicOldRecord, historicNewRecord]
+        historicalDuplicates.downloadCompleted = [historicOldRecord, historicNewRecord]
+        let reversibleTrash = root.appendingPathComponent("historical-duplicate-trash")
+        try fm.createDirectory(at: reversibleTrash, withIntermediateDirectories: true)
+        historicalDuplicates.trashFiles = { urls in
+            do {
+                for url in urls { try FileManager.default.moveItem(at: url, to: reversibleTrash.appendingPathComponent(url.lastPathComponent)) }
+                return nil
+            } catch { return error.localizedDescription }
+        }
+        historicalDuplicates.refreshCompleted()
+        try await waitUntil { historicalDuplicates.completed.count == 1 }
+        expect(historicalDuplicates.downloadCompleted.count == 1, "Historical duplicate download history was retained")
+        expect(fm.fileExists(atPath: historicNew.imageURL.path) && fm.fileExists(atPath: historicNew.videoURL.path), "Historical repair removed the current export")
+        expect(fm.fileExists(atPath: historicSource.imageURL.path) && fm.fileExists(atPath: historicSource.videoURL.path), "Historical repair touched raw download sources")
+        expect(fm.fileExists(atPath: reversibleTrash.appendingPathComponent(historicOld.imageURL.lastPathComponent).path), "Historical duplicate was not preserved through recoverable trash")
+        historicalDuplicates.refreshCompleted()
+        try await Task.sleep(for: .milliseconds(200))
+        expect(historicalDuplicates.completed.count == 1, "Historical duplicate returned on a second directory scan")
+        pass("verified historical duplicates are repaired with recoverable trash, raw sources preserved and no scan resurrection")
+
         let asyncModel = try model("async-queue")
         let original = try pair(root.appendingPathComponent("async-input"), "zzz")
         let added = try pair(original.imageURL.deletingLastPathComponent(), "aaa")

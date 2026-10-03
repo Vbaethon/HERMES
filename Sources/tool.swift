@@ -12,6 +12,7 @@ enum ToolError: Error, CustomStringConvertible {
     case cannotAddReaderOutput
     case cannotAddWriterInput
     case failed(String)
+    case metadataUnsupported(String)
 
     var description: String {
         switch self {
@@ -26,6 +27,8 @@ enum ToolError: Error, CustomStringConvertible {
         case .cannotAddWriterInput:
             return "Could not add writer input."
         case .failed(let message):
+            return message
+        case .metadataUnsupported(let message):
             return message
         }
     }
@@ -794,6 +797,445 @@ func writeHEICWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throw
     }
 }
 
+// Shared metadata is filled on the staged pair only. TIFF overlays keep all old
+// offsets (including opaque MakerNotes/thumbnail IFDs); HEIF image items and MOV
+// sample offsets stay in place. No image, audio, video or auxiliary track codec
+// is invoked by this path.
+struct PairLocation: Equatable {
+    var latitude: Double
+    var longitude: Double
+    var altitude: Double?
+    var accuracy: Double?
+
+    static func iso6709(_ value: String, accuracy: String? = nil) -> Self? {
+        guard value.count <= 128,
+              let regex = try? NSRegularExpression(pattern: #"^([+-][0-9]{2}(?:\.[0-9]+)?)([+-][0-9]{3}(?:\.[0-9]+)?)([+-][0-9]+(?:\.[0-9]+)?)?/$"#),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }
+        func number(_ index: Int) -> Double? {
+            guard let range = Range(match.range(at: index), in: value) else { return nil }
+            return Double(value[range])
+        }
+        guard let latitude = number(1), let longitude = number(2), abs(latitude) <= 90, abs(longitude) <= 180 else { return nil }
+        let altitude = number(3)
+        guard altitude == nil || (altitude!.isFinite && abs(altitude!) < 1_000_000) else { return nil }
+        let precision = accuracy.flatMap(Double.init).flatMap { $0.isFinite && $0 >= 0 && $0 < 1_000_000 ? $0 : nil }
+        return Self(latitude: latitude, longitude: longitude, altitude: altitude, accuracy: precision)
+    }
+
+    var isoString: String {
+        let coordinates = String(format: "%+011.7f%+012.7f", locale: Locale(identifier: "en_US_POSIX"), latitude, longitude)
+        return coordinates + (altitude.map { String(format: "%+.3f", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? "") + "/"
+    }
+
+    func sameCoordinates(as other: Self) -> Bool {
+        abs(latitude - other.latitude) < 0.000001 && abs(longitude - other.longitude) < 0.000001
+    }
+}
+
+struct TIFFMetadataOverlay {
+    struct Entry {
+        var tag: UInt16
+        var bytes: Data // The original 12-byte record, including its unchanged offset.
+    }
+    var data: Data
+    let littleEndian: Bool
+
+    init(_ data: Data) throws {
+        guard data.count >= 8, data.prefix(2) == Data("MM".utf8) || data.prefix(2) == Data("II".utf8) else { throw ToolError.noAssetID }
+        self.data = data
+        littleEndian = data[0] == 0x49
+        guard integer(2, width: 2) == 42 else { throw ToolError.noAssetID }
+    }
+
+    func integer(_ offset: Int, width: Int) -> UInt32 {
+        let bytes = data[offset..<offset + width]
+        return (littleEndian ? Array(bytes.reversed()) : Array(bytes)).reduce(0) { ($0 << 8) | UInt32($1) }
+    }
+
+    func encoded(_ value: UInt32, width: Int) -> Data {
+        let bytes = (0..<width).reversed().map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+        return Data(littleEndian ? bytes.reversed() : bytes)
+    }
+
+    func entries(at offset: Int) throws -> ([Entry], UInt32) {
+        guard offset >= 8, offset <= data.count - 2 else { throw ToolError.noAssetID }
+        let count = Int(integer(offset, width: 2))
+        guard count <= 4096, count <= (data.count - offset - 2) / 12,
+              data.count - offset - 2 - count * 12 >= 4 else { throw ToolError.noAssetID }
+        var result: [Entry] = []
+        for i in 0..<count {
+            let start = offset + 2 + i * 12
+            let type = UInt16(integer(start + 2, width: 2))
+            let items = Int(integer(start + 4, width: 4))
+            let width = tiffTypeSize(type)
+            guard items <= Int.max / width else { throw ToolError.noAssetID }
+            let length = items * width
+            if length > 4 {
+                let valueOffset = Int(integer(start + 8, width: 4))
+                guard valueOffset <= data.count, length <= data.count - valueOffset else { throw ToolError.noAssetID }
+            }
+            result.append(Entry(tag: UInt16(integer(start, width: 2)), bytes: Data(data[start..<start + 12])))
+        }
+        return (result, integer(offset + 2 + count * 12, width: 4))
+    }
+
+    func pointer(_ entries: [Entry], tag: UInt16) -> Int? {
+        guard let entry = entries.first(where: { $0.tag == tag }) else { return nil }
+        let bytes = littleEndian ? Array(entry.bytes[8..<12].reversed()) : Array(entry.bytes[8..<12])
+        return Int(bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
+    }
+
+    mutating func entry(tag: UInt16, type: UInt16, count: UInt32, value: Data) throws -> Entry {
+        guard data.count <= Int(UInt32.max) - value.count else { throw ToolError.noAssetID }
+        var bytes = encoded(UInt32(tag), width: 2) + encoded(UInt32(type), width: 2) + encoded(count, width: 4)
+        if value.count <= 4 { bytes += value + Data(repeating: 0, count: 4 - value.count) }
+        else {
+            if data.count % 2 != 0 { data.append(0) }
+            bytes += encoded(UInt32(data.count), width: 4)
+            data += value
+        }
+        return Entry(tag: tag, bytes: bytes)
+    }
+
+    mutating func appendIFD(_ entries: [Entry], next: UInt32 = 0) throws -> UInt32 {
+        guard entries.count <= 4096, data.count < Int(UInt32.max) - entries.count * 12 - 8 else { throw ToolError.noAssetID }
+        if data.count % 2 != 0 { data.append(0) }
+        let offset = UInt32(data.count)
+        data += encoded(UInt32(entries.count), width: 2)
+        for entry in entries.sorted(by: { $0.tag < $1.tag }) { data += entry.bytes }
+        data += encoded(next, width: 4)
+        return offset
+    }
+
+    func rational(_ value: Double) -> Data? {
+        guard value.isFinite, value >= 0, value <= Double(UInt32.max) / 1000 else { return nil }
+        let denominator: UInt32 = value <= Double(UInt32.max) / 1_000_000 ? 1_000_000 : 1000
+        return encoded(UInt32((value * Double(denominator)).rounded()), width: 4) + encoded(denominator, width: 4)
+    }
+
+    func angle(_ value: Double) -> Data {
+        let absolute = abs(value), degrees = floor(absolute), minutes = floor((absolute - degrees) * 60)
+        let seconds = ((absolute - degrees) * 60 - minutes) * 60
+        return encoded(UInt32(degrees), width: 4) + encoded(1, width: 4)
+            + encoded(UInt32(minutes), width: 4) + encoded(1, width: 4)
+            + encoded(UInt32((seconds * 1_000_000).rounded()), width: 4) + encoded(1_000_000, width: 4)
+    }
+
+    mutating func filling(tiff: [UInt16: String], exif: [UInt16: String], focal35mm: UInt16?, location: PairLocation?,
+                          existingLocation: PairLocation?) throws -> Bool {
+        var (root, next) = try entries(at: Int(integer(4, width: 4)))
+        var changed = false
+        for (tag, text) in tiff.sorted(by: { $0.key < $1.key }) where !root.contains(where: { $0.tag == tag }) {
+            let bytes = Data(text.utf8) + Data([0])
+            root.append(try entry(tag: tag, type: 2, count: UInt32(bytes.count), value: bytes)); changed = true
+        }
+        if !exif.isEmpty || focal35mm != nil {
+            let oldOffset = pointer(root, tag: 0x8769)
+            var (fields, exifNext) = try oldOffset.map { try entries(at: $0) } ?? ([], 0)
+            var exifChanged = false
+            for (tag, text) in exif.sorted(by: { $0.key < $1.key }) where !fields.contains(where: { $0.tag == tag }) {
+                let bytes = Data(text.utf8) + Data([0])
+                fields.append(try entry(tag: tag, type: 2, count: UInt32(bytes.count), value: bytes)); exifChanged = true
+            }
+            if let focal35mm, !fields.contains(where: { $0.tag == 0xa405 }) {
+                fields.append(try entry(tag: 0xa405, type: 3, count: 1, value: encoded(UInt32(focal35mm), width: 2))); exifChanged = true
+            }
+            if exifChanged {
+                let offset = try appendIFD(fields, next: exifNext)
+                root.removeAll { $0.tag == 0x8769 }
+                root.append(try entry(tag: 0x8769, type: 4, count: 1, value: encoded(offset, width: 4))); changed = true
+            }
+        }
+        if let location {
+            let oldOffset = pointer(root, tag: 0x8825)
+            var (gps, gpsNext) = try oldOffset.map { try entries(at: $0) } ?? ([], 0)
+            let coordinateTags: Set<UInt16> = [1, 2, 3, 4]
+            // Incomplete or conflicting coordinates remain intact; do not build
+            // one coordinate from each side of the pair.
+            let canFill = gps.allSatisfy { !coordinateTags.contains($0.tag) }
+                || existingLocation.map { $0.sameCoordinates(as: location) } == true
+            if canFill {
+                var additions: [(UInt16, UInt16, UInt32, Data)] = [
+                    (0, 1, 4, Data([2, 3, 0, 0])),
+                    (1, 2, 2, Data((location.latitude < 0 ? "S\0" : "N\0").utf8)),
+                    (2, 5, 3, angle(location.latitude)),
+                    (3, 2, 2, Data((location.longitude < 0 ? "W\0" : "E\0").utf8)),
+                    (4, 5, 3, angle(location.longitude))]
+                if let altitude = location.altitude, let bytes = rational(abs(altitude)),
+                   !gps.contains(where: { $0.tag == 5 || $0.tag == 6 }) {
+                    additions += [(5, 1, 1, Data([altitude < 0 ? 1 : 0])), (6, 5, 1, bytes)]
+                }
+                if let accuracy = location.accuracy, let bytes = rational(accuracy) { additions.append((31, 5, 1, bytes)) }
+                var gpsChanged = false
+                for (tag, type, count, bytes) in additions where !gps.contains(where: { $0.tag == tag }) {
+                    gps.append(try entry(tag: tag, type: type, count: count, value: bytes)); gpsChanged = true
+                }
+                if gpsChanged {
+                    let offset = try appendIFD(gps, next: gpsNext)
+                    root.removeAll { $0.tag == 0x8825 }
+                    root.append(try entry(tag: 0x8825, type: 4, count: 1, value: encoded(offset, width: 4))); changed = true
+                }
+            }
+        }
+        if changed {
+            let offset = try appendIFD(root, next: next)
+            data.replaceSubrange(4..<8, with: encoded(offset, width: 4))
+        }
+        return changed
+    }
+}
+
+func stillExifTIFF(at url: URL) throws -> Data {
+    if ["heic", "heif"].contains(url.pathExtension.lowercased()) { return try extractHEICExifData(from: url) }
+    let bytes = try Data(contentsOf: url)
+    guard bytes.count >= 4, bytes.prefix(2) == Data([0xff, 0xd8]) else { throw ToolError.noAssetID }
+    var offset = 2
+    while offset <= bytes.count - 4, bytes[offset] == 0xff {
+        if bytes[offset + 1] == 0xda || bytes[offset + 1] == 0xd9 { break }
+        let length = Int(readUInt16BE(bytes, offset + 2))
+        guard length >= 2, length <= bytes.count - offset - 2 else { throw ToolError.noAssetID }
+        if bytes[offset + 1] == 0xe1, length >= 8, bytes[offset + 4..<offset + 10] == Data("Exif\0\0".utf8) {
+            return Data(bytes[offset + 10..<offset + 2 + length])
+        }
+        offset += length + 2
+    }
+    throw ToolError.noAssetID
+}
+
+func writeStillExifTIFF(_ tiff: Data, at url: URL) throws {
+    var bytes = try Data(contentsOf: url)
+    if ["heic", "heif"].contains(url.pathExtension.lowercased()) {
+        let location = try heicExifItemLocation(in: bytes)
+        let oldItem = Data(bytes[location.itemRange])
+        guard oldItem.count >= 4, Int(readUInt32BE(oldItem, 0)) <= oldItem.count - 4 else { throw ToolError.noAssetID }
+        let prefixLength = 4 + Int(readUInt32BE(oldItem, 0))
+        let item = Data(oldItem.prefix(prefixLength)) + tiff
+        let offset = bytes.count + 8
+        guard item.count <= Int(UInt32.max) - 8, integerFits(item.count, byteCount: location.extentLengthRange.count) else { throw ToolError.noAssetID }
+        if let range = location.constructionMethodRange {
+            writeIntegerBE(readIntegerBE(bytes, range: range) & 0xf000, range: range, in: &bytes)
+        }
+        if location.extentOffsetRange.count > 0, integerFits(offset, byteCount: location.extentOffsetRange.count) {
+            writeIntegerBE(0, range: location.baseOffsetRange, in: &bytes)
+            writeIntegerBE(offset, range: location.extentOffsetRange, in: &bytes)
+        } else if location.baseOffsetRange.count > 0, integerFits(offset, byteCount: location.baseOffsetRange.count) {
+            writeIntegerBE(offset, range: location.baseOffsetRange, in: &bytes)
+            writeIntegerBE(0, range: location.extentOffsetRange, in: &bytes)
+        } else { throw ToolError.noAssetID }
+        writeIntegerBE(item.count, range: location.extentLengthRange, in: &bytes)
+        for box in try isoBoxes(in: bytes, range: 0..<bytes.count) where readUInt32BE(bytes, box.range.lowerBound) == 0 {
+            guard box.range.count <= Int(UInt32.max) else { throw ToolError.metadataUnsupported("HEIF metadata capacity exceeded.") }
+            var size = Data(); appendUInt32BE(UInt32(box.range.count), to: &size)
+            bytes.replaceSubrange(box.range.lowerBound..<box.range.lowerBound + 4, with: size)
+        }
+        appendUInt32BE(UInt32(item.count + 8), to: &bytes); bytes += Data("mdat".utf8) + item
+    } else {
+        guard tiff.count <= Int(UInt16.max) - 8 else { throw ToolError.metadataUnsupported("EXIF metadata is too large; pixels were not recompressed.") }
+        let payload = Data("Exif\0\0".utf8) + tiff
+        var segment = Data([0xff, 0xe1]); appendUInt16BE(UInt16(payload.count + 2), to: &segment); segment += payload
+        var offset = 2
+        var replaced = false
+        while offset <= bytes.count - 4, bytes[offset] == 0xff {
+            if bytes[offset + 1] == 0xda { break }
+            let length = Int(readUInt16BE(bytes, offset + 2))
+            guard length >= 2, length <= bytes.count - offset - 2 else { throw ToolError.noAssetID }
+            if bytes[offset + 1] == 0xe1, length >= 8, bytes[offset + 4..<offset + 10] == Data("Exif\0\0".utf8) {
+                bytes.replaceSubrange(offset..<offset + 2 + length, with: segment); replaced = true; break
+            }
+            offset += length + 2
+        }
+        guard replaced else { throw ToolError.noAssetID }
+    }
+    try bytes.write(to: url, options: .atomic)
+}
+
+func metadataBox(_ type: String, _ payload: Data) throws -> Data {
+    guard payload.count <= Int(UInt32.max) - 8 else { throw ToolError.noAssetID }
+    var bytes = Data(); appendUInt32BE(UInt32(payload.count + 8), to: &bytes)
+    bytes += Data(type.utf8) + payload
+    return bytes
+}
+
+func movieFillingMetadata(_ additions: [String: String], at url: URL) throws {
+    guard !additions.isEmpty else { return }
+    var data = try Data(contentsOf: url)
+    let top = try isoBoxes(in: data, range: 0..<data.count)
+    let movies = top.filter { $0.isType("moov") }
+    guard movies.count == 1, let movie = movies.first, !top.contains(where: { $0.isType("moof") }),
+          !(try isoBoxes(in: data, range: movie.payload)).contains(where: { $0.isType("mvex") }) else { throw ToolError.metadataUnsupported("Fragmented movie metadata was preserved in its original container.") }
+    func adding(to container: ISOBox?) throws -> Data {
+        var children: [ISOBox] = []
+        var fullBoxPrefix = Data()
+        if let container {
+            if let parsed = try? isoBoxes(in: data, range: container.payload) { children = parsed }
+            else {
+                guard container.payload.count >= 4, readUInt32BE(data, container.payload.lowerBound) == 0 else { throw ToolError.noAssetID }
+                fullBoxPrefix = Data(repeating: 0, count: 4)
+                children = try isoBoxes(in: data, range: container.payload.lowerBound + 4..<container.payload.upperBound)
+            }
+        }
+        var keysPayload = Data(repeating: 0, count: 8)
+        var valuesPayload = Data()
+        var count: UInt32 = 0
+        if let keys = children.first(where: { $0.isType("keys") }), let values = children.first(where: { $0.isType("ilst") }) {
+            guard keys.payload.count >= 8 else { throw ToolError.noAssetID }
+            keysPayload = Data(data[keys.payload]); valuesPayload = Data(data[values.payload])
+            count = readUInt32BE(keysPayload, 4)
+            guard count <= 4096 else { throw ToolError.noAssetID }
+        }
+        for (key, text) in additions.sorted(by: { $0.key < $1.key }) {
+            count += 1
+            keysPayload += try metadataBox("mdta", Data(key.utf8))
+            var value = Data(); appendUInt32BE(1, to: &value); appendUInt32BE(0, to: &value); value += Data(text.utf8)
+            let atom = try metadataBox("data", value)
+            var entry = Data(); appendUInt32BE(UInt32(atom.count + 8), to: &entry); appendUInt32BE(count, to: &entry); entry += atom
+            valuesPayload += entry
+        }
+        var countBytes = Data(); appendUInt32BE(count, to: &countBytes); keysPayload.replaceSubrange(4..<8, with: countBytes)
+        let newKeys = try metadataBox("keys", keysPayload), newValues = try metadataBox("ilst", valuesPayload)
+        var payload = fullBoxPrefix
+        for child in children where !child.isType("keys") && !child.isType("ilst") { payload += data[child.range] }
+        if !children.contains(where: { $0.isType("hdlr") }) {
+            var handler = Data(repeating: 0, count: 8); handler += Data("mdta".utf8) + Data(repeating: 0, count: 13)
+            payload += try metadataBox("hdlr", handler)
+        }
+        payload += newKeys + newValues
+        return try metadataBox("meta", payload)
+    }
+    func isKeyed(_ box: ISOBox) -> Bool {
+        guard box.isType("meta") else { return false }
+        let children = (try? isoBoxes(in: data, range: box.payload))
+            ?? (try? isoBoxes(in: data, range: box.payload.lowerBound + 4..<box.payload.upperBound)) ?? []
+        return children.contains { $0.isType("hdlr") && $0.payload.count >= 12 && readUInt32BE(data, $0.payload.lowerBound + 8) == fourCC("mdta") }
+    }
+    var replaced = false
+    var moviePayload = Data()
+    for child in try isoBoxes(in: data, range: movie.payload) {
+        if !replaced, isKeyed(child) { moviePayload += try adding(to: child); replaced = true }
+        else if !replaced, child.isType("udta") {
+            var userPayload = Data()
+            for item in try isoBoxes(in: data, range: child.payload) {
+                if !replaced, isKeyed(item) { userPayload += try adding(to: item); replaced = true }
+                else { userPayload += data[item.range] }
+            }
+            moviePayload += try metadataBox("udta", userPayload)
+        } else { moviePayload += data[child.range] }
+    }
+    if !replaced { moviePayload += try adding(to: nil) }
+    let updatedMovie = try metadataBox("moov", moviePayload)
+    // Relocating the metadata container leaves every existing stco/co64 sample
+    // offset valid. Keep the old range as free rather than shifting any mdat.
+    for box in top where readUInt32BE(data, box.range.lowerBound) == 0 {
+        guard box.range.count <= Int(UInt32.max) else { throw ToolError.noAssetID }
+        var size = Data(); appendUInt32BE(UInt32(box.range.count), to: &size)
+        data.replaceSubrange(box.range.lowerBound..<box.range.lowerBound + 4, with: size)
+    }
+    data.replaceSubrange(movie.typeRange, with: Data("free".utf8)); data += updatedMovie
+    try data.write(to: url, options: .atomic)
+}
+
+func pairImageLocation(_ properties: [String: Any]) -> PairLocation? {
+    let gps = properties[kCGImagePropertyGPSDictionary as String] as? [String: Any] ?? [:]
+    guard let latitude = (gps[kCGImagePropertyGPSLatitude as String] as? NSNumber)?.doubleValue,
+          let longitude = (gps[kCGImagePropertyGPSLongitude as String] as? NSNumber)?.doubleValue,
+          let latitudeRef = gps[kCGImagePropertyGPSLatitudeRef as String] as? String,
+          let longitudeRef = gps[kCGImagePropertyGPSLongitudeRef as String] as? String,
+          ["N", "S"].contains(latitudeRef), ["E", "W"].contains(longitudeRef),
+          latitude.isFinite, longitude.isFinite, latitude >= 0, latitude <= 90, longitude >= 0, longitude <= 180 else { return nil }
+    let altitude = (gps[kCGImagePropertyGPSAltitude as String] as? NSNumber)?.doubleValue
+    let altitudeRef = (gps[kCGImagePropertyGPSAltitudeRef as String] as? NSNumber)?.intValue
+    let accuracy = (gps[kCGImagePropertyGPSHPositioningError as String] as? NSNumber)?.doubleValue
+    return PairLocation(latitude: latitudeRef == "S" ? -latitude : latitude,
+        longitude: longitudeRef == "W" ? -longitude : longitude,
+        altitude: altitude.flatMap { $0.isFinite && $0 >= 0 && $0 < 1_000_000 && (altitudeRef == 0 || altitudeRef == 1) ? (altitudeRef == 1 ? -$0 : $0) : nil },
+        accuracy: accuracy.flatMap { $0.isFinite && $0 >= 0 && $0 < 1_000_000 ? $0 : nil })
+}
+
+func mergeLivePhotoPairMetadata(still: URL, movie: URL) async throws -> [String] {
+    guard let imageSource = CGImageSourceCreateWithURL(still as CFURL, nil),
+          let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else { throw ToolError.noAssetID }
+    let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+    let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+    let asset = AVURLAsset(url: movie)
+    var items = try await asset.load(.metadata)
+    if let mainTrack = try await asset.loadTracks(withMediaType: .video).first { items += try await mainTrack.load(.metadata) }
+    var texts: [String: String] = [:]
+    var existingKeys = Set<String>()
+    for item in items {
+        guard let key = item.key as? String, key.hasPrefix("com.apple.quicktime.") else { continue }
+        existingKeys.insert(key)
+        if let text = try await item.load(.stringValue), !text.isEmpty, text.utf8.count <= 4096, texts[key] == nil { texts[key] = text }
+    }
+    let prefix = "com.apple.quicktime."
+    let imageLocation = pairImageLocation(properties)
+    let movieLocation = texts[prefix + "location.ISO6709"].flatMap { PairLocation.iso6709($0, accuracy: texts[prefix + "location.accuracy.horizontal"]) }
+    var movieAdditions: [String: String] = [:]
+    var tiffAdditions: [UInt16: String] = [:]
+    var exifAdditions: [UInt16: String] = [:]
+    let mappings: [(String, UInt16, String)] = [("make", 0x010f, kCGImagePropertyTIFFMake as String),
+        ("model", 0x0110, kCGImagePropertyTIFFModel as String), ("software", 0x0131, kCGImagePropertyTIFFSoftware as String),
+        ("description", 0x010e, kCGImagePropertyTIFFImageDescription as String),
+        ("copyright", 0x8298, kCGImagePropertyTIFFCopyright as String), ("author", 0x013b, kCGImagePropertyTIFFArtist as String)]
+    for (suffix, tag, imageKey) in mappings {
+        if let value = tiff[imageKey] as? String, !value.isEmpty, value.utf8.count <= 4096 {
+            if !existingKeys.contains(prefix + suffix) { movieAdditions[prefix + suffix] = value }
+        } else if tiff[imageKey] == nil, let value = texts[prefix + suffix] { tiffAdditions[tag] = value }
+    }
+    let lensKey = prefix + "camera.lens_model"
+    if let lens = exif[kCGImagePropertyExifLensModel as String] as? String, !lens.isEmpty, lens.utf8.count <= 4096 {
+        if !existingKeys.contains(lensKey) { movieAdditions[lensKey] = lens }
+    } else if exif[kCGImagePropertyExifLensModel as String] == nil, let lens = texts[lensKey] { exifAdditions[0xa434] = lens }
+    let focalKey = prefix + "camera.focal_length.35mm_equivalent"
+    var focal35mm: UInt16?
+    if let focal = (exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] as? NSNumber)?.intValue, focal > 0, focal <= 65535 {
+        if !existingKeys.contains(focalKey) { movieAdditions[focalKey] = String(focal) }
+    } else if let text = texts[focalKey], let value = UInt16(text), value > 0 { focal35mm = value }
+    // EXIF dates carry local wall time separately from the UTC offset. Copy a
+    // creation date only with a real offset; never invent a timezone.
+    let dateKey = prefix + "creationdate"
+    if let date = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String,
+       let offset = exif[kCGImagePropertyExifOffsetTimeOriginal as String] as? String,
+       date.range(of: #"^[0-9]{4}:[0-9]{2}:[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$"#, options: .regularExpression) != nil,
+       offset.range(of: #"^[+-][0-9]{2}:[0-9]{2}$"#, options: .regularExpression) != nil,
+       !existingKeys.contains(dateKey) {
+        let local = date.prefix(10).replacingOccurrences(of: ":", with: "-") + "T" + date.suffix(8)
+        movieAdditions[dateKey] = local + offset
+    } else if exif[kCGImagePropertyExifDateTimeOriginal as String] == nil,
+              tiff[kCGImagePropertyTIFFDateTime as String] == nil, let date = texts[dateKey],
+              let regex = try? NSRegularExpression(pattern: #"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?(Z|[+-][0-9]{2}:?[0-9]{2})$"#),
+              let match = regex.firstMatch(in: date, range: NSRange(date.startIndex..., in: date)) {
+        func group(_ index: Int) -> String? { Range(match.range(at: index), in: date).map { String(date[$0]) } }
+        exifAdditions[0x9003] = "\(group(1)!):\(group(2)!):\(group(3)!) \(group(4)!)"
+        let offset = group(6)!
+        exifAdditions[0x9011] = offset == "Z" ? "+00:00" : (offset.count == 5 ? String(offset.prefix(3)) + ":" + offset.suffix(2) : offset)
+        if let fraction = group(5) { exifAdditions[0x9291] = fraction }
+    }
+    if !existingKeys.contains(prefix + "location.ISO6709"), let imageLocation {
+        movieAdditions[prefix + "location.ISO6709"] = imageLocation.isoString
+        if let accuracy = imageLocation.accuracy { movieAdditions[prefix + "location.accuracy.horizontal"] = String(accuracy) }
+    } else if let movieLocation, let imageLocation, movieLocation.sameCoordinates(as: imageLocation),
+              !existingKeys.contains(prefix + "location.accuracy.horizontal"), let accuracy = imageLocation.accuracy {
+        movieAdditions[prefix + "location.accuracy.horizontal"] = String(accuracy)
+    }
+    var changes: [String] = []
+    if !tiffAdditions.isEmpty || !exifAdditions.isEmpty || focal35mm != nil || movieLocation != nil {
+        do {
+            var overlay = try TIFFMetadataOverlay(stillExifTIFF(at: still))
+            if try overlay.filling(tiff: tiffAdditions, exif: exifAdditions, focal35mm: focal35mm,
+                                   location: movieLocation, existingLocation: imageLocation) {
+                try writeStillExifTIFF(overlay.data, at: still); changes.append("照片补齐兼容元数据")
+            }
+        } catch ToolError.noAssetID { changes.append("照片元数据结构暂不支持，已保留原信息") }
+        catch ToolError.metadataUnsupported(let message) { changes.append(message) }
+    }
+    if !movieAdditions.isEmpty {
+        do { try movieFillingMetadata(movieAdditions, at: movie); changes.append("视频补齐兼容元数据") }
+        catch ToolError.noAssetID { changes.append("视频元数据结构暂不支持，已保留原信息") }
+        catch ToolError.metadataUnsupported(let message) { changes.append(message) }
+    }
+    return changes
+}
+
 func convertImageToJPEGWithAssetID(sourceURL: URL, outputURL: URL, assetID: String) throws {
     let temporaryURL = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
@@ -1185,8 +1627,38 @@ func detectStillImageExtension(_ url: URL) -> String {
 }
 
 
-/// Serialize publication across helper processes. Existing files are never replaced.
-func publishLivePhoto(still: URL, movie: URL, to folder: URL, baseName: String) throws -> (URL, URL) {
+struct ToolFileRevision: Codable, Equatable {
+    let size: UInt64
+    let modified: TimeInterval
+    let created: TimeInterval
+    let fileNumber: UInt64
+    init?(_ url: URL) {
+        guard let values = try? FileManager.default.attributesOfItem(atPath: url.path),
+              values[.type] as? FileAttributeType == .typeRegular,
+              let size = values[.size] as? NSNumber, let modified = values[.modificationDate] as? Date else { return nil }
+        self.size = size.uint64Value; self.modified = modified.timeIntervalSince1970
+        created = (values[.creationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        fileNumber = (values[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+    }
+}
+
+struct ToolPairRevision: Codable { let image: ToolFileRevision; let movie: ToolFileRevision }
+struct ToolCompositionOutput: Codable {
+    let imagePath: String
+    let moviePath: String
+    let revision: ToolPairRevision
+}
+struct ToolCompositionReplacement: Codable {
+    let imagePath: String
+    let moviePath: String
+    let revision: ToolPairRevision
+    var superseded: [ToolCompositionOutput]?
+}
+
+/// Serialize publication across helper processes. Only a model-provided,
+/// revision-checked previous output is replaced; ordinary name collisions stay distinct.
+func publishLivePhoto(still: URL, movie: URL, to folder: URL, baseName: String,
+                      replacement: ToolCompositionReplacement? = nil, inputURLs: [URL] = []) throws -> (URL, URL) {
     let fm = FileManager.default
     let lockPath = folder.appendingPathComponent(".hermes-publish.lock").path
     let fd = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
@@ -1194,6 +1666,65 @@ func publishLivePhoto(still: URL, movie: URL, to folder: URL, baseName: String) 
     defer { close(fd) }
     guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(.EIO) }
     defer { flock(fd, LOCK_UN) }
+    if let replacement {
+        let primary = ToolCompositionOutput(imagePath: replacement.imagePath, moviePath: replacement.moviePath, revision: replacement.revision)
+        let records = [primary] + (replacement.superseded ?? [])
+        guard records.count <= 256 else { throw ToolError.failed("Too many previous composition outputs.") }
+        let physicalFolder = folder.resolvingSymlinksInPath().standardizedFileURL
+        let inputs = Set(inputURLs.map { $0.resolvingSymlinksInPath().standardizedFileURL })
+        var oldFiles: [URL] = []
+        var seen = Set<URL>()
+        for record in records {
+            let image = URL(fileURLWithPath: record.imagePath).standardizedFileURL
+            let video = URL(fileURLWithPath: record.moviePath).standardizedFileURL
+            guard image.deletingPathExtension() == video.deletingPathExtension(),
+                  ToolFileRevision(image) == record.revision.image, ToolFileRevision(video) == record.revision.movie else {
+                throw ToolError.failed("Previous composition changed; replacement was not published.")
+            }
+            for url in [image, video] {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                guard values.isRegularFile == true, values.isSymbolicLink != true,
+                      url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL == physicalFolder,
+                      !inputs.contains(url.resolvingSymlinksInPath().standardizedFileURL) else {
+                    throw ToolError.failed("Replacement is not an owned export in the selected output folder.")
+                }
+                if seen.insert(url).inserted { oldFiles.append(url) }
+            }
+        }
+        let stem = URL(fileURLWithPath: primary.imagePath).deletingPathExtension().lastPathComponent
+        let imageURL = folder.appendingPathComponent(stem).appendingPathExtension(still.pathExtension)
+        let movieURL = folder.appendingPathComponent(stem).appendingPathExtension("mov")
+        for url in [imageURL, movieURL] where fm.fileExists(atPath: url.path) && !seen.contains(url) {
+            throw ToolError.failed("An unrelated file occupies the replacement path; no files were changed.")
+        }
+        let rollback = folder.appendingPathComponent(".hermes-replacement-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: rollback, withIntermediateDirectories: false)
+        var moved: [(URL, URL)] = []
+        var published: [(URL, URL)] = []
+        do {
+            for (index, url) in oldFiles.enumerated() {
+                let backup = rollback.appendingPathComponent(String(index))
+                try fm.moveItem(at: url, to: backup); moved.append((url, backup))
+            }
+            for (source, destination) in [(movie, movieURL), (still, imageURL)] {
+                try fm.moveItem(at: source, to: destination); published.append((source, destination))
+            }
+        } catch {
+            var errors = [String(describing: error)]
+            for (source, destination) in published.reversed() {
+                do { try fm.moveItem(at: destination, to: source) } catch { errors.append(String(describing: error)) }
+            }
+            for (original, backup) in moved.reversed() {
+                do { try fm.moveItem(at: backup, to: original) } catch { errors.append(String(describing: error)) }
+            }
+            if errors.count == 1 { try? fm.removeItem(at: rollback) }
+            else { errors.append("Recovery files: " + rollback.path) }
+            throw ToolError.failed(errors.joined(separator: "\n"))
+        }
+        do { try fm.removeItem(at: rollback) }
+        catch { throw ToolError.failed("The replacement was saved, but transaction cleanup failed: \(rollback.path): \(error)") }
+        return (imageURL, movieURL)
+    }
     let names = try fm.contentsOfDirectory(atPath: folder.path)
     let occupied = Set(names.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent.lowercased() })
     var stem = baseName
@@ -1234,6 +1765,11 @@ struct Main {
             defer { try? FileManager.default.removeItem(at: outputFolder) }
             let assetIDIndex = args.firstIndex(of: "--asset-id")
             let providedAssetID = assetIDIndex.flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
+            let replacement: ToolCompositionReplacement?
+            if let index = args.firstIndex(of: "--replace-pair") {
+                guard args.indices.contains(index + 1), args[index + 1].utf8.count <= 131_072 else { throw ToolError.usage }
+                replacement = try JSONDecoder().decode(ToolCompositionReplacement.self, from: Data(args[index + 1].utf8))
+            } else { replacement = nil }
 
             try FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true)
             let baseName = jpegURL.deletingPathExtension().lastPathComponent
@@ -1345,6 +1881,7 @@ struct Main {
             if !copiedNativeMovie {
                 try await makeLivePhotoMovie(sourceURL: videoURL, outputURL: outputMOV, assetID: assetID)
             }
+            let mergedMetadata = try await mergeLivePhotoPairMetadata(still: outputJPEG, movie: outputMOV)
             let completedDate = Date()
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputJPEG.path)
             try? FileManager.default.setAttributes([.modificationDate: completedDate], ofItemAtPath: outputMOV.path)
@@ -1353,9 +1890,11 @@ struct Main {
                   try await extractAssetIDFromMovie(outputMOV) == assetID else {
                 throw NSError(domain: "HERMES.Tool", code: 2, userInfo: [NSLocalizedDescriptionKey: "合成结果验证失败，未发布文件。"])
             }
-            let published = try publishLivePhoto(still: outputJPEG, movie: outputMOV, to: destinationFolder, baseName: baseName)
+            let published = try publishLivePhoto(still: outputJPEG, movie: outputMOV, to: destinationFolder, baseName: baseName,
+                replacement: replacement, inputURLs: [jpegURL, videoURL])
             let result = try JSONSerialization.data(withJSONObject: ["imagePath": published.0.path, "moviePath": published.1.path], options: [.sortedKeys])
             print("Asset ID: \(assetID)")
+            if !mergedMetadata.isEmpty { print("Metadata: " + mergedMetadata.joined(separator: "；")) }
             print("HERMES_RESULT:" + String(decoding: result, as: UTF8.self))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8))
