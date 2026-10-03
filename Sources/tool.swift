@@ -1834,13 +1834,10 @@ struct Main {
                        outputImageURL: outputJPEG, outputMovieURL: outputMOV) {
                     copiedNativeMovie = true
                 } else if stillHasAssetID {
-                    if imageOrientation(jpegURL) == 1 {
-                        try FileManager.default.copyItem(at: jpegURL, to: outputJPEG)
-                    } else {
-                        outputJPEG = outputFolder.appendingPathComponent(baseName).appendingPathExtension("jpg")
-                        try? FileManager.default.removeItem(at: outputJPEG)
-                        try convertImageToJPEGWithAssetID(sourceURL: jpegURL, outputURL: outputJPEG, assetID: assetID)
-                    }
+                    // The image already carries the chosen asset ID. Keep its
+                    // encoded image items, HDR data and display orientation;
+                    // the movie path below repairs pairing/timing separately.
+                    try FileManager.default.copyItem(at: jpegURL, to: outputJPEG)
                 } else {
                     do {
                         try writeHEICWithAssetID(sourceURL: jpegURL, outputURL: outputJPEG, assetID: assetID)

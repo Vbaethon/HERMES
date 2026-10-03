@@ -52,6 +52,34 @@ import AudioToolbox
         }
         return nil
     }
+    static func verifyPreservedPair(_ arguments: [String]) async throws {
+        let sourceImage = URL(fileURLWithPath: arguments[2])
+        let sourceMovie = URL(fileURLWithPath: arguments[3])
+        let outputImage = URL(fileURLWithPath: arguments[4])
+        let outputMovie = URL(fileURLWithPath: arguments[5])
+        let assetID = arguments[6]
+        expect(outputImage.pathExtension == "heic", "Orientation repair converted HEIC to JPEG")
+        expect(imageOrientation(sourceImage) == imageOrientation(outputImage), "HEIC display orientation changed")
+        func mediaItems(_ url: URL) throws -> [Data] {
+            let data = try Data(contentsOf: url)
+            return try isoBoxes(in: data, range: 0..<data.count).filter { $0.isType("mdat") }.map { Data(data[$0.payload]) }
+        }
+        let originalItems = try mediaItems(sourceImage)
+        expect(!originalItems.isEmpty, "Fixture needs encoded HEIF image data")
+        expect(Array(try mediaItems(outputImage).prefix(originalItems.count)) == originalItems,
+               "HEIF image/HDR items were recompressed or removed")
+        expect(try extractAssetIDFromTIFF(extractHEICExifData(from: outputImage)) == assetID,
+               "HEIC pairing ID is incorrect")
+        expect(try await extractAssetIDFromMovie(outputMovie) == assetID, "Movie pairing ID is incorrect")
+        for mediaType in [AVMediaType.video, .audio] {
+            expect(try await bytes(of: sourceMovie, mediaType: mediaType) == bytes(of: outputMovie, mediaType: mediaType),
+                   "Pairing repair changed encoded video or audio")
+        }
+        let sourceTrack = try await AVURLAsset(url: sourceMovie).loadTracks(withMediaType: .video)[0]
+        let outputTrack = try await AVURLAsset(url: outputMovie).loadTracks(withMediaType: .video)[0]
+        expect(try await sourceTrack.load(.preferredTransform) == outputTrack.load(.preferredTransform),
+               "Movie display direction changed")
+    }
     static func generateMovie(_ url: URL, codec: AVVideoCodecType, title: String) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         writer.metadata = [metadataItem(identifier: .quickTimeMetadataTitle, value: title as NSString,
@@ -85,6 +113,10 @@ import AudioToolbox
     }
     static func main() async throws {
         setbuf(stdout, nil)
+        if CommandLine.arguments.count == 7, CommandLine.arguments[1] == "--verify-pair" {
+            try await verifyPreservedPair(CommandLine.arguments)
+            return
+        }
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
         let originalID = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
         let replacementID = "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"
@@ -142,6 +174,27 @@ import AudioToolbox
         try writeHEICWithAssetID(sourceURL: orientedHEIC, outputURL: identifiedOrientedHEIC, assetID: originalID)
         expect(imageOrientation(identifiedOrientedHEIC) == 6, "Fixture needs a non-normalized native orientation")
 
+        // Non-square, asymmetric pixels make rotation/mirroring observable.
+        let orientationBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 96, pixelsHigh: 64,
+            bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<64 { for x in 0..<96 {
+            let offset = y * orientationBitmap.bytesPerRow + x * 3
+            orientationBitmap.bitmapData![offset] = UInt8(x * 2)
+            orientationBitmap.bitmapData![offset + 1] = UInt8(y * 3)
+            orientationBitmap.bitmapData![offset + 2] = x < 32 ? 230 : 30
+        } }
+        for orientation in 1...8 {
+            let plain = root.appendingPathComponent("direction-\(orientation).heic")
+            let destination = CGImageDestinationCreateWithURL(plain as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+            CGImageDestinationAddImage(destination, orientationBitmap.cgImage!, [kCGImagePropertyOrientation: orientation,
+                kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: "direction fixture"]] as CFDictionary)
+            expect(CGImageDestinationFinalize(destination), "Orientation HEIF fixture failed")
+            let identified = root.appendingPathComponent("direction-\(orientation)-identified.heic")
+            try writeHEICWithAssetID(sourceURL: plain, outputURL: identified, assetID: originalID)
+            expect(imageOrientation(identified) == orientation, "HEIF fixture orientation changed")
+        }
+
         let video = root.appendingPathComponent("sample.mov")
         try await generateMovie(video, codec: .h264, title: originalTitle)
         // Add a generated AAC audio track to the ordinary fixture movie.
@@ -162,8 +215,9 @@ import AudioToolbox
         let videoRange = try await videoTrack.load(.timeRange)
         let audioRange = try await audioTrack.load(.timeRange)
         let duration = CMTimeMinimum(videoRange.duration, audioRange.duration)
-        try composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!
-            .insertTimeRange(CMTimeRange(start: videoRange.start, duration: duration), of: videoTrack, at: .zero)
+        let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!
+        try compositionVideoTrack.insertTimeRange(CMTimeRange(start: videoRange.start, duration: duration), of: videoTrack, at: .zero)
+        compositionVideoTrack.preferredTransform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 64, ty: 0)
         try composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!
             .insertTimeRange(CMTimeRange(start: audioRange.start, duration: duration), of: audioTrack, at: .zero)
         let withAudio = root.appendingPathComponent("with-audio.mov")
@@ -171,6 +225,8 @@ import AudioToolbox
         exporter.metadata = [metadataItem(identifier: .quickTimeMetadataTitle, value: originalTitle as NSString,
             dataType: kCMMetadataBaseDataType_UTF8 as String)]
         try await exporter.export(to: withAudio, as: .mov)
+        let rotatedTrack = try await AVURLAsset(url: withAudio).loadTracks(withMediaType: .video)[0]
+        expect(try await rotatedTrack.load(.preferredTransform) != .identity, "Fixture must exercise movie direction metadata")
         print("PASS: generated ordinary video with an AAC audio track")
         let live = root.appendingPathComponent("live.mov")
         try await makeMovie(sourceURL: withAudio, outputURL: live, assetID: originalID)
@@ -396,11 +452,34 @@ with tempfile.TemporaryDirectory(prefix="hermes-tool-metadata-") as directory:
         output = json.loads(next(line.removeprefix("HERMES_RESULT:") for line in result.stdout.splitlines()
                                  if line.startswith("HERMES_RESULT:")))
         image_output, movie_output = Path(output["imagePath"]), Path(output["moviePath"])
+        assert image_output.suffix == ".heic", "Oriented HEIF must keep its original format"
+        assert image_output.read_bytes() == oriented_image.read_bytes(), "Oriented HEIF was modified"
         if native:
-            assert image_output.suffix == ".heic", "Native oriented HEIF must keep its original format"
-            assert image_output.read_bytes() == oriented_image.read_bytes(), "Native oriented HEIF was modified"
             assert movie_output.read_bytes() == movie.read_bytes(), "Native timing, audio, video or metadata was modified"
-        else:
-            assert image_output.suffix == ".jpg", "Mismatched or incomplete pairs must use the existing conversion path"
+        subprocess.run([str(binary), "--verify-pair", str(oriented_image), str(movie),
+                        str(image_output), str(movie_output), "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"], check=True)
         assert not list(destination.glob(".hermes-stage-*"))
-    print("PASS: native HEIF orientation 6 retains every source byte; mismatched IDs and incomplete movies keep conversion checks")
+    print("PASS: oriented HEIF remains byte-identical for native, mismatched-ID and missing-timing movies; media samples and pairing preserved")
+
+    for orientation in range(1, 9):
+        identified = temp / f"direction-{orientation}-identified.heic"
+        plain = temp / f"direction-{orientation}.heic"
+        for mode, image, movie, args, asset_id in [
+            ("mismatched", identified, temp / "copied.mov", [], "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"),
+            ("missing-timing", identified, temp / "with-audio.mov", [], "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"),
+            ("missing-image-id", plain, temp / "live.mov", [], "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"),
+            ("photos-preparation", identified, temp / "live.mov", ["--asset-id", "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"],
+             "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"),
+        ]:
+            destination = temp / f"direction-{orientation}-{mode}"
+            result = subprocess.run([str(tool), str(image), str(movie), str(destination), *args],
+                                    capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, (orientation, mode, result.stdout, result.stderr)
+            output = json.loads(next(line.removeprefix("HERMES_RESULT:") for line in result.stdout.splitlines()
+                                     if line.startswith("HERMES_RESULT:")))
+            subprocess.run([str(binary), "--verify-pair", str(image), str(movie), output["imagePath"],
+                            output["moviePath"], asset_id], check=True, timeout=30)
+            if mode in {"mismatched", "missing-timing"}:
+                assert Path(output["imagePath"]).read_bytes() == identified.read_bytes()
+            assert not list(destination.glob(".hermes-stage-*"))
+    print("PASS: all 8 HEIF directions retain encoded image items, direction, audio/video and correct IDs through pairing repair and Photos preparation")
