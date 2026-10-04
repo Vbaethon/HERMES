@@ -1578,6 +1578,11 @@ final class ImporterModel: ObservableObject {
                     ?? .legacy(for: pair.imageURL, downloadedAt: originalRevision.image.modified)
                 item.displayOrder?.write(to: item.imageURL)
                 if let movie = item.movieURL { item.displayOrder?.write(to: movie) }
+                if let attribution = MediaPostAttribution.read(from: pair.imageURL)
+                    ?? MediaPostAttribution.read(from: pair.videoURL) {
+                    attribution.write(to: item.imageURL)
+                    if let movie = item.movieURL { attribution.write(to: movie) }
+                }
                 // Record the valid local result even if Photos import fails.
                 mergeCompletedItem(item)
                 if fromDownloads { mergeDownloadCompletedItem(item) }

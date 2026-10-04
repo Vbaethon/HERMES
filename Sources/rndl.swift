@@ -85,6 +85,10 @@ enum XHSNativeDownloader {
         var title = ""
         var author = "unknown"
         var userID = ""
+        var attributionTitle = ""
+        var attributionDescription = ""
+        var attributionAuthorName = ""
+        var attributionAuthorID = ""
         var type = ""
         var items: [MediaItem] = []
         var videoURL: URL?
@@ -156,6 +160,7 @@ enum XHSNativeDownloader {
         var originalFields: [URL: String] = [:]
         var originalImageURLs: Set<URL> = []
         var originalVideoURLs: Set<URL> = []
+        var postAttribution: MediaPostAttribution? = nil
     }
 
     struct SourceBinding: Sendable {
@@ -269,6 +274,8 @@ enum XHSNativeDownloader {
                 guard !tasks.isEmpty else {
                     throw NSError(domain: "XHSDownloader", code: 3, userInfo: [NSLocalizedDescriptionKey: "没有可下载的小红书媒体。"])
                 }
+                let attribution = postAttribution(for: note, shareURL: link)
+                for index in tasks.indices { tasks[index].postAttribution = attribution }
 
                 let downloadProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
@@ -504,15 +511,35 @@ enum XHSNativeDownloader {
         return nil
     }
 
+    static func postAttribution(for note: NoteInfo, shareURL: URL) -> MediaPostAttribution {
+        MediaPostAttribution(platform: "xhs", postID: note.noteID,
+            postURL: XHSAppCache.isNoteID(note.noteID)
+                ? URL(string: "https://www.xiaohongshu.com/explore/\(note.noteID)") : shareURL,
+            title: note.attributionTitle, authorName: note.attributionAuthorName,
+            authorID: note.attributionAuthorID, postDescription: note.attributionDescription)
+    }
+
     static func parseNote(_ note: [String: Any], fallbackURL: URL) throws -> NoteInfo {
         let user = note["user"] as? [String: Any] ?? [:]
         var info = NoteInfo()
         info.noteID = JSONValueUtilities.string(note["noteId"]) ?? fallbackURL.lastPathComponent
         info.title = JSONValueUtilities.string(note["title"]) ?? ""
+        info.attributionTitle = JSONValueUtilities.nonEmptyString(note["title"]) ?? ""
+        info.attributionDescription = JSONValueUtilities.nonEmptyString(note["desc"])
+            ?? JSONValueUtilities.nonEmptyString(note["description"]) ?? ""
+        info.attributionAuthorName = JSONValueUtilities.nonEmptyString(user["nickname"])
+            ?? JSONValueUtilities.nonEmptyString(user["nickName"])
+            ?? JSONValueUtilities.nonEmptyString(user["nick_name"]) ?? ""
         info.author = JSONValueUtilities.string(user["nickname"]) ?? JSONValueUtilities.string(user["nickName"]) ?? JSONValueUtilities.string(user["userId"]) ?? JSONValueUtilities.string(user["id"]) ?? "unknown"
         info.userID = JSONValueUtilities.string(user["redId"])
             ?? JSONValueUtilities.string(user["redID"])
             ?? JSONValueUtilities.string(user["red_id"])
+            ?? ""
+        info.attributionAuthorID = JSONValueUtilities.string(user["userId"])
+            ?? JSONValueUtilities.string(user["user_id"])
+            ?? JSONValueUtilities.string(user["userid"])
+            ?? JSONValueUtilities.string(user["id"])
+            ?? (info.userID.isEmpty ? nil : info.userID)
             ?? ""
         info.type = JSONValueUtilities.string(note["type"]) ?? ""
 
@@ -943,6 +970,14 @@ enum XHSNativeDownloader {
         // has a higher score or its image array arrives in a different order.
         let webNotes = matching.filter { !$0.usedAppCache }
         guard var result = (webNotes.isEmpty ? matching : webNotes).max(by: noteIsLessComplete) else { return nil }
+        // Enrich only informational attribution from already matched snapshots.
+        // These fields never participate in source ranking or resource pairing.
+        for note in matching {
+            if result.attributionTitle.isEmpty { result.attributionTitle = note.attributionTitle }
+            if result.attributionDescription.isEmpty { result.attributionDescription = note.attributionDescription }
+            if result.attributionAuthorName.isEmpty { result.attributionAuthorName = note.attributionAuthorName }
+            if result.attributionAuthorID.isEmpty { result.attributionAuthorID = note.attributionAuthorID }
+        }
         if result.type == "video" {
             let cached = matching.filter { $0.type == "video" && $0.videoFromAppCache }.max { $0.videoScore < $1.videoScore }
             let original = matching.compactMap(\.originalVideoURL).first
@@ -1550,6 +1585,7 @@ enum XHSNativeDownloader {
                             try? await remuxHDRVideoIfNeeded(at: finalURL, hint: videoHDRHint)
                         }
                         task.displayOrder?.write(to: finalURL)
+                        task.postAttribution?.write(to: finalURL)
                         let original = isOriginal || task.originalVideoURL == sourceURL || task.originalVideoURLs.contains(sourceURL) || task.originalImageURLs.contains(sourceURL)
                         let state: MediaSourceProvenance.State = original
                             ? (recoveredAudio ? .originalWithRecoveredAudio : .cloudOriginal) : .playbackBackup

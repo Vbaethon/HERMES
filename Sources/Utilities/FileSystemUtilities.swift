@@ -103,6 +103,83 @@ struct MediaDisplayOrder: Codable, Hashable, Sendable {
     }
 }
 
+/// Informational attribution only. It cannot establish originality, associate
+/// still/motion resources, or authorize replacement of downloaded files.
+/// Every optional field remains absent when the page did not supply it.
+struct MediaPostAttribution: Codable, Hashable, Sendable {
+    let platform: String
+    let postID: String
+    let postURL: String?
+    let title: String?
+    let postDescription: String?
+    let authorName: String?
+    let authorID: String?
+    private static let attribute = "com.codex.hermes.post-attribution.v1"
+
+    init(platform: String, postID: String, postURL: URL? = nil, title: String? = nil,
+         authorName: String? = nil, authorID: String? = nil, postDescription: String? = nil) {
+        self.platform = platform
+        self.postID = postID
+        self.postURL = postURL.flatMap(Self.publicPostURL)
+        self.title = Self.recordedValue(title)
+        self.postDescription = Self.recordedValue(postDescription)
+        self.authorName = Self.recordedValue(authorName)
+        self.authorID = Self.recordedValue(authorID)
+    }
+
+    func write(to url: URL) {
+        guard !platform.isEmpty, !postID.isEmpty,
+              let data = try? JSONEncoder().encode(self), data.count <= 65536 else { return }
+        _ = data.withUnsafeBytes { setxattr(url.path, Self.attribute, $0.baseAddress, $0.count, 0, 0) }
+    }
+
+    static func read(from url: URL) -> Self? {
+        let size = getxattr(url.path, attribute, nil, 0, 0, 0)
+        guard size > 0, size <= 65536 else { return nil }
+        var data = Data(count: size)
+        guard data.withUnsafeMutableBytes({ getxattr(url.path, attribute, $0.baseAddress, size, 0, 0) }) == size,
+              let attribution = try? JSONDecoder().decode(Self.self, from: data),
+              !attribution.platform.isEmpty, !attribution.postID.isEmpty else { return nil }
+        // Re-normalize optional strings and URLs even for older/external receipts.
+        return Self(platform: attribution.platform, postID: attribution.postID,
+                    postURL: attribution.postURL.flatMap(URL.init(string:)), title: attribution.title,
+                    authorName: attribution.authorName, authorID: attribution.authorID,
+                    postDescription: attribution.postDescription)
+    }
+
+    func fillingMissingFields(from other: Self?) -> Self {
+        guard let other, platform == other.platform, postID == other.postID else { return self }
+        return Self(platform: platform, postID: postID,
+                    postURL: (postURL ?? other.postURL).flatMap(URL.init(string:)),
+                    title: title ?? other.title, authorName: authorName ?? other.authorName,
+                    authorID: authorID ?? other.authorID, postDescription: postDescription ?? other.postDescription)
+    }
+
+    private static func recordedValue(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty, value.lowercased() != "unknown" else { return nil }
+        return value
+    }
+
+    private static func publicPostURL(_ url: URL) -> String? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              ["https", "http"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil else { return nil }
+        // Never persist share-page authentication, signatures, user info, or fragments.
+        // Dewu uses the numeric trendId/contentId query as its public post identity.
+        components.user = nil
+        components.password = nil
+        components.fragment = nil
+        components.queryItems = components.queryItems?.filter { item in
+            guard ["trendId", "contentId", "trend_id", "content_id", "aweme_id", "item_id"].contains(item.name),
+                  let value = item.value, !value.isEmpty else { return false }
+            return value.allSatisfy(\.isNumber)
+        }
+        if components.queryItems?.isEmpty == true { components.queryItems = nil }
+        return components.url?.absoluteString
+    }
+}
+
 enum FileSystemUtilities {
     /// Returns the content modification date of a URL, or `.distantPast` on failure.
     static func modificationDate(_ url: URL) -> Date {

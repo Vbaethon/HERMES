@@ -92,7 +92,21 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             toolbar = next
         }
         lastToolbarState = nil
-        if let toolbar { reloadVisibleItemState(in: toolbar) }
+        if let toolbar {
+            ensureInspectorItem(in: toolbar)
+            reloadVisibleItemState(in: toolbar)
+        }
+    }
+
+    /// Migrate saved toolbar configurations while keeping the system inspector at the right edge.
+    private func ensureInspectorItem(in toolbar: NSToolbar) {
+        if let index = toolbar.items.firstIndex(where: { $0.itemIdentifier == .toggleInspector }),
+           index != toolbar.items.count - 1 {
+            toolbar.removeItem(at: index)
+        }
+        if !toolbar.items.contains(where: { $0.itemIdentifier == .toggleInspector }) {
+            toolbar.insertItem(withItemIdentifier: .toggleInspector, at: toolbar.items.count)
+        }
     }
 
     private func configureWindowChrome(_ window: NSWindow) {
@@ -241,6 +255,10 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
             defaultIdentifiers
         }
 
+        func toolbarImmovableItemIdentifiers(_ toolbar: NSToolbar) -> Set<NSToolbarItem.Identifier> {
+            [.toggleInspector]
+        }
+
         func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
             switch itemIdentifier {
             case ID.filter:
@@ -271,11 +289,11 @@ final class NativeWindowToolbarController: NSObject, NSToolbarDelegate {
         private var defaultIdentifiers: [NSToolbarItem.Identifier] {
             switch model.selection ?? .queue {
             case .queue:
-                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [.flexibleSpace, ID.addFiles, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [.flexibleSpace, ID.addFiles, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose, .inspectorTrackingSeparator, .toggleInspector]
             case .downloads:
-                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.importToPhotos, ID.addToAlbum, .space, ID.clear, ID.compose, .inspectorTrackingSeparator, .toggleInspector]
             case .completed:
-                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.addToAlbum, .space, ID.clear, ID.importCompleted]
+                FinderStyleSidebarController.toolbarDefaultItemIdentifiers + [ID.filter, .flexibleSpace, ID.refresh, ID.openFolder, ID.chooseFolder, .space, ID.addToAlbum, .space, ID.clear, ID.importCompleted, .inspectorTrackingSeparator, .toggleInspector]
             }
         }
 

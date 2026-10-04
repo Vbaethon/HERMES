@@ -3,8 +3,6 @@ import AppKit
 import AVFoundation
 import Darwin
 
-enum ToolRunResult: Sendable { case success(String), failure(String) }
-
 private actor DownloadStatusRecorder {
     private var statuses: [DownloaderInfra.DownloadStatus] = []
     func record(_ status: DownloaderInfra.DownloadStatus) { statuses.append(status) }

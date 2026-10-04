@@ -71,7 +71,8 @@ enum CompletedCollectionView {
                 status: .finished,
                 mediaKind: item.mediaKind,
                 contentVersion: item.modifiedTime,
-                unavailableMessage: item.unavailableMessage
+                unavailableMessage: item.unavailableMessage,
+                resourceURLs: [item.imageURL] + (item.movieURL.map { [$0] } ?? [])
             )
         }
 
@@ -80,6 +81,7 @@ enum CompletedCollectionView {
             let selectedCount = model.selectedCompletedIDs.count
             let menu = NSMenu()
             menu.autoenablesItems = false
+            gridController?.addShareItem(to: menu)
 
             menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.openLocationTitle(count: selectedCount),

@@ -51,12 +51,9 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
     }
 
     func makeSplitViewItem() -> NSSplitViewItem {
-        let item = NSSplitViewItem(sidebarWithViewController: self)
-        item.minimumThickness = 180
-        item.maximumThickness = 360
-        item.canCollapse = true
-        item.holdingPriority = .defaultLow
-        return item
+        // Retain AppKit's sidebar holding priority so the content pane absorbs
+        // width changes before a sidebar that the user has resized.
+        NSSplitViewItem(sidebarWithViewController: self)
     }
 
     override func viewDidLoad() {

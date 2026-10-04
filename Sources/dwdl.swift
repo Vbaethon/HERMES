@@ -22,6 +22,7 @@ enum DewuNativeDownloader {
             guard !pageInfo.contentID.isEmpty else {
                 return .failure("未能从分享页解析 contentId/trendId。")
             }
+            let attribution = postAttribution(for: pageInfo, shareURL: shareURL)
 
             let author = FileNaming.sanitizeFileName(pageInfo.author.isEmpty ? "dewu" : pageInfo.author, fallback: "dewu")
             let userID = FileNaming.sanitizeFileName(pageInfo.userID.isEmpty ? "unknown" : pageInfo.userID, fallback: "unknown")
@@ -51,6 +52,7 @@ enum DewuNativeDownloader {
                     let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
                     tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1), isImage: true))
                 }
+                for index in tasks.indices { tasks[index].postAttribution = attribution }
                 do {
                     let imageDownloadProgress: DownloaderInfra.ProgressHandler?
                     if let progress {
@@ -168,6 +170,7 @@ enum DewuNativeDownloader {
                         let destination = FileNaming.uniqueDestination(in: outputFolder, name: fileName(from: url), usedNames: &usedNames)
                         tasks.append(DownloadTask(url: url, destination: destination, fallbackURLs: source.fallbackURLs, displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index + 1), isImage: true))
                     }
+                    for index in tasks.indices { tasks[index].postAttribution = attribution }
                     let apiImageDownloadProgress: DownloaderInfra.ProgressHandler?
                     if let progress {
                         apiImageDownloadProgress = { fraction in
@@ -203,6 +206,7 @@ enum DewuNativeDownloader {
                         displayOrder: MediaDisplayOrder(postID: "dewu:" + pageInfo.contentID, downloadedAt: downloadedAt, index: index),
                         isLivePhoto: !pageInfo.isVideoPost && stillURL != nil))
                 }
+                for index in tasks.indices { tasks[index].postAttribution = attribution }
                 let videoDownloadProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
                     videoDownloadProgress = { fraction in
@@ -229,6 +233,11 @@ enum DewuNativeDownloader {
         var contentID = ""
         var author = ""
         var userID = ""
+        var recordedUserID = ""
+        var recordedAuthorName = ""
+        var title = ""
+        var postDescription = ""
+        var publicPostURL: URL?
         var images: [ImageSource] = []
         var videos: [URL] = []
         var isVideoPost = false
@@ -257,6 +266,7 @@ enum DewuNativeDownloader {
         // Presentation only; reliable media pairing remains unchanged.
         var isLivePhoto = false
         var isImage = false
+        var postAttribution: MediaPostAttribution? = nil
 
         var downloadStage: DownloaderInfra.DownloadStage {
             isImage ? .downloadingImage : isLivePhoto ? .downloadingLivePhoto : .downloadingVideo
@@ -284,6 +294,10 @@ enum DewuNativeDownloader {
 
     private static func parseSharePage(_ url: URL) async throws -> SharePageInfo {
         let page = String(data: try await requestAsync(url), encoding: .utf8) ?? ""
+        return parseSharePageHTML(page)
+    }
+
+    private static func parseSharePageHTML(_ page: String) -> SharePageInfo {
         var info = SharePageInfo()
 
         if let nextData = RegexUtilities.firstCapture(1, pattern: #"<script[^>]+id=["']__NEXT_DATA__["'][^>]*>(.*?)</script>"#, in: page, dotMatchesLineSeparators: true),
@@ -324,7 +338,37 @@ enum DewuNativeDownloader {
         if info.userID.isEmpty {
             info.userID = inferUserID(info.images.first?.url.absoluteString ?? "")
         }
+        let metadata = sharePageMetadata(page)
+        if info.title.isEmpty { info.title = metadata["og:title"] ?? "" }
+        if info.postDescription.isEmpty {
+            info.postDescription = metadata["og:description"] ?? metadata["description"] ?? ""
+        }
+        for value in [metadata["canonical"], metadata["og:url"]].compactMap({ $0 }) {
+            guard let url = URL(string: value), let host = url.host?.lowercased(),
+                  host == "dewu.com" || host.hasSuffix(".dewu.com") || host == "dw4.co",
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.path != "/", !url.path.isEmpty else { continue }
+            let declaredIDs = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+                .filter { ["trendId", "contentId", "trend_id", "content_id"].contains($0.name) }
+                .compactMap(\.value)
+            guard declaredIDs.isEmpty || declaredIDs.allSatisfy({ $0 == info.contentID }) else { continue }
+            info.publicPostURL = url
+            break
+        }
         return info
+    }
+
+    static func postAttribution(fromHTML page: String, shareURL: URL) -> MediaPostAttribution? {
+        let info = parseSharePageHTML(page)
+        guard !info.contentID.isEmpty else { return nil }
+        return postAttribution(for: info, shareURL: shareURL)
+    }
+
+    private static func postAttribution(for info: SharePageInfo, shareURL: URL) -> MediaPostAttribution {
+        MediaPostAttribution(platform: "dewu", postID: info.contentID,
+            postURL: info.publicPostURL ?? shareURL, title: info.title,
+            authorName: info.recordedAuthorName, authorID: info.recordedUserID,
+            postDescription: info.postDescription)
     }
 
     private static func parseNextData(_ json: [String: Any], into info: inout SharePageInfo) {
@@ -336,6 +380,20 @@ enum DewuNativeDownloader {
         let user = item["userInfo"] as? [String: Any] ?? [:]
         info.author = JSONValueUtilities.string(user["userName"]) ?? ""
         info.userID = JSONValueUtilities.string(user["userId"]) ?? JSONValueUtilities.string(user["uid"]) ?? JSONValueUtilities.string(user["user_id"]) ?? JSONValueUtilities.string(user["duid"]) ?? ""
+        info.recordedUserID = JSONValueUtilities.nonEmptyString(user["userId"])
+            ?? JSONValueUtilities.nonEmptyString(user["uid"])
+            ?? JSONValueUtilities.nonEmptyString(user["user_id"])
+            ?? JSONValueUtilities.nonEmptyString(user["duid"])
+            ?? JSONValueUtilities.nonEmptyString(user["id"]) ?? ""
+        info.recordedAuthorName = JSONValueUtilities.nonEmptyString(user["userName"])
+            ?? JSONValueUtilities.nonEmptyString(user["nickname"])
+            ?? JSONValueUtilities.nonEmptyString(user["nickName"]) ?? ""
+        info.title = JSONValueUtilities.nonEmptyString(content["title"])
+            ?? JSONValueUtilities.nonEmptyString(content["contentTitle"]) ?? ""
+        info.postDescription = JSONValueUtilities.nonEmptyString(content["content"])
+            ?? JSONValueUtilities.nonEmptyString(content["desc"])
+            ?? JSONValueUtilities.nonEmptyString(content["description"])
+            ?? JSONValueUtilities.nonEmptyString(content["contentDesc"]) ?? ""
         info.contentID = JSONValueUtilities.string(content["contentId"]) ?? info.contentID
         let source = JSONValueUtilities.string(props["source"]) ?? JSONValueUtilities.string((props["routeQuery"] as? [String: Any])?["source"])
         if source == "videoTrend" {
@@ -369,6 +427,30 @@ enum DewuNativeDownloader {
         if info.userID.isEmpty {
             info.userID = inferUserID(JSONValueUtilities.string(user["icon"]) ?? "", info.images.first?.url.absoluteString ?? "")
         }
+    }
+
+    private static func sharePageMetadata(_ page: String) -> [String: String] {
+        func attribute(_ name: String, in tag: String) -> String? {
+            let prefix = "(?is)\\b" + NSRegularExpression.escapedPattern(for: name) + "\\s*=\\s*"
+            let value = RegexUtilities.firstCapture(1, pattern: prefix + #""([^\"]*)""#, in: tag)
+                ?? RegexUtilities.firstCapture(1, pattern: prefix + "'([^']*)'", in: tag)
+            return value.map(MediaFileUtilities.htmlDecode)
+                .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        }
+        var result: [String: String] = [:]
+        for tag in RegexUtilities.allMatches(#"(?is)<meta\b[^>]*>"#, in: page) {
+            guard let name = attribute("property", in: tag) ?? attribute("name", in: tag),
+                  let value = attribute("content", in: tag) else { continue }
+            let key = name.lowercased()
+            if result[key] == nil { result[key] = value }
+        }
+        for tag in RegexUtilities.allMatches(#"(?is)<link\b[^>]*>"#, in: page) {
+            guard attribute("rel", in: tag)?.lowercased().split(whereSeparator: \.isWhitespace).contains("canonical") == true,
+                  let url = attribute("href", in: tag) else { continue }
+            result["canonical"] = url
+            break
+        }
+        return result
     }
 
     private static func latestTrendDetailRequest(contentID: String, databases: [URL]) -> [String: Any]? {
@@ -675,6 +757,7 @@ enum DewuNativeDownloader {
     ) async throws {
         try await DownloaderInfra.downloadWithRetriesAsync(task.url, to: task.destination, fallbackURLs: task.fallbackURLs, validate: { url in try await MediaFileUtilities.validateMedia(url, expectedSuffix: task.destination.pathExtension) }, userAgent: userAgent, session: networkSession, shouldUseDirectly: shouldUseDirectly, progress: progress, stage: task.downloadStage)
         task.displayOrder?.write(to: task.destination)
+        task.postAttribution?.write(to: task.destination)
     }
 
     private static func openDewuApp(_ url: URL) {

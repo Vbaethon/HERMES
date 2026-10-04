@@ -546,26 +546,59 @@ final class DownloadBarView: NSView {
 
 // MARK: - Download Progress Bar Views
 
-/// Native, soft radial color fields. Movement is decorative; width belongs to real progress.
+/// Full-track color fields behind native glass, with one mask for real progress.
 @MainActor
 private final class DownloadFluidColorView: NSView {
-    private let fields = (0..<3).map { _ in CAGradientLayer() }
-    var isFlowing = false { didSet { updateMotion() } }
+    private let base = CAGradientLayer()
+    private let fields = (0..<4).map { _ in CAGradientLayer() }
+    private let progressMask = CAGradientLayer()
+    private var progress: CGFloat = 0
+    private var lastBounds = CGRect.zero
+    private let edgeFeather: CGFloat = 10
+    var isFlowing = false { didSet { if isFlowing != oldValue { updateMotion() } } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = true
-        for field in fields {
+        base.startPoint = CGPoint(x: 0, y: 0.5)
+        base.endPoint = CGPoint(x: 1, y: 0.5)
+        base.colors = [
+            NSColor(srgbRed: 0, green: 0.82, blue: 0.48, alpha: 0.40).cgColor,
+            NSColor(srgbRed: 0.10, green: 0.88, blue: 1, alpha: 0.34).cgColor,
+            NSColor(srgbRed: 0, green: 0.82, blue: 0.48, alpha: 0.40).cgColor
+        ]
+        layer?.addSublayer(base)
+        let colors: [NSColor] = [
+            NSColor(srgbRed: 0.02, green: 0.96, blue: 0.26, alpha: 1),
+            NSColor(srgbRed: 0.10, green: 0.88, blue: 1.00, alpha: 1),
+            NSColor(srgbRed: 0.00, green: 0.86, blue: 0.49, alpha: 1),
+            NSColor(srgbRed: 0.20, green: 0.94, blue: 0.80, alpha: 1)
+        ]
+        for (index, field) in fields.enumerated() {
             field.type = .radial
-            field.locations = [0, 0.48, 1]
+            field.startPoint = CGPoint(x: 0.5, y: 0.5)
+            field.endPoint = CGPoint(x: 1, y: 1)
+            field.locations = [0, 0.45, 1]
+            field.colors = [colors[index].withAlphaComponent(0.94).cgColor,
+                            colors[index].withAlphaComponent(0.58).cgColor,
+                            colors[index].withAlphaComponent(0).cgColor]
             layer?.addSublayer(field)
         }
-        updateColors()
+        progressMask.startPoint = CGPoint(x: 0, y: 0.5)
+        progressMask.endPoint = CGPoint(x: 1, y: 0.5)
+        progressMask.colors = [NSColor.white.cgColor, NSColor.white.cgColor,
+                               NSColor.clear.cgColor, NSColor.clear.cgColor]
+        progressMask.opacity = 0
+        layer?.mask = progressMask
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshMotion),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshMotion),
             name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshMotion),
+            name: NSApplication.didHideNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshMotion),
+            name: NSApplication.didUnhideNotification, object: nil)
     }
 
     @available(*, unavailable)
@@ -573,10 +606,24 @@ private final class DownloadFluidColorView: NSView {
 
     override func layout() {
         super.layout()
+        guard bounds != lastBounds else { return }
+        lastBounds = bounds
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for field in fields { field.frame = bounds }
+        base.frame = bounds
+        // The extra feather lies outside the track at 100%, leaving a fully filled end.
+        progressMask.frame = CGRect(x: 0, y: 0, width: bounds.width + edgeFeather, height: bounds.height)
+        for (index, field) in fields.enumerated() {
+            field.removeAnimation(forKey: "fluid")
+            let width = bounds.width * (index.isMultiple(of: 2) ? 0.44 : 0.52)
+            let height: CGFloat = 100
+            let centerX = bounds.width * [0.20, 0.50, 0.81, 0.35][index]
+            field.frame = CGRect(x: centerX - width / 2, y: bounds.midY - height / 2,
+                                 width: width, height: height)
+        }
         CATransaction.commit()
+        updateProgressMask(animated: false)
+        updateMotion()
     }
 
     override func viewDidMoveToWindow() {
@@ -584,36 +631,59 @@ private final class DownloadFluidColorView: NSView {
         updateMotion()
     }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateColors()
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateMotion()
     }
 
-    private func updateColors() {
-        // HERMES icon colors sit behind the native glass and are sampled by its material.
-        // Keep the foreground content transparent so it cannot cover the glass surface.
-        let colors: [NSColor] = [
-            NSColor(srgbRed: 0.00, green: 0.96, blue: 0.22, alpha: 1),
-            NSColor(srgbRed: 0.10, green: 0.88, blue: 1.00, alpha: 1),
-            NSColor(srgbRed: 0.00, green: 0.82, blue: 0.48, alpha: 1)
-        ]
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        updateMotion()
+    }
+
+    func setProgress(_ value: CGFloat, animated: Bool) {
+        let next = value.isFinite ? min(max(value, 0), 1) : 0
+        guard next != progress else { return }
+        progress = next
+        updateProgressMask(animated: animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        updateMotion()
+    }
+
+    private func updateProgressMask(animated: Bool) {
+        guard bounds.width > 0 else { return }
+        let span = bounds.width + edgeFeather
+        let end = bounds.width * progress + (progress == 1 ? edgeFeather : 0)
+        let feather = min(edgeFeather, end * 0.45)
+        let locations: [NSNumber] = [0, NSNumber(value: Double(max(0, end - feather) / span)),
+                                    NSNumber(value: Double(end / span)), 1]
+        let from = progressMask.presentation()?.locations ?? progressMask.locations
+        progressMask.removeAnimation(forKey: "progress")
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer?.backgroundColor = NSColor(srgbRed: 0.00, green: 0.82, blue: 0.48, alpha: 0.35).cgColor
-        for (index, field) in fields.enumerated() {
-            field.colors = [colors[index].withAlphaComponent(0.92).cgColor,
-                            colors[index].withAlphaComponent(0.52).cgColor,
-                            colors[index].withAlphaComponent(0).cgColor]
-            field.startPoint = CGPoint(x: [0.12, 0.52, 0.88][index], y: [0.2, 0.85, 0.25][index])
-            field.endPoint = CGPoint(x: [0.65, 1.08, 1.38][index], y: [1.5, 1.8, 1.5][index])
-        }
+        progressMask.locations = locations
+        progressMask.opacity = progress > 0 ? 1 : 0
         CATransaction.commit()
+        if animated, progress > 0, let from, from != locations {
+            let animation = CABasicAnimation(keyPath: "locations")
+            animation.fromValue = from
+            animation.toValue = locations
+            animation.duration = 0.42
+            animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.82, 0.2, 1)
+            progressMask.add(animation, forKey: "progress")
+        }
     }
 
-    @objc private func refreshMotion() { updateMotion() }
+    @objc private func refreshMotion() {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            updateProgressMask(animated: false)
+        }
+        updateMotion()
+    }
 
     private func updateMotion() {
-        let animate = isFlowing && window?.occlusionState.contains(.visible) == true
+        let animate = isFlowing && progress > 0 && progress < 1 && bounds.width > 0
+            && !isHiddenOrHasHiddenAncestor && !NSApp.isHidden
+            && window?.occlusionState.contains(.visible) == true
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         for (index, field) in fields.enumerated() {
             if !animate {
@@ -621,23 +691,18 @@ private final class DownloadFluidColorView: NSView {
                 continue
             }
             guard field.animation(forKey: "fluid") == nil else { continue }
-            let start = field.startPoint
-            let end = field.endPoint
-            let dx: CGFloat = index == 1 ? -0.24 : 0.23
-            let dy: CGFloat = index == 1 ? -0.42 : 0.40
-            let animations = [("startPoint", start), ("endPoint", end)].map { key, point in
-                let animation = CABasicAnimation(keyPath: key)
-                animation.fromValue = NSValue(point: point)
-                animation.toValue = NSValue(point: CGPoint(x: point.x + dx, y: point.y + dy))
-                return animation
+            let center = field.position
+            let swing = bounds.width * (index.isMultiple(of: 2) ? 0.24 : 0.30)
+            let animation = CAKeyframeAnimation(keyPath: "position")
+            animation.values = (0...48).map { step in
+                let phase = Double(step) / 48 * .pi * 2 + Double(index) * 1.3
+                return NSValue(point: CGPoint(x: center.x + CGFloat(sin(phase)) * swing,
+                                              y: center.y + CGFloat(cos(phase)) * 12))
             }
-            let group = CAAnimationGroup()
-            group.animations = animations
-            group.duration = [5.5, 7.0, 6.2][index]
-            group.autoreverses = true
-            group.repeatCount = .infinity
-            group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            field.add(group, forKey: "fluid")
+            animation.duration = [5.8, 7.2, 6.3, 4.9][index]
+            animation.repeatCount = .infinity
+            animation.calculationMode = .linear
+            field.add(animation, forKey: "fluid")
         }
     }
 }
@@ -647,14 +712,10 @@ final class DownloadTaskProgressBarView: NSView {
     private let glassSurface: NSGlassEffectView
     private let fillClipView = NSView()
     private let fillView = DownloadFluidColorView()
-    private let fillEdgeView = NSView()
     private let textLabel = NSTextField(labelWithString: "")
     private let countField = NSTextField(labelWithString: "")
-    private var fillWidthConstraint: NSLayoutConstraint?
     private var representedID: UUID?
     private var representedText = ""
-    private var currentProgress: CGFloat = 0
-    private var displayedProgress: CGFloat = 0
 
     // Animation queue
     private var isAnimating = false
@@ -678,7 +739,6 @@ final class DownloadTaskProgressBarView: NSView {
     override func layout() {
         super.layout()
         updateGlassRadius()
-        fillWidthConstraint?.constant = bounds.width * currentProgress
     }
 
     func update(with item: DownloadProgressItem, stackIndex: Int, defersPrimaryText: Bool = false) {
@@ -693,7 +753,7 @@ final class DownloadTaskProgressBarView: NSView {
         let isPrimary = stackIndex == 0
         let isSameItem = representedID == item.id
         fillView.isFlowing = item.isActive && isPrimary
-        let targetFillAlpha = (item.isActive ? 0.82 : 0.42) * [1.0, 0.70, 0.45][min(stackIndex, 2)]
+        let targetFillAlpha = (item.isActive ? 0.88 : 0.42) * [1.0, 0.70, 0.45][min(stackIndex, 2)]
         if isPrimary {
             if defersPrimaryText {
                 primaryTextDeferred = true
@@ -714,7 +774,6 @@ final class DownloadTaskProgressBarView: NSView {
             }
             countField.animator().alphaValue = self.primaryTextVisible ? 1 : 0
             fillView.animator().alphaValue = targetFillAlpha
-            fillEdgeView.animator().alphaValue = item.progress > 0 && item.progress < 1 ? targetFillAlpha : 0
         }
 
         if isPrimary {
@@ -836,7 +895,6 @@ final class DownloadTaskProgressBarView: NSView {
         glassSurface.translatesAutoresizingMaskIntoConstraints = false
         fillClipView.translatesAutoresizingMaskIntoConstraints = false
         fillView.translatesAutoresizingMaskIntoConstraints = false
-        fillEdgeView.translatesAutoresizingMaskIntoConstraints = false
         textLabel.translatesAutoresizingMaskIntoConstraints = false
         countField.translatesAutoresizingMaskIntoConstraints = false
 
@@ -846,15 +904,10 @@ final class DownloadTaskProgressBarView: NSView {
         fillClipView.layer?.masksToBounds = true
 
         fillView.wantsLayer = true
-        // The fluid view owns its adaptive color fields.
+        // A single mask owns the progress edge; the color field stays full width.
         fillView.layer?.cornerRadius = 0
         fillView.layer?.masksToBounds = false
         fillView.layer?.compositingFilter = nil
-
-        fillEdgeView.wantsLayer = true
-        fillEdgeView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.58).cgColor
-        fillEdgeView.layer?.compositingFilter = nil
-        fillEdgeView.alphaValue = 0
 
         textLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         textLabel.textColor = .labelColor
@@ -871,12 +924,9 @@ final class DownloadTaskProgressBarView: NSView {
         let glassContent = NSView()
         glassSurface.contentView = glassContent
         fillClipView.addSubview(fillView)
-        fillClipView.addSubview(fillEdgeView)
         glassContent.addSubview(textLabel)
         glassContent.addSubview(countField)
 
-        let fillWidthConstraint = fillView.widthAnchor.constraint(equalToConstant: 0)
-        self.fillWidthConstraint = fillWidthConstraint
         NSLayoutConstraint.activate([
             glassSurface.leadingAnchor.constraint(equalTo: leadingAnchor),
             glassSurface.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -889,14 +939,9 @@ final class DownloadTaskProgressBarView: NSView {
             fillClipView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             fillView.leadingAnchor.constraint(equalTo: fillClipView.leadingAnchor),
+            fillView.trailingAnchor.constraint(equalTo: fillClipView.trailingAnchor),
             fillView.topAnchor.constraint(equalTo: fillClipView.topAnchor),
             fillView.bottomAnchor.constraint(equalTo: fillClipView.bottomAnchor),
-            fillWidthConstraint,
-
-            fillEdgeView.leadingAnchor.constraint(equalTo: fillView.trailingAnchor, constant: -1.5),
-            fillEdgeView.topAnchor.constraint(equalTo: fillClipView.topAnchor),
-            fillEdgeView.bottomAnchor.constraint(equalTo: fillClipView.bottomAnchor),
-            fillEdgeView.widthAnchor.constraint(equalToConstant: 1.5),
 
             textLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             textLabel.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -8),
@@ -922,25 +967,8 @@ final class DownloadTaskProgressBarView: NSView {
     }
 
     private func animateProgress(to progress: CGFloat, animated: Bool) {
-        let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let clampedProgress = min(max(progress, 0), 1)
-        currentProgress = clampedProgress
-        let width = bounds.width * clampedProgress
-        guard animated else {
-            displayedProgress = clampedProgress
-            fillWidthConstraint?.constant = width
-            layoutSubtreeIfNeeded()
-            return
-        }
-        guard abs(clampedProgress - displayedProgress) > 0.002 else { return }
-        displayedProgress = clampedProgress
-        fillWidthConstraint?.constant = width
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.42
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.82, 0.2, 1)
-            context.allowsImplicitAnimation = true
-            self.layoutSubtreeIfNeeded()
-        }
+        layoutSubtreeIfNeeded()
+        fillView.setProgress(progress, animated: animated)
     }
 }
 

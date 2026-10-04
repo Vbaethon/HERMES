@@ -44,7 +44,17 @@ harness = r"""
   for fraction in [CGFloat(0), 0.01, 0.58, 1] {
    bar.update(with: DownloadProgressItem(id: UUID(),title: "Downloading",detail: "",completedCount: 0,totalCount: 1,currentUnitProgress: fraction,isActive: true),stackIndex: 0)
    controller.view.layoutSubtreeIfNeeded()
-   precondition(abs(fill.frame.width - bar.bounds.width * fraction) < 0.5, "Progress width must match real fraction")
+   precondition(abs(fill.frame.width - bar.bounds.width) < 0.5, "Color geometry must stay full-track as progress changes")
+   let mask = fill.layer!.mask as! CAGradientLayer
+   if fraction == 0 {
+    precondition(mask.opacity == 0, "Zero progress must have no fill")
+   } else if fraction == 1 {
+    let opaqueEnd = CGFloat(mask.locations![1].doubleValue) * mask.bounds.width
+    precondition(opaqueEnd >= bar.bounds.width - 0.5, "Completed progress must fill the rounded end")
+   } else {
+    let visibleEnd = CGFloat(mask.locations![2].doubleValue) * mask.bounds.width
+    precondition(abs(visibleEnd - bar.bounds.width * fraction) < 0.5, "Masked progress must match the real fraction")
+   }
   }
   print("Progress geometry passed: 0%, 1%, 58%, 100%")
   print("before=\(before) after=\(window.frame.size)")

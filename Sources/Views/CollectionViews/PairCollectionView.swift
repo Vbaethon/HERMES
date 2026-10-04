@@ -65,7 +65,8 @@ enum PairCollectionView {
                 url: item.imageURL,
                 status: item.status,
                 mediaKind: .livePhoto,
-                contentVersion: 0
+                contentVersion: 0,
+                resourceURLs: [item.imageURL, item.videoURL]
             )
         }
 
@@ -74,6 +75,7 @@ enum PairCollectionView {
             let selectedCount = model.selectedPairIDs.count
             let menu = NSMenu()
             menu.autoenablesItems = false
+            gridController?.addShareItem(to: menu)
 
             menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.composeTitle(count: selectedCount),

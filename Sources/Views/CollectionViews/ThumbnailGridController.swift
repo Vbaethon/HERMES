@@ -7,6 +7,7 @@ struct ThumbnailGridItem: Identifiable, Hashable {
     let mediaKind: ThumbnailMediaKind
     let contentVersion: TimeInterval
     var unavailableMessage: String? = nil
+    var resourceURLs: [URL] = []
 }
 
 @MainActor
@@ -35,6 +36,12 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         override func menu(for event: NSEvent) -> NSMenu? {
             gridController?.contextMenu(for: event)
         }
+
+        override func beginDraggingSession(with items: [NSDraggingItem], event: NSEvent,
+                                           source: any NSDraggingSource) -> NSDraggingSession {
+            let resources = gridController?.expandedDraggingItems(items) ?? items
+            return super.beginDraggingSession(with: resources, event: event, source: source)
+        }
     }
 
     private let collectionView: GridCollectionView
@@ -47,6 +54,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private var isApplyingSelection = false
     private var onSelectionChange: ((Set<String>) -> Void)?
     private var makeContextMenu: (() -> NSMenu?)?
+    private var sharingServicePicker: NSSharingServicePicker?
 
     var nsCollectionView: NSCollectionView { collectionView }
     var hasPresentedItems: Bool { !items.isEmpty }
@@ -80,6 +88,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         collectionView.gridController = self
         collectionView.delegate = self
         ThumbnailCollectionStyle.prepare(collectionView, sectionInset: sectionInset)
+        collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
     }
 
     func updateItems(_ newItems: [ThumbnailGridItem], animatingDifferences: Bool = true, defersCompletionRemoval: Bool = true) {
@@ -94,7 +104,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                       let cell = collectionView.item(at: path) as? ThumbnailCollectionItem,
                       cell.isPresentingComposition else { continue }
                 let completed = ThumbnailGridItem(id: old.id, url: old.url, status: .finished,
-                    mediaKind: old.mediaKind, contentVersion: old.contentVersion, unavailableMessage: old.unavailableMessage)
+                    mediaKind: old.mediaKind, contentVersion: old.contentVersion,
+                    unavailableMessage: old.unavailableMessage, resourceURLs: old.resourceURLs)
                 presentedItems.insert(completed, at: min(index, presentedItems.count))
             }
         }
@@ -174,11 +185,58 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        false
+        !resourceURLs(forIDs: Set(indexPaths.compactMap { dataSource.itemIdentifier(for: $0) })).isEmpty
     }
 
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
-        nil
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = itemByID[id],
+              let url = NativeMediaResources.readableURLs(for: item).first else { return nil }
+        return url as NSURL
+    }
+
+    func resourceURLs(forIDs ids: Set<String>) -> [URL] {
+        NativeMediaResources.readableURLs(for: items.filter { ids.contains($0.id) && requestedIDs.contains($0.id) })
+    }
+
+    /// Expand each native collection drag item into its exact source resources.
+    /// A Live Photo contributes two standard file-URL pasteboard items.
+    func expandedDraggingItems(_ originalItems: [NSDraggingItem]) -> [NSDraggingItem] {
+        var exported = Set<URL>()
+        var result: [NSDraggingItem] = []
+        for original in originalItems {
+            guard let primaryURL = original.item as? NSURL,
+                  let item = items.first(where: {
+                      requestedIDs.contains($0.id)
+                          && $0.url.standardizedFileURL == (primaryURL as URL).standardizedFileURL
+                  }) else { continue }
+            let resources = NativeMediaResources.readableURLs(for: item)
+            guard !resources.isEmpty else { return [] }
+            for (index, url) in resources.enumerated() where exported.insert(url).inserted {
+                if index == 0 {
+                    result.append(original)
+                } else {
+                    let resource = NSDraggingItem(pasteboardWriter: url as NSURL)
+                    let icon = NSWorkspace.shared.icon(forFile: url.path)
+                    resource.setDraggingFrame(original.draggingFrame.offsetBy(dx: 8, dy: -8), contents: icon)
+                    result.append(resource)
+                }
+            }
+        }
+        return result
+    }
+
+    func addShareItem(to menu: NSMenu) {
+        let urls = resourceURLs(forIDs: selectedIDs)
+        if !urls.isEmpty {
+            let picker = NSSharingServicePicker(items: urls)
+            sharingServicePicker = picker
+            menu.addItem(picker.standardShareMenuItem)
+        } else {
+            let share = NSMenuItem(title: "共享", action: nil, keyEquivalent: "")
+            share.isEnabled = false
+            menu.addItem(share)
+        }
+        menu.addItem(.separator())
     }
 
     private func syncSelectionFromCollectionView() {

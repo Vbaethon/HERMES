@@ -31,6 +31,7 @@ enum DouyinNativeDownloader {
         var authorID = ""
         var images: [MediaItem] = []
         var videos: [VideoItem] = []
+        var postAttribution: MediaPostAttribution? = nil
 
         var hasSourceMarkedHDRVideo: Bool {
             images.contains { $0.sourceMarkedHDR } || videos.contains { $0.sourceMarkedHDR }
@@ -83,6 +84,7 @@ enum DouyinNativeDownloader {
         // Presentation only; source selection and transfer behavior are unchanged.
         var isLivePhoto = false
         var isImage = false
+        var postAttribution: MediaPostAttribution? = nil
 
         var downloadStage: DownloaderInfra.DownloadStage {
             isImage ? .downloadingImage : isLivePhoto ? .downloadingLivePhoto : .downloadingVideo
@@ -111,6 +113,7 @@ enum DouyinNativeDownloader {
 	        var height: Int?
 	        var fps: Int?          // frame rate from seed video (e.g. 60)
 	        var playURL: URL?      // raw play_addr URL from seed data
+	        var postAttributions: [String: MediaPostAttribution] = [:]
 	    }
 
     private struct DouyinCacheEntry: Codable {
@@ -476,6 +479,10 @@ enum DouyinNativeDownloader {
                     ))
                 }
 
+                let attribution = postAttribution(for: info, fallbackURL: resolvedURL,
+                    supplementation: seedInfo.postAttributions[info.awemeID])
+                for index in tasks.indices { tasks[index].postAttribution = attribution }
+
                 let downloadProgress: DownloaderInfra.ProgressHandler?
                 if let progress {
                     downloadProgress = { fraction in
@@ -671,6 +678,23 @@ enum DouyinNativeDownloader {
     }
 
     private static func applyDouyinSeed(_ seed: [String: Any], to info: inout DouyinSeedInfo) {
+        if let postID = JSONValueUtilities.nonEmptyString(seed["aweme_id"])
+            ?? JSONValueUtilities.nonEmptyString(seed["awemeId"])
+            ?? JSONValueUtilities.nonEmptyString(seed["group_id"]),
+           postID.range(of: #"^[0-9]{16,20}$"#, options: .regularExpression) != nil {
+            let author = seed["author"] as? [String: Any] ?? [:]
+            let captured = MediaPostAttribution(platform: "douyin", postID: postID,
+                title: JSONValueUtilities.nonEmptyString(seed["title"]),
+                authorName: JSONValueUtilities.nonEmptyString(author["nickname"])
+                    ?? JSONValueUtilities.nonEmptyString(author["nick_name"]),
+                authorID: JSONValueUtilities.nonEmptyString(author["unique_id"])
+                    ?? JSONValueUtilities.nonEmptyString(author["short_id"])
+                    ?? JSONValueUtilities.nonEmptyString(author["uid"])
+                    ?? JSONValueUtilities.nonEmptyString(author["sec_uid"]),
+                postDescription: JSONValueUtilities.nonEmptyString(seed["desc"])
+                    ?? JSONValueUtilities.nonEmptyString(seed["caption"]))
+            info.postAttributions[postID] = (info.postAttributions[postID] ?? captured).fillingMissingFields(from: captured)
+        }
         if info.desc == nil {
             info.desc = JSONValueUtilities.nonEmptyString(seed["desc"]) ?? JSONValueUtilities.nonEmptyString(seed["caption"])
         }
@@ -717,6 +741,27 @@ enum DouyinNativeDownloader {
                 }
             }
         }
+    }
+
+    static func recordedPostAttributions(fromHTML html: String) -> [String: MediaPostAttribution] {
+        parseDouyinSeedInfo(html).postAttributions
+    }
+
+    static func postAttribution(for info: AwemeInfo, fallbackURL: URL,
+                                supplementation: MediaPostAttribution? = nil) -> MediaPostAttribution {
+        let samePostSupplement = supplementation.flatMap {
+            $0.platform == "douyin" && $0.postID == info.awemeID ? $0 : nil
+        }
+        let samePostPrimary = info.postAttribution.flatMap {
+            $0.platform == "douyin" && $0.postID == info.awemeID ? $0 : nil
+        }
+        let captured = samePostPrimary?.fillingMissingFields(from: samePostSupplement) ?? samePostSupplement
+        let route = info.images.isEmpty ? "video" : "note"
+        let canonicalURL = info.awemeID.range(of: #"^[0-9]{16,20}$"#, options: .regularExpression) != nil
+            ? URL(string: "https://www.douyin.com/\(route)/\(info.awemeID)") : fallbackURL
+        return MediaPostAttribution(platform: "douyin", postID: info.awemeID,
+            postURL: canonicalURL, title: captured?.title, authorName: captured?.authorName,
+            authorID: captured?.authorID, postDescription: captured?.postDescription)
     }
 
     private static func douyinPlayAddrDictionaries(from video: [String: Any]) -> [[String: Any]] {
@@ -1052,17 +1097,23 @@ enum DouyinNativeDownloader {
                 selected.videos[0].alternateURLs = orderedVideoURLs(old.alternateURLs + [new.videoURL] + new.alternateURLs)
             }
             selected.didProbeSource = current.didProbeSource || candidate.didProbeSource
+            selected.postAttribution = (selected.postAttribution ?? current.postAttribution ?? candidate.postAttribution)?
+                .fillingMissingFields(from: current.postAttribution).fillingMissingFields(from: candidate.postAttribution)
             return selected
         }
         let candidateScore = candidate.images.count * 10 + candidate.videos.count
         let currentScore = current.images.count * 10 + current.videos.count
-        return candidateScore > currentScore ? candidate : current
+        var selected = candidateScore > currentScore ? candidate : current
+        selected.postAttribution = (selected.postAttribution ?? current.postAttribution ?? candidate.postAttribution)?
+            .fillingMissingFields(from: current.postAttribution).fillingMissingFields(from: candidate.postAttribution)
+        return selected
     }
 
     static func mergeLivePhotoVideos(from cached: AwemeInfo, into publicInfo: AwemeInfo) -> AwemeInfo {
         // Only image entries retain an image ordinal. A flat video list has no safe pairing identity.
         guard !publicInfo.awemeID.isEmpty, cached.awemeID == publicInfo.awemeID else { return publicInfo }
         var merged = publicInfo
+        merged.postAttribution = (publicInfo.postAttribution ?? cached.postAttribution)?.fillingMissingFields(from: cached.postAttribution)
         for index in merged.images.indices {
             let current = merged.images[index].videoURL
             guard current == nil || hasSuspiciousLivePhotoURL(current!) else { continue }
@@ -1179,6 +1230,8 @@ enum DouyinNativeDownloader {
 	            info.desc = fallbackInfo?.desc.isEmpty == false ? fallbackInfo!.desc : (seedInfo.desc ?? "")
 	            info.author = fallbackInfo?.author.isEmpty == false ? fallbackInfo!.author : (seedInfo.author ?? "unknown")
 	            info.authorID = fallbackInfo?.authorID.isEmpty == false ? fallbackInfo!.authorID : (seedInfo.authorID ?? "")
+	            info.postAttribution = fallbackInfo?.postAttribution?.fillingMissingFields(from: seedInfo.postAttributions[awemeID])
+	                ?? seedInfo.postAttributions[awemeID]
 	            info.videos.append(VideoItem(
 	                index: 1,
 	                videoURL: candidate.url,
@@ -2228,6 +2281,11 @@ enum DouyinNativeDownloader {
             ?? JSONValueUtilities.nonEmptyString(author["uid"])
             ?? JSONValueUtilities.nonEmptyString(author["sec_uid"])
             ?? ""
+        info.postAttribution = MediaPostAttribution(platform: "douyin", postID: info.awemeID,
+            title: JSONValueUtilities.nonEmptyString(aweme["title"]),
+            authorName: JSONValueUtilities.nonEmptyString(author["nickname"])
+                ?? JSONValueUtilities.nonEmptyString(author["nick_name"]),
+            authorID: info.authorID, postDescription: info.desc)
 
         let images = aweme["images"] as? [[String: Any]]
             ?? aweme["image_list"] as? [[String: Any]]
@@ -2966,6 +3024,7 @@ enum DouyinNativeDownloader {
                 try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: finalURL.path)
                 task.displayOrder?.write(to: finalURL)
+                task.postAttribution?.write(to: finalURL)
                 print("[HERMES] 媒体校验通过: \(finalURL.lastPathComponent), 来源主机: \(task.url.host ?? "unknown")")
                 await DownloaderInfra.reportStatus(.completed)
                 return DownloadOutcome(fileURL: finalURL, sourceHost: task.url.host ?? "unknown")

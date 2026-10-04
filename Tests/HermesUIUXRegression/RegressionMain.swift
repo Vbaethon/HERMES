@@ -101,6 +101,50 @@ import Foundation
         terminationWindow.window?.orderOut(nil)
         pass("window close and Cmd-Q share native confirmation/progress alerts; Continue preserves work and Exit waits for safe cleanup")
 
+        let downloadProgress = DownloadTaskProgressBarView(frame: CGRect(x: 0, y: 0, width: 620, height: 40))
+        let progressWindow = NSWindow(contentRect: downloadProgress.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        progressWindow.contentView = downloadProgress
+        progressWindow.orderFront(nil)
+        var progressItem = DownloadProgressItem(id: UUID(), title: "小红书", detail: "下载原始文件",
+            completedCount: 0, totalCount: 1, currentUnitProgress: 0, isActive: true)
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        downloadProgress.layoutSubtreeIfNeeded()
+        let colorView = descendants(downloadProgress).first { $0.layer?.mask is CAGradientLayer }!
+        let mask = colorView.layer!.mask as! CAGradientLayer
+        let colorLayers = colorView.layer!.sublayers!
+        let initialColorBounds = colorLayers.map(\.bounds)
+        expect(mask.opacity == 0 && (downloadProgress.accessibilityValue() as? Double) == 0, "zero progress must hide the fill and expose zero accessibility progress")
+        progressItem.currentUnitProgress = 0.25
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        try await Task.sleep(for: .milliseconds(500))
+        expect(colorView.bounds.width == downloadProgress.bounds.width && colorLayers.map(\.bounds) == initialColorBounds, "changing progress must reveal a full-track field without stretching its colors")
+        let stationaryEdge = mask.locations
+        try await Task.sleep(for: .milliseconds(250))
+        expect(mask.locations == stationaryEdge && (downloadProgress.accessibilityValue() as? Double) == 25, "decorative flow must not move the progress edge or change its accessible value")
+        progressItem.currentUnitProgress = 0.70
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        progressItem.currentUnitProgress = 0.80
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        try await Task.sleep(for: .milliseconds(500))
+        let presentedEdge = mask.presentation()?.locations ?? mask.locations!
+        let edgeReachedTarget = zip(presentedEdge, mask.locations!).allSatisfy { abs($0.doubleValue - $1.doubleValue) < 0.001 }
+        expect((downloadProgress.accessibilityValue() as? Double) == 80 && edgeReachedTarget && (mask.animationKeys()?.count ?? 0) <= 1, "rapid callbacks must converge to the latest progress without a second trailing animation")
+        progressWindow.setContentSize(NSSize(width: 410, height: 40))
+        downloadProgress.layoutSubtreeIfNeeded()
+        expect(colorView.bounds.width == 410 && (downloadProgress.accessibilityValue() as? Double) == 80, "resizing must retain the progress fraction while sizing the field to the full track")
+        progressItem.currentUnitProgress = 1
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        try await Task.sleep(for: .milliseconds(500))
+        let opaqueEnd = CGFloat(mask.locations![1].doubleValue) * mask.bounds.width
+        expect(opaqueEnd >= colorView.bounds.width - 0.01 && (downloadProgress.accessibilityValue() as? Double) == 100, "completion must fill the whole track including its rounded end")
+        expect(colorLayers.allSatisfy { $0.animationKeys()?.isEmpty != false }, "completed downloads must stop decorative motion")
+        progressItem = DownloadProgressItem(id: UUID(), title: "抖音", detail: "下载原始文件",
+            completedCount: 0, totalCount: 1, currentUnitProgress: 0, isActive: true)
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        expect(mask.opacity == 0 && mask.animationKeys()?.isEmpty != false, "a new task must clear the old fill immediately without inheriting its animation")
+        progressWindow.orderOut(nil)
+        pass("download progress keeps one softened edge, full-track colors, exact accessible progress, and clean resize/completion/task-reset behavior")
+
         let settingsSuiteName = "HermesSettingsRegression.\(UUID().uuidString)"
         let settingsDefaults = UserDefaults(suiteName: settingsSuiteName)!
         defer { settingsDefaults.removePersistentDomain(forName: settingsSuiteName) }
@@ -458,7 +502,9 @@ import Foundation
         let photoMenu = try await rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
         expect(menuModel.selectedDownloadItemIDs == [photoID] && menuSelections == [[photoID]], "right-clicking another item must atomically select it without publishing an empty selection")
         let photoActions = photoMenu.items.filter { !$0.isSeparatorItem }
-        expect(!photoActions[0].isEnabled && photoActions.dropFirst().allSatisfy(\.isEnabled), "a standalone photo must retain Finder, Photos, album and deletion actions while downloading")
+        let composeTitle = ThumbnailContextMenuItem.composeTitle(count: 1)
+        expect(photoActions.first { $0.title == composeTitle }?.isEnabled == false
+            && photoActions.filter { $0.title != composeTitle }.allSatisfy(\.isEnabled), "a standalone photo must retain preview, sharing, Finder, Photos, album and deletion actions while downloading")
         menuModel.isProcessingDownloads = true
         let composingMenu = try await rightClickMenu(menuCoordinator.collectionView!, at: photoIndex)
         expect(composingMenu.items.first { $0.title.contains("访达") }!.isEnabled, "Finder must remain available during composition")
@@ -475,7 +521,7 @@ import Foundation
         expect(pairMenu.items.filter { !$0.isSeparatorItem }.allSatisfy(\.isEnabled), "queue actions must remain available for settled sources during download")
         menuModel.isProcessingDownloads = true
         let guardedPairMenu = try await rightClickMenu(pairMenuCoordinator.collectionView!, at: 0)
-        expect(!guardedPairMenu.items[0].isEnabled, "queue menu composition must follow model eligibility when another composition is running")
+        expect(guardedPairMenu.items.first { $0.title == composeTitle }?.isEnabled == false, "queue menu composition must follow model eligibility when another composition is running")
         expect(guardedPairMenu.items.first { $0.title.contains("访达") }!.isEnabled, "queue Finder action must remain available during another composition")
         menuModel.isProcessingDownloads = false
         menuModel.isDownloading = false

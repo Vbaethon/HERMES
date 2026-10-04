@@ -66,21 +66,28 @@ enum DownloadCollectionView {
 
         func applyItems(_ newItems: [DownloadGridItem], animatingDifferences: Bool = true, defersCompletionRemoval: Bool = true) {
             items = newItems
-            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences, defersCompletionRemoval: defersCompletionRemoval)
+            gridController?.updateItems(newItems.map { gridItem(for: $0) }, animatingDifferences: animatingDifferences, defersCompletionRemoval: defersCompletionRemoval)
         }
 
         func applySelection() {
             gridController?.applySelection(model?.selectedDownloadItemIDs ?? [])
         }
 
-        private static func gridItem(for item: DownloadGridItem) -> ThumbnailGridItem {
-            ThumbnailGridItem(
+        private func gridItem(for item: DownloadGridItem) -> ThumbnailGridItem {
+            let resources: [URL]
+            if case .pair(let id) = item.kind, let pair = model?.downloadPairs.first(where: { $0.id == id }) {
+                resources = [pair.imageURL, pair.videoURL]
+            } else {
+                resources = [item.imageURL]
+            }
+            return ThumbnailGridItem(
                 id: item.id,
                 url: item.imageURL,
                 status: item.status,
                 mediaKind: item.mediaKind,
                 contentVersion: item.modifiedTime,
-                unavailableMessage: item.unavailableMessage
+                unavailableMessage: item.unavailableMessage,
+                resourceURLs: resources
             )
         }
 
@@ -89,6 +96,7 @@ enum DownloadCollectionView {
             let selectedCount = model.selectedDownloadItemIDs.count
             let menu = NSMenu()
             menu.autoenablesItems = false
+            gridController?.addShareItem(to: menu)
 
             menu.addItem(ThumbnailCollectionContextMenu.item(
                 title: ThumbnailContextMenuItem.composeTitle(count: selectedCount),

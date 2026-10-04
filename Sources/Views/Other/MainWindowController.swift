@@ -4,21 +4,29 @@ import Combine
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let frameAutosaveName = "HERMESMainWindow"
     private static let preferredWindowSize = NSSize(width: 1440, height: 1080)
-    private static let minimumWindowSize = NSSize(width: 920, height: 620)
+    private static let minimumContentHeight: CGFloat = 620
 
     let model: ImporterModel
     var canComposeCurrentPage: Bool { model.canComposeCurrentPage }
-    private let splitViewController = NSSplitViewController()
+    private let splitViewController = MainSplitViewController()
     private let sidebarController: FinderStyleSidebarController
     private let detailController: DetailPagesController
     private let toolbarController: NativeWindowToolbarController
+    let inspectorController: MediaInspectorController
+    private let inspectorDefaults: UserDefaults
+    private var inspectorItem: NSSplitViewItem?
+    private var inspectorObservation: NSKeyValueObservation?
+    static let inspectorVisibleDefaultsKey = "HERMESInspectorVisible.v1"
+    var inspectorVisible: Bool { inspectorItem?.isCollapsed == false }
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
     private var terminationProgressAlert: NSAlert?
     var requestTermination: () -> Void = { NSApp.terminate(nil) }
 
-    init(model: ImporterModel = ImporterModel()) {
+    init(model: ImporterModel = ImporterModel(), inspectorDefaults: UserDefaults = .standard) {
         self.model = model
+        self.inspectorDefaults = inspectorDefaults
+        inspectorController = MediaInspectorController(model: model)
         sidebarController = FinderStyleSidebarController(
             sections: SidebarSection.allCases,
             selection: model.selection,
@@ -54,7 +62,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let window = NSWindow(contentViewController: splitViewController)
         window.setContentSize(Self.preferredWindowSize)
-        window.minSize = Self.minimumWindowSize
         super.init(window: window)
         if !window.setFrameUsingName(Self.frameAutosaveName) {
             window.center()
@@ -79,7 +86,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
         toolbarController.installToolbar(in: window)
-        updateWindowSizeLimits()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -176,8 +182,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func configureSplitView() {
+        splitViewController.inspectorController = inspectorController
         splitViewController.splitView.isVertical = true
         splitViewController.splitView.dividerStyle = .thin
+        splitViewController.splitView.autosaveName = "HERMESMainSplitView"
 
         let sidebarItem = sidebarController.makeSplitViewItem()
         let detailItem = NSSplitViewItem(viewController: detailController)
@@ -186,7 +194,32 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(detailItem)
-        splitViewController.splitView.setPosition(220, ofDividerAt: 0)
+        let inspector = NSSplitViewItem(inspectorWithViewController: inspectorController)
+        // Use AppKit's pane-preserving mode, including its onscreen/fullscreen
+        // fallback, rather than restoring sidebar widths or resizing by hand.
+        inspector.collapseBehavior = .preferResizingSplitViewWithFixedSiblings
+        inspector.isCollapsed = !inspectorDefaults.bool(forKey: Self.inspectorVisibleDefaultsKey)
+        inspectorItem = inspector
+        splitViewController.addSplitViewItem(inspector)
+        inspectorController.isInspectionEnabled = !inspector.isCollapsed
+        inspectorObservation = inspector.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.inspectorVisibilityDidChange() }
+        }
+        // AppKit derives the window's width limits from the visible split items
+        // and owns pane collapse, screen changes, zoom and fullscreen sizing.
+        splitViewController.view.heightAnchor.constraint(
+            greaterThanOrEqualToConstant: Self.minimumContentHeight
+        ).isActive = true
+    }
+
+    func setInspectorVisible(_ visible: Bool) {
+        inspectorItem?.isCollapsed = !visible
+    }
+
+    private func inspectorVisibilityDidChange() {
+        let visible = inspectorVisible
+        inspectorDefaults.set(visible, forKey: Self.inspectorVisibleDefaultsKey)
+        inspectorController.isInspectionEnabled = visible
     }
 
     private func configureWindow() {
@@ -197,7 +230,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.title = pageTitle
         window.subtitle = pageSubtitle
         SystemWindowBackgroundController.configureMainWindow(window)
-        updateWindowSizeLimits()
     }
 
     private var needsReload = false
@@ -242,88 +274,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         toolbarController.reloadToolbarIfNeeded()
         detailController.reload()
-    }
-
-    private func updateWindowSizeLimits() {
-        guard let window else { return }
-        let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
-        guard !visibleFrame.isEmpty else { return }
-
-        let maxSize = NSSize(
-            width: floor(visibleFrame.width),
-            height: floor(visibleFrame.height)
-        )
-        if window.maxSize != maxSize {
-            window.maxSize = maxSize
-        }
-        if window.contentMaxSize != maxSize {
-            window.contentMaxSize = maxSize
-        }
-
-        let minSize = NSSize(
-            width: min(Self.minimumWindowSize.width, maxSize.width),
-            height: min(Self.minimumWindowSize.height, maxSize.height)
-        )
-        if window.minSize != minSize {
-            window.minSize = minSize
-        }
-        if window.contentMinSize != minSize {
-            window.contentMinSize = minSize
-        }
-
-        clampWindowFrame(visibleFrame: visibleFrame)
-    }
-
-    private func clampWindowToScreen() {
-        guard let window else { return }
-        let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
-        guard !visibleFrame.isEmpty else { return }
-
-        let maxSize = NSSize(
-            width: floor(visibleFrame.width),
-            height: floor(visibleFrame.height)
-        )
-        if window.maxSize != maxSize {
-            window.maxSize = maxSize
-        }
-        if window.contentMaxSize != maxSize {
-            window.contentMaxSize = maxSize
-        }
-
-        clampWindowFrame(visibleFrame: visibleFrame)
-    }
-
-    private func clampWindowFrame(visibleFrame: NSRect) {
-        guard let window else { return }
-        var frame = window.frame
-        var shouldClampFrame = false
-        if frame.width > visibleFrame.width {
-            frame.size.width = visibleFrame.width
-            shouldClampFrame = true
-        }
-        if frame.height > visibleFrame.height {
-            frame.size.height = visibleFrame.height
-            shouldClampFrame = true
-        }
-        if frame.maxX > visibleFrame.maxX {
-            frame.origin.x = visibleFrame.maxX - frame.width
-            shouldClampFrame = true
-        }
-        if frame.minX < visibleFrame.minX {
-            frame.origin.x = visibleFrame.minX
-            shouldClampFrame = true
-        }
-        if frame.maxY > visibleFrame.maxY {
-            frame.origin.y = visibleFrame.maxY - frame.height
-            shouldClampFrame = true
-        }
-        if frame.minY < visibleFrame.minY {
-            frame.origin.y = visibleFrame.minY
-            shouldClampFrame = true
-        }
-        if shouldClampFrame {
-            window.setFrame(frame, display: true, animate: false)
-        }
+        inspectorController.reload()
     }
 
     private func installNotifications() {
@@ -350,13 +301,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         })
         observers.append(center.addObserver(forName: .chooseCurrentFolder, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.chooseCurrentFolder() }
-        })
-        observers.append(center.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { [weak self] notification in
-            guard let changedWindow = notification.object as? NSWindow else { return }
-            Task { @MainActor [weak self, weak changedWindow] in
-                guard let self, let changedWindow, changedWindow === self.window else { return }
-                self.updateWindowSizeLimits()
-            }
         })
     }
 
@@ -518,4 +462,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+}
+
+/// Keep the system pane animations, but avoid reading and wrapping the inspector
+/// form while AppKit is changing the widths of the split items.
+@MainActor
+final class MainSplitViewController: NSSplitViewController {
+    weak var inspectorController: MediaInspectorController?
+
+    override func toggleSidebar(_ sender: Any?) {
+        animatePaneToggle { super.toggleSidebar(sender) }
+    }
+
+    override func toggleInspector(_ sender: Any?) {
+        animatePaneToggle { super.toggleInspector(sender) }
+    }
+
+    private func animatePaneToggle(_ toggle: () -> Void) {
+        inspectorController?.beginPaneTransition()
+        NSAnimationContext.runAnimationGroup { _ in
+            toggle()
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.inspectorController?.endPaneTransition() }
+        }
+    }
 }

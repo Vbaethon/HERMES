@@ -50,6 +50,9 @@
 		111111111111111111111151 /* ThumbnailCompositionEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111150 /* ThumbnailCompositionEffect.swift */; };
 		111111111111111111111153 /* XHSLivePhotoAudioRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */; };
 		111111111111111111111155 /* XHSCachedMotionReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111154 /* XHSCachedMotionReader.swift */; };
+		111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111156 /* Utilities/NativeMediaResources.swift */; };
+		111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111158 /* Views/Other/MediaInspectorController.swift */; };
+		11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115A /* Utilities/MediaInspection.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -122,6 +125,9 @@
 		111111111111111111111150 /* ThumbnailCompositionEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Thumbnail/ThumbnailCompositionEffect.swift; sourceTree = "<group>"; };
 		111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/XHSLivePhotoAudioRecovery.swift; sourceTree = "<group>"; };
 		111111111111111111111154 /* XHSCachedMotionReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/XHSCachedMotionReader.swift; sourceTree = "<group>"; };
+		111111111111111111111156 /* Utilities/NativeMediaResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/NativeMediaResources.swift; sourceTree = "<group>"; };
+		111111111111111111111158 /* Views/Other/MediaInspectorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MediaInspectorController.swift; sourceTree = "<group>"; };
+		11111111111111111111115A /* Utilities/MediaInspection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/MediaInspection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -145,6 +151,9 @@
 		111111111111111111111013 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				11111111111111111111115A /* Utilities/MediaInspection.swift */,
+				111111111111111111111158 /* Views/Other/MediaInspectorController.swift */,
+				111111111111111111111156 /* Utilities/NativeMediaResources.swift */,
 				111111111111111111111029 /* HermesApp.swift */,
 				111111111111111111111146 /* SubprocessRunner.swift */,
 				111111111111111111111152 /* XHSLivePhotoAudioRecovery.swift */,
@@ -372,6 +381,9 @@
 				111111111111111111111131 /* Views/CollectionViews/DownloadCollectionView.swift in Sources */,
 				111111111111111111111132 /* Views/CollectionViews/CompletedCollectionView.swift in Sources */,
 				111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */,
+				11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */,
+				111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */,
+				111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */,
 				111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */,
 				111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */,
 				111111111111111111111135 /* Views/Other/PageControllers.swift in Sources */,
@@ -546,7 +558,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 647;
+				CURRENT_PROJECT_VERSION = 655;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -558,7 +570,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 2.0.6;
+				MARKETING_VERSION = 2.3.4;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -580,7 +592,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 647;
+				CURRENT_PROJECT_VERSION = 655;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -592,7 +604,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 2.0.6;
+				MARKETING_VERSION = 2.3.4;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
