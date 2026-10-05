@@ -3,9 +3,30 @@ import AVFoundation
 import CoreMedia
 
 enum ThumbnailCollectionAnimation {
+    // A calmer product cadence, using AppKit's inherited timing curve.
+    // This is intentionally longer than NSAnimationContext's default 0.25s.
+    static let transitionDuration: TimeInterval = 0.4
+
+    @MainActor
+    static func duration(animated: Bool = true) -> TimeInterval {
+        animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? transitionDuration : 0
+    }
+
     @MainActor
     static func perform(_ updates: () -> Void) {
         updates()
+    }
+}
+
+/// This grid has fixed-size items and no scrolling supplementary views. A
+/// viewport translation must not invalidate every item's layout on each tick.
+private final class ThumbnailFlowLayout: NSCollectionViewFlowLayout {
+    override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
+        guard let collectionView else { return true }
+        if sectionHeadersPinToVisibleBounds || sectionFootersPinToVisibleBounds {
+            return super.shouldInvalidateLayout(forBoundsChange: newBounds)
+        }
+        return collectionView.bounds.size != newBounds.size
     }
 }
 
@@ -26,7 +47,7 @@ enum ThumbnailCollectionStyle {
 
     @MainActor
     static func makeLayout(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset) -> NSCollectionViewFlowLayout {
-        let layout = NSCollectionViewFlowLayout()
+        let layout = ThumbnailFlowLayout()
         layout.scrollDirection = .vertical
         layout.itemSize = itemSize
         layout.minimumInteritemSpacing = itemSpacing
@@ -37,6 +58,7 @@ enum ThumbnailCollectionStyle {
 
     @MainActor
     static func prepare(_ collectionView: NSCollectionView, sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset) {
+        collectionView.wantsLayer = true
         collectionView.collectionViewLayout = makeLayout(sectionInset: sectionInset)
         collectionView.backgroundColors = [.clear]
         collectionView.isSelectable = true
@@ -46,6 +68,10 @@ enum ThumbnailCollectionStyle {
 
     @MainActor
     static func prepare(_ scrollView: NSScrollView, documentView: NSCollectionView) {
+        // Keep the entire clipping/document hierarchy layer-backed so AppKit
+        // can pan retained thumbnail layers instead of redrawing the viewport.
+        scrollView.wantsLayer = true
+        scrollView.contentView.wantsLayer = true
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
         scrollView.automaticallyAdjustsContentInsets = true
@@ -139,17 +165,21 @@ extension NSImage {
 }
 
 final class ThumbnailDurationCache: @unchecked Sendable {
-    let cache: NSCache<NSURL, NSString> = {
-        let cache = NSCache<NSURL, NSString>()
+    let cache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
         cache.countLimit = 600
         return cache
     }()
+
+    func key(for url: URL, contentVersion: TimeInterval) -> NSString {
+        "\(url.standardizedFileURL.absoluteString)\n\(contentVersion.bitPattern)" as NSString
+    }
 }
 
 let thumbnailDurationCache = ThumbnailDurationCache()
 
-func loadVideoDurationText(from url: URL) async -> String? {
-    let cacheKey = url.standardizedFileURL as NSURL
+func loadVideoDurationText(from url: URL, contentVersion: TimeInterval = 0) async -> String? {
+    let cacheKey = thumbnailDurationCache.key(for: url, contentVersion: contentVersion)
     if let cachedText = thumbnailDurationCache.cache.object(forKey: cacheKey) {
         return cachedText as String
     }

@@ -4,6 +4,45 @@ import XCTest
 
 @MainActor
 final class ThumbnailLayoutTests: XCTestCase {
+    func testScrollingKeepsFixedLayoutAndUpdatesVisibleRowsOnRetainedLayers() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 350))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        grid.updateItems((0..<200).map {
+            ThumbnailGridItem(id: "scroll-\($0)", url: URL(fileURLWithPath: "/tmp/scroll-row-\($0).png"),
+                status: .finished, mediaKind: .photo, contentVersion: 1)
+        }, animatingDifferences: false)
+        scroll.layoutSubtreeIfNeeded()
+        grid.nsCollectionView.layoutSubtreeIfNeeded()
+        let layout = try XCTUnwrap(grid.nsCollectionView.collectionViewLayout)
+        let before = Set(grid.nsCollectionView.visibleItems().compactMap { grid.nsCollectionView.indexPath(for: $0) })
+        XCTAssertNotNil(grid.nsCollectionView.layer)
+        XCTAssertNotNil(scroll.contentView.layer)
+        let bounds = grid.nsCollectionView.bounds
+        XCTAssertFalse(layout.shouldInvalidateLayout(forBoundsChange: bounds.offsetBy(dx: 0, dy: 250)))
+        XCTAssertTrue(layout.shouldInvalidateLayout(forBoundsChange:
+            NSRect(origin: bounds.origin, size: NSSize(width: bounds.width + 150, height: bounds.height))))
+        let distant = try XCTUnwrap(layout.layoutAttributesForItem(at: IndexPath(item: 150, section: 0)))
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: distant.frame.minY))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        grid.nsCollectionView.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(75))
+        let after = Set(grid.nsCollectionView.visibleItems().compactMap { grid.nsCollectionView.indexPath(for: $0) })
+        XCTAssertFalse(after.isEmpty)
+        XCTAssertTrue(before.isDisjoint(with: after), "Panning without layout invalidation must still recycle visible rows")
+        XCTAssertTrue(after.contains(IndexPath(item: 150, section: 0)))
+        grid.updateSectionInset(ThumbnailCollectionStyle.sectionInset(additionalBottomInset: 90))
+        grid.nsCollectionView.layoutSubtreeIfNeeded()
+        XCTAssertEqual((layout as? NSCollectionViewFlowLayout)?.sectionInset.bottom, 90)
+        grid.updateItems([], animatingDifferences: false)
+        XCTAssertFalse(grid.hasPresentedItems)
+    }
+
     func testStatusUpdatesKeepTheVisibleCellAndLoadedImage() async throws {
         _ = NSApplication.shared
         let grid = ThumbnailGridController()

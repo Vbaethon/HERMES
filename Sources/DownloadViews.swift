@@ -657,12 +657,13 @@ private final class DownloadFluidColorView: NSView {
         let locations: [NSNumber] = [0, NSNumber(value: Double(max(0, end - feather) / span)),
                                     NSNumber(value: Double(end / span)), 1]
         let from = progressMask.presentation()?.locations ?? progressMask.locations
-        progressMask.removeAnimation(forKey: "progress")
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        // Commit the target and its replacement animation together. A separate
+        // commit can briefly reveal the target before restarting at the old edge.
+        progressMask.removeAnimation(forKey: "progress")
         progressMask.locations = locations
         progressMask.opacity = progress > 0 ? 1 : 0
-        CATransaction.commit()
         if animated, progress > 0, let from, from != locations {
             let animation = CABasicAnimation(keyPath: "locations")
             animation.fromValue = from
@@ -671,6 +672,7 @@ private final class DownloadFluidColorView: NSView {
             animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.82, 0.2, 1)
             progressMask.add(animation, forKey: "progress")
         }
+        CATransaction.commit()
     }
 
     @objc private func refreshMotion() {

@@ -53,7 +53,16 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
     func makeSplitViewItem() -> NSSplitViewItem {
         // Retain AppKit's sidebar holding priority so the content pane absorbs
         // width changes before a sidebar that the user has resized.
-        NSSplitViewItem(sidebarWithViewController: self)
+        let item = NSSplitViewItem(sidebarWithViewController: self)
+        // A zero-width view starts at the system's minimum (144pt here), not
+        // its comfortable automatic width. Seed only the initial geometry;
+        // autosaved sizes and subsequent divider drags remain owned by AppKit.
+        if view.frame.width == 0, item.automaticMaximumThickness > 0 {
+            var size = view.frame.size
+            size.width = item.automaticMaximumThickness
+            view.setFrameSize(size)
+        }
+        return item
     }
 
     override func viewDidLoad() {

@@ -10,6 +10,15 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var badgeTask: Task<Void, Never>?
     private var unavailableMessage: String?
     private var previewMessage: String?
+    private struct Appearance: Equatable {
+        let url: URL?
+        let status: PairItem.Status
+        let kind: ThumbnailMediaKind
+        let selected: Bool
+        let availability: String?
+    }
+    private var lastAppearance: Appearance?
+    private weak var lastAppearanceImage: NSImage?
     private var thumbnailView: ThumbnailItemView? { view as? ThumbnailItemView }
     var isPresentingComposition: Bool { thumbnailView?.compositionEffect.isPresenting == true }
     var onCompositionPresentationEnded: (() -> Void)? {
@@ -78,6 +87,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.addSubview(placeholderLabel)
         rootView.placeholderLabel = placeholderLabel
         rootView.onEffectiveAppearanceChanged = { [weak self] in
+            self?.lastAppearance = nil
             self?.updateBorderAppearance(isSelected: self?.isSelected ?? false)
         }
         view = rootView
@@ -93,11 +103,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         representedContentVersion = nil
         unavailableMessage = nil
         previewMessage = nil
+        lastAppearance = nil
+        lastAppearanceImage = nil
         view.setAccessibilityLabel(nil)
         view.setAccessibilityValue(nil)
         thumbnailView?.compositionEffect.reset()
         thumbnailView?.failureLabel?.isHidden = true
         thumbnailView?.placeholderLabel?.isHidden = true
+        imageView?.layer?.removeAnimation(forKey: "opacity")
         imageView?.image = nil
         imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
@@ -106,7 +119,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     override var isSelected: Bool {
         didSet {
-            updateBorderAppearance(isSelected: isSelected)
+            if oldValue != isSelected { updateBorderAppearance(isSelected: isSelected) }
         }
     }
 
@@ -117,10 +130,13 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0, unavailableMessage: String? = nil) {
         if representedURL == url, representedContentVersion == contentVersion, self.unavailableMessage == unavailableMessage {
             thumbnailStatus = status
+            let kindChanged = self.mediaKind != mediaKind
             self.mediaKind = mediaKind
-            loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
+            if kindChanged { badgeTask?.cancel(); badgeTask = nil; thumbnailView?.setBadge(nil) }
+            if kindChanged || (mediaKind.showsDuration && badgeTask == nil && thumbnailView?.badgeLabel?.isHidden == true) {
+                loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
+            }
             updateBorderAppearance(isSelected: isSelected)
-            view.toolTip = url.lastPathComponent
             if imageView?.image == nil, thumbnailTask == nil {
                 startThumbnailLoad(for: url)
             }
@@ -137,7 +153,6 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         self.unavailableMessage = unavailableMessage
         previewMessage = nil
         thumbnailView?.placeholderLabel?.isHidden = true
-        thumbnailDurationCache.cache.removeObject(forKey: url.standardizedFileURL as NSURL)
         thumbnailStatus = status
         self.mediaKind = mediaKind
         thumbnailView?.compositionEffect.reset()
@@ -154,17 +169,29 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private func startThumbnailLoad(for url: URL) {
         thumbnailTask?.cancel()
         let displayScale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let contentVersion = representedContentVersion ?? 0
+        let allowsCachedThumbnail = unavailableMessage == nil
+        if allowsCachedThumbnail, let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
+            pointSize: ThumbnailCollectionStyle.cellSide, scale: displayScale, contentVersion: contentVersion) {
+            thumbnailTask = nil
+            showLoadedThumbnail(cached, animated: false)
+            updateBorderAppearance(isSelected: isSelected)
+            return
+        }
         thumbnailTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
             let result = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,
                 pointSize: ThumbnailCollectionStyle.cellSide,
-                scale: displayScale
+                scale: displayScale,
+                contentVersion: contentVersion,
+                allowsCachedThumbnail: allowsCachedThumbnail
             )
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard let self, self.representedURL == url, !Task.isCancelled else { return }
+                guard let self, self.representedURL == url,
+                      self.representedContentVersion == contentVersion, !Task.isCancelled else { return }
                 self.thumbnailTask = nil
                 self.previewMessage = result.unavailableMessage
                 let shouldFadeIn = self.imageView?.image == nil
@@ -191,12 +218,17 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     @MainActor
     private func showLoadedThumbnail(_ image: NSImage, animated: Bool) {
         guard let imageView else { return }
+        // Changing the model alpha does not cancel a fade still presenting on
+        // the recycled image layer. Never carry it into another artwork.
+        imageView.layer?.removeAnimation(forKey: "opacity")
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             imageView.alphaValue = 0
             imageView.image = image
             thumbnailView?.updateImageFrame(for: image)
+            // Retain AppKit's timing curve with the grid's calmer transition
+            // duration. Cached revisits paint immediately without another fade.
             NSAnimationContext.runAnimationGroup { context in
-                context.allowsImplicitAnimation = true
+                context.duration = ThumbnailCollectionAnimation.duration()
                 imageView.animator().alphaValue = 1
             }
         } else {
@@ -217,20 +249,34 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             return
         }
 
-        badgeTask?.cancel()
+        let contentVersion = representedContentVersion ?? 0
+        if let cached = thumbnailDurationCache.cache.object(forKey:
+            thumbnailDurationCache.key(for: url, contentVersion: contentVersion)) {
+            thumbnailView?.setBadge(cached as String)
+            return
+        }
+        guard badgeTask == nil else { return }
         badgeTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(320))
             guard !Task.isCancelled else { return }
-            let durationText = await loadVideoDurationText(from: url)
+            let durationText = await loadVideoDurationText(from: url, contentVersion: contentVersion)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard let self, self.representedURL == url, self.mediaKind == mediaKind, !Task.isCancelled else { return }
+                guard let self, self.representedURL == url, self.representedContentVersion == contentVersion,
+                      self.mediaKind == mediaKind, !Task.isCancelled else { return }
+                self.badgeTask = nil
                 self.thumbnailView?.setBadge(durationText)
             }
         }
     }
 
     private func updateBorderAppearance(isSelected: Bool) {
+        let availability = unavailableMessage ?? previewMessage
+        let appearance = Appearance(url: representedURL, status: thumbnailStatus,
+            kind: mediaKind, selected: isSelected, availability: availability)
+        guard lastAppearance != appearance || lastAppearanceImage !== imageView?.image else { return }
+        lastAppearance = appearance
+        lastAppearanceImage = imageView?.image
         let kind: String
         switch mediaKind {
         case .photo: kind = "照片"
@@ -247,14 +293,17 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.group)
         view.setAccessibilityLabel(representedURL.map { "\($0.lastPathComponent)，\(kind)" })
-        let availability = unavailableMessage ?? previewMessage
         view.setAccessibilityValue(([status, availability, isSelected ? "已选择" : "未选择"].compactMap { $0 }).joined(separator: "，"))
         view.toolTip = representedURL.map { availability == nil ? $0.lastPathComponent : "\(availability!)\n\($0.path)" }
         thumbnailView?.compositionEffect.update(image: imageView?.image, running: thumbnailStatus == .running)
-        thumbnailView?.failureLabel?.stringValue = thumbnailStatus == .failed ? "合成失败" : availability ?? ""
-        thumbnailView?.failureLabel?.textColor = .labelColor
-        thumbnailView?.failureLabel?.isHidden = thumbnailStatus != .failed && availability == nil
-        thumbnailView?.needsLayout = true
+        let failureText = thumbnailStatus == .failed ? "合成失败" : availability ?? ""
+        let failureHidden = thumbnailStatus != .failed && availability == nil
+        if let label = thumbnailView?.failureLabel,
+           label.stringValue != failureText || label.isHidden != failureHidden {
+            label.stringValue = failureText
+            label.isHidden = failureHidden
+            thumbnailView?.needsLayout = true
+        }
         if isSelected {
             thumbnailView?.setRingState(.selected)
         } else if thumbnailStatus == .failed {
@@ -274,6 +323,7 @@ fileprivate enum ThumbnailStateRing {
 final class ThumbnailStateRingView: NSView {
     fileprivate var state: ThumbnailStateRing = .none {
         didSet {
+            guard state != oldValue else { return }
             isHidden = state == .none
             updateBorderColor()
         }
@@ -383,7 +433,6 @@ final class ThumbnailItemView: NSView {
     override func layout() {
         super.layout()
         updateImageFrame(for: imageView?.image)
-        updateBadgeFrames()
     }
 
     func containsThumbnail(at point: NSPoint) -> Bool {
@@ -408,8 +457,8 @@ final class ThumbnailItemView: NSView {
         let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
         let frame = NSRect(origin: origin, size: size)
         interactiveFrame = frame
-        imageView.frame = frame
-        compositionEffect.frame = frame
+        if imageView.frame != frame { imageView.frame = frame }
+        if compositionEffect.frame != frame { compositionEffect.frame = frame }
         updateRingFrame()
         updateBadgeFrames()
     }
@@ -421,10 +470,12 @@ final class ThumbnailItemView: NSView {
     func setBadge(_ text: String?) {
         guard let badgeLabel else { return }
         guard let text, !text.isEmpty else {
+            guard !badgeLabel.isHidden || !badgeLabel.stringValue.isEmpty else { return }
             badgeLabel.isHidden = true
             badgeLabel.stringValue = ""
             return
         }
+        guard badgeLabel.stringValue != text || badgeLabel.isHidden else { return }
         badgeLabel.stringValue = text
         badgeLabel.isHidden = false
         updateBadgeFrames()
@@ -433,7 +484,8 @@ final class ThumbnailItemView: NSView {
     private func updateRingFrame() {
         guard let ringView else { return }
         let outwardInset = ThumbnailCollectionStyle.stateRingGap + ThumbnailCollectionStyle.stateRingLineWidth
-        ringView.frame = interactiveFrame.insetBy(dx: -outwardInset, dy: -outwardInset)
+        let frame = interactiveFrame.insetBy(dx: -outwardInset, dy: -outwardInset)
+        if ringView.frame != frame { ringView.frame = frame }
     }
 
     private func updateBadgeFrames() {
@@ -443,14 +495,18 @@ final class ThumbnailItemView: NSView {
             failureLabel.frame = NSRect(x: baseFrame.minX + 4, y: baseFrame.maxY - size.height - 4,
                                        width: min(size.width + 8, baseFrame.width - 8), height: size.height)
         }
-        placeholderLabel?.frame = NSRect(x: baseFrame.minX + 8, y: baseFrame.minY + 12, width: max(0, baseFrame.width - 16), height: 18)
+        if let placeholderLabel, !placeholderLabel.isHidden {
+            let frame = NSRect(x: baseFrame.minX + 8, y: baseFrame.minY + 12, width: max(0, baseFrame.width - 16), height: 18)
+            if placeholderLabel.frame != frame { placeholderLabel.frame = frame }
+        }
         if let badgeLabel, !badgeLabel.isHidden {
             let labelSize = ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
             let origin = NSPoint(
                 x: baseFrame.maxX - labelSize.width - ThumbnailBadgeStyle.inset,
                 y: baseFrame.minY + ThumbnailBadgeStyle.inset
             )
-            badgeLabel.frame = NSRect(origin: origin, size: labelSize).integral
+            let frame = NSRect(origin: origin, size: labelSize).integral
+            if badgeLabel.frame != frame { badgeLabel.frame = frame }
         }
     }
 }

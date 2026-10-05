@@ -127,8 +127,11 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         snapshot.appendItems(presentedItems.map(\.id), toSection: Section.main)
 
         let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
-            self?.updateVisibleItems()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = ThumbnailCollectionAnimation.duration(animated: shouldAnimate)
+            dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
+                self?.updateVisibleItems()
+            }
         }
         applySelection(selectedIDs)
         onPresentationChange?()
@@ -228,15 +231,52 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     func addShareItem(to menu: NSMenu) {
         let urls = resourceURLs(forIDs: selectedIDs)
         if !urls.isEmpty {
-            let picker = NSSharingServicePicker(items: urls)
-            sharingServicePicker = picker
-            menu.addItem(picker.standardShareMenuItem)
+            let standardItem = NSSharingServicePicker(items: urls).standardShareMenuItem
+            let share = NSMenuItem(title: standardItem.title,
+                                   action: #selector(shareFromContextMenu(_:)), keyEquivalent: "")
+            share.image = standardItem.image
+            share.target = self
+            share.representedObject = selectedIDs
+            menu.addItem(share)
         } else {
             let share = NSMenuItem(title: "共享", action: nil, keyEquivalent: "")
             share.isEnabled = false
             menu.addItem(share)
         }
         menu.addItem(.separator())
+    }
+
+    /// Anchor to artwork in display order, independent of selection or right-click order.
+    /// Skip offscreen items so a scrolled multi-selection still points at a visible file.
+    func sharingAnchorRect(forIDs ids: Set<String>) -> NSRect? {
+        collectionView.layoutSubtreeIfNeeded()
+        for item in items where ids.contains(item.id) && requestedIDs.contains(item.id) {
+            guard let path = dataSource.indexPath(for: item.id),
+                  let view = collectionView.item(at: path)?.view as? ThumbnailItemView else { continue }
+            view.layoutSubtreeIfNeeded()
+            let artwork = view.imageView?.frame ?? .zero
+            let rect = view.convert(artwork.isEmpty ? view.bounds : artwork, to: collectionView)
+                .intersection(collectionView.visibleRect)
+            if !rect.isEmpty { return rect }
+        }
+        return nil
+    }
+
+    @objc private func shareFromContextMenu(_ sender: NSMenuItem) {
+        guard let ids = sender.representedObject as? Set<String> else { return }
+        // Present after the contextual menu finishes tracking; otherwise its
+        // dismissal can also dismiss the share popover or become its anchor.
+        Task { @MainActor [weak self] in
+            guard let self, self.collectionView.window != nil,
+                  ids.isSubset(of: self.requestedIDs),
+                  let rect = self.sharingAnchorRect(forIDs: ids) else { return }
+            let urls = self.resourceURLs(forIDs: ids)
+            guard !urls.isEmpty else { return }
+            self.sharingServicePicker?.close()
+            let picker = NSSharingServicePicker(items: urls)
+            self.sharingServicePicker = picker
+            picker.show(relativeTo: rect, of: self.collectionView, preferredEdge: .minX)
+        }
     }
 
     private func syncSelectionFromCollectionView() {

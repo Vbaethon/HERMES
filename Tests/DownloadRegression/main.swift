@@ -11,6 +11,75 @@ private actor DownloadStatusRecorder {
     func statusSnapshot() -> [DownloaderInfra.DownloadStatus] { statuses }
 }
 
+private actor DownloadProgressRecorder {
+    private var values: [Double] = []
+    private let suspendFirst: Bool
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isWaiting = false
+
+    init(suspendFirst: Bool = false) { self.suspendFirst = suspendFirst }
+
+    func record(_ value: Double) async {
+        if suspendFirst && !isWaiting && values.isEmpty {
+            isWaiting = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+        values.append(value)
+    }
+
+    func release() { continuation?.resume(); continuation = nil }
+    func snapshot() -> [Double] { values }
+}
+
+private func checkDownloadProgress() async throws {
+    let recorder = DownloadProgressRecorder()
+    let progress = DownloaderInfra.DownloadProgressAggregator(totalCount: 3) { await recorder.record($0) }
+    for (index, value) in [(-1, 1.0), (3, 1.0), (0, Double.nan), (1, .infinity), (2, -.infinity)] {
+        await progress.update(index: index, fraction: value)
+    }
+    await progress.complete(index: 3)
+    let invalidValues = await recorder.snapshot()
+    precondition(invalidValues.isEmpty, "invalid indices and nonfinite progress must not change the total")
+    await progress.update(index: 0, fraction: 0.6)
+    await progress.update(index: 0, fraction: 0.1) // Retry starts from an earlier byte count.
+    await progress.update(index: 1, fraction: 0.9)
+    await progress.update(index: 1, fraction: -0.5)
+    await progress.complete(index: 0)
+    await progress.update(index: 0, fraction: 0.4) // Late callback for a completed file.
+    await progress.complete(index: 0)
+    await progress.complete(index: 2)
+    await progress.update(index: 1, fraction: 2)
+    await progress.complete(index: 1)
+    let values = await recorder.snapshot()
+    precondition(values.first == 0.6 / 3 && values.last == 1
+        && zip(values, values.dropFirst()).allSatisfy { $0 < $1 },
+        "retries, duplicate completions and late callbacks must preserve increasing cumulative progress")
+
+    // Hold the first consumer across an actor suspension. Sibling callbacks
+    // must be coalesced until it finishes, rather than delivered ahead of it.
+    let delayed = DownloadProgressRecorder(suspendFirst: true)
+    let concurrent = DownloaderInfra.DownloadProgressAggregator(totalCount: 2) { await delayed.record($0) }
+    let firstUpdate = Task { await concurrent.update(index: 0, fraction: 0.2) }
+    for _ in 0..<1000 {
+        if await delayed.isWaiting { break }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    let firstIsWaiting = await delayed.isWaiting
+    precondition(firstIsWaiting, "the delayed progress consumer must start")
+    await concurrent.update(index: 1, fraction: 0.6)
+    await concurrent.update(index: 0, fraction: 0.1)
+    await concurrent.complete(index: 0)
+    await concurrent.update(index: 0, fraction: 0.3)
+    await concurrent.complete(index: 1)
+    let whileWaiting = await delayed.snapshot()
+    await delayed.release()
+    await firstUpdate.value
+    let delivered = await delayed.snapshot()
+    precondition(whileWaiting.isEmpty && delivered == [0.1, 1],
+        "a suspended consumer must receive the older value before the latest total, including final completion")
+    print("PASS: multi-file progress rejects retry regressions and late callbacks, serializes concurrent delivery, and reaches 100%")
+}
+
 private func containsStagesInOrder(_ stages: [DownloaderInfra.DownloadStage], _ expected: [DownloaderInfra.DownloadStage]) -> Bool {
     var remaining = expected.makeIterator()
     var next = remaining.next()
@@ -83,6 +152,7 @@ private func audioTrackSubtype(at url: URL) async throws -> UInt32? {
 
 @main struct DownloadRegression {
     static func main() async throws {
+        try await checkDownloadProgress()
         try XHSCachedMotionRegression.run()
         try await XHSReplacementRegression.run()
         typealias D = DouyinNativeDownloader

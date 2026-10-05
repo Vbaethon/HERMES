@@ -62,7 +62,7 @@ final class ThumbnailCompositionEffect: NSView {
         if startsPresentation { alphaValue = 0 }
         updateActivity()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.3
+            context.duration = ThumbnailCollectionAnimation.duration()
             animator().alphaValue = 1
         }
     }
@@ -101,7 +101,7 @@ final class ThumbnailCompositionEffect: NSView {
         isRunning = false
         // Keep the mesh moving throughout the dissolve, and stop it only when removed.
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.3 : 0
+            context.duration = ThumbnailCollectionAnimation.duration(animated: animated)
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             Task { @MainActor in

@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import AVFoundation
 import CoreImage
+import ImageIO
+import MapKit
 
 private struct NativeMediaFailure: Error, CustomStringConvertible {
     let description: String
@@ -11,6 +13,9 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
     @MainActor static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.codex.Hermes")
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--inspector-location-preview") {
+            NSApp.setActivationPolicy(.regular)
+        }
         Task { @MainActor in
             do {
                 try await runChecks()
@@ -93,6 +98,105 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         let png = bitmap.representation(using: .png, properties: [:])!
         try png.write(to: image)
         try png.write(to: secondImage)
+        var formatImages = [image]
+        for (suffix, type) in [("jpg", "public.jpeg"), ("jpeg", "public.jpeg"), ("jfif", "public.jpeg"),
+                               ("heic", "public.heic"), ("heif", "public.heic")] {
+            let url = root.appendingPathComponent("no-metadata.\(suffix)")
+            let destination = CGImageDestinationCreateWithURL(url as CFURL, type as CFString, 1, nil)!
+            CGImageDestinationAddImage(destination, bitmap.cgImage!, nil)
+            try expect(CGImageDestinationFinalize(destination), "\(suffix) fixture must be encoded")
+            formatImages.append(url)
+        }
+        let webp = root.appendingPathComponent("no-metadata.webp")
+        try Data(base64Encoded: "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")!.write(to: webp)
+        formatImages.append(webp)
+        for url in formatImages {
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            try expect(source != nil && CGImageSourceCreateImageAtIndex(source!, 0, nil) != nil,
+                "\(url.pathExtension) fixture must be a real decodable image")
+            let snapshot = await MediaInspection.loadSnapshot(.init(name: url.lastPathComponent, sourceURLs: [url],
+                displayedURLs: [url], kind: "照片", compositionState: "不适用"))
+            try expect(snapshot.location == nil && !snapshot.inspectorRows.contains {
+                [.capture, .location, .post].contains($0.section) || !$0.isDisplayable
+            }, "every supported image format must hide missing information using the same evidence rule")
+            try expect(snapshot.inspectorRows.contains { $0.key == "显示尺寸" },
+                "\(url.pathExtension) must preserve its actual image information")
+        }
+        pass("JPG, JPEG, JFIF, HEIC, HEIF, PNG and WebP share missing-information visibility while retaining real properties")
+        let locatedImage = root.appendingPathComponent("located.jpg")
+        let relocatedImage = root.appendingPathComponent("relocated.jpg")
+        let cameraProperties: [CFString: Any] = [
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Apple", kCGImagePropertyTIFFModel: "iPhone 16 Pro"],
+            kCGImagePropertyExifDictionary: [
+                kCGImagePropertyExifLensModel: "iPhone 16 Pro back triple camera 6.86mm f/1.78",
+                kCGImagePropertyExifFNumber: 1.78, kCGImagePropertyExifExposureTime: 1.0 / 125,
+                kCGImagePropertyExifISOSpeedRatings: [80], kCGImagePropertyExifFocalLength: 6.86,
+                kCGImagePropertyExifFocalLenIn35mmFilm: 24]
+        ]
+        func writeJPEGImage(_ url: URL, properties: [CFString: Any]) throws {
+            let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+            CGImageDestinationAddImage(destination, bitmap.cgImage!, properties as CFDictionary)
+            try expect(CGImageDestinationFinalize(destination), "EXIF fixture image must be written")
+        }
+        func writeGPSImage(_ url: URL, latitude: Double, longitude: Double, latitudeRef: String, longitudeRef: String) throws {
+            var properties = cameraProperties
+            properties[kCGImagePropertyGPSDictionary] = [
+                kCGImagePropertyGPSLatitude: latitude, kCGImagePropertyGPSLatitudeRef: latitudeRef,
+                kCGImagePropertyGPSLongitude: longitude, kCGImagePropertyGPSLongitudeRef: longitudeRef]
+            try writeJPEGImage(url, properties: properties)
+        }
+        try writeGPSImage(locatedImage, latitude: 33.865, longitude: 151.2094, latitudeRef: "S", longitudeRef: "E")
+        try writeGPSImage(relocatedImage, latitude: 37.7749, longitude: 122.4194, latitudeRef: "N", longitudeRef: "W")
+        let photoLocation = MediaInspection.Location(latitude: -33.865, longitude: 151.2094)!
+        let otherPhotoLocation = MediaInspection.Location(latitude: 37.7749, longitude: -122.4194)!
+        let videoLocation = MediaInspection.Location(latitude: 28.9534, longitude: 118.8718)!
+        let locatedBytes = try Data(contentsOf: locatedImage)
+        let locatedSnapshot = await MediaInspection.loadSnapshot(.init(name: "located", sourceURLs: [locatedImage],
+            displayedURLs: [locatedImage], kind: "照片", compositionState: "不适用"))
+        try expect(locatedSnapshot.location == photoLocation, "ImageIO GPS must preserve southern/eastern hemispheres")
+        for (key, value) in [("相机型号", "Apple iPhone 16 Pro"), ("镜头", "iPhone 16 Pro back triple camera 6.86mm f/1.78"),
+                             ("光圈", "f/1.78"), ("快门", "1/125 秒"), ("ISO", "80"),
+                             ("焦距", "6.86 mm"), ("等效焦距", "24 mm（35 mm）")] {
+            try expect(locatedSnapshot.inspectorRows.contains { $0.section == .capture && $0.key == key && $0.value == value },
+                "the inspector must read and format actual \(key) from a real EXIF image")
+        }
+        let invalidCameraRows = MediaInspection.imageCaptureRows([
+            kCGImagePropertyTIFFDictionary as String: [kCGImagePropertyTIFFMake as String: "Apple"],
+            kCGImagePropertyExifDictionary as String: [kCGImagePropertyExifFNumber as String: -1,
+                kCGImagePropertyExifExposureTime as String: Double.nan, kCGImagePropertyExifISOSpeedRatings as String: [0],
+                kCGImagePropertyExifFocalLength as String: Double.infinity]])
+        try expect(invalidCameraRows.isEmpty, "invalid shooting values and a manufacturer alone must not invent camera settings")
+        let longExposureRows = MediaInspection.imageCaptureRows([
+            kCGImagePropertyTIFFDictionary as String: [kCGImagePropertyTIFFMake as String: "Canon", kCGImagePropertyTIFFModel as String: "Canon EOS R5"],
+            kCGImagePropertyExifDictionary as String: [kCGImagePropertyExifExposureTime as String: 2.5]])
+        try expect(longExposureRows.contains { $0.key == "相机型号" && $0.value == "Canon EOS R5" }
+            && longExposureRows.contains { $0.key == "快门" && $0.value == "2.5 秒" },
+            "camera brands must not repeat and long exposures must remain seconds")
+        pass("real EXIF camera, lens, aperture, shutter, ISO and focal lengths with missing/invalid-value handling")
+        let otherSnapshot = await MediaInspection.loadSnapshot(.init(name: "relocated", sourceURLs: [relocatedImage],
+            displayedURLs: [relocatedImage], kind: "照片", compositionState: "不适用"))
+        try expect(otherSnapshot.location == otherPhotoLocation, "ImageIO GPS must preserve northern/western hemispheres")
+        try expect(MediaInspection.Location.iso6709("+28.9534+118.8718+072.355/") == videoLocation
+            && MediaInspection.Location.iso6709("-33.8650+151.2094-004.250/") == photoLocation
+            && MediaInspection.Location.iso6709("+00+000/") == .init(latitude: 0, longitude: 0),
+            "QuickTime decimal ISO 6709 must preserve signs and accept valid zero coordinates")
+        for invalid in ["", "+91.0000+118.8718/", "+28.9534+181.0000/", "+28.9534+118.8718", "NaN,NaN", "Sydney"] {
+            try expect(MediaInspection.Location.iso6709(invalid) == nil, "invalid or inferred locations must be rejected")
+        }
+        try expect(MediaInspection.Location(latitude: .nan, longitude: 0) == nil
+            && MediaInspection.Location(latitude: 0, longitude: .infinity) == nil
+            && MediaInspection.Location.imageGPS([kCGImagePropertyGPSDictionary as String:
+                [kCGImagePropertyGPSLatitude as String: 33.865, kCGImagePropertyGPSLongitude as String: 151.2094]]) == nil,
+            "nonfinite coordinates and GPS with missing hemisphere references must not produce a map")
+        let sourceOnlyLocation = await MediaInspection.loadSnapshot(.init(name: "output", sourceURLs: [locatedImage],
+            displayedURLs: [image], kind: "照片", compositionState: "不适用", isCompositionOutput: true))
+        try expect(sourceOnlyLocation.location == nil, "a source path must never locate an output that has no GPS")
+        try expect(!sourceOnlyLocation.rows.contains { $0.section == .capture },
+            "a source camera must not be attributed to a displayed output with no shooting metadata")
+        try expect(!locatedSnapshot.rows.contains { ["纬度", "经度", "经纬度"].contains($0.key)
+            || $0.value.contains("151.2094") || $0.value.contains("33.865") },
+            "geographic coordinates must remain map data and never appear in inspector rows")
+        pass("real image GPS, hemisphere signs, valid zero coordinates and invalid/missing location handling")
         // Resource transfer depends on real readable files, not successful
         // decoding. The malformed motion fixture also exercises unavailable
         // metadata without pretending the file is a verified Live Photo.
@@ -116,6 +220,20 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         try expect(unknownRows.contains { $0.section == .image && $0.key == "HDR" && $0.value == "否（SDR）" }
             && unknownRows.contains { $0.section == .video && $0.key == "HDR" && $0.value == "无法确认" },
             "ordinary images must report SDR and malformed videos must not invent an HDR result")
+        let unknownSnapshot = await MediaInspection.loadSnapshot(unrecorded)
+        try expect(!unknownSnapshot.inspectorRows.contains {
+            ["原始文件", "来源平台", "博主", "来源帖子", "帖子标题/描述"].contains($0.key)
+                || ($0.section == .video && $0.key == "HDR")
+        }, "missing metadata must stay out of the form while its diagnostic state remains available")
+        try expect(unknownSnapshot.inspectorRows.contains { $0.section == .image && $0.key == "HDR" && $0.value == "否（SDR）" },
+            "a confirmed negative result is real information and must remain visible")
+        let presentation = MediaInspection.Snapshot(rows: [
+            .init(key: "缺失字段", value: nil), .init(key: "空字段", value: " \n\t"),
+            .init(key: "读取中字段", value: "读取中…", availability: .loading),
+            .init(key: "帖子标题/描述", value: "未记录"), .init(key: "音轨", value: "无音轨", section: .video)
+        ])
+        try expect(presentation.inspectorRows.map(\.key) == ["帖子标题/描述", "音轨"],
+            "availability must describe the evidence rather than blacklist words in actual metadata")
         if !CommandLine.arguments.contains("--sidebar-performance") {
             let context = CIContext()
             let rect = CGRect(x: 0, y: 0, width: 64, height: 64)
@@ -149,11 +267,32 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
                 displayedURLs: [sdr10], kind: "照片", compositionState: "不适用"))
             try expect(sdr10Rows.contains { $0.key == "HDR" && $0.value == "否（SDR）" },
                 "10-bit image depth alone must not establish HDR")
-            for transfer in [AVVideoTransferFunction_ITU_R_709_2, AVVideoTransferFunction_ITU_R_2100_HLG,
-                             AVVideoTransferFunction_SMPTE_ST_2084_PQ] {
-                let url = root.appendingPathComponent("\(transfer).mov")
+            for (transfer, suffix, fileType) in [
+                (AVVideoTransferFunction_ITU_R_709_2, "mov", AVFileType.mov),
+                (AVVideoTransferFunction_ITU_R_2100_HLG, "mov", .mov),
+                (AVVideoTransferFunction_SMPTE_ST_2084_PQ, "mov", .mov),
+                (AVVideoTransferFunction_ITU_R_709_2, "mp4", .mp4),
+                (AVVideoTransferFunction_ITU_R_709_2, "m4v", .m4v)
+            ] {
+                let url = root.appendingPathComponent("\(transfer).\(suffix)")
                 let isHDR = transfer != AVVideoTransferFunction_ITU_R_709_2
-                let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+                let hasLocation = !isHDR && suffix == "mov"
+                let writer = try AVAssetWriter(outputURL: url, fileType: fileType)
+                if hasLocation {
+                    let locationTag = AVMutableMetadataItem()
+                    locationTag.identifier = .quickTimeMetadataLocationISO6709
+                    locationTag.value = "+28.9534+118.8718+072.355/" as NSString
+                    locationTag.dataType = kCMMetadataBaseDataType_UTF8 as String
+                    let makeTag = AVMutableMetadataItem()
+                    makeTag.identifier = .quickTimeMetadataMake
+                    makeTag.value = "Apple" as NSString
+                    makeTag.dataType = kCMMetadataBaseDataType_UTF8 as String
+                    let modelTag = AVMutableMetadataItem()
+                    modelTag.identifier = .quickTimeMetadataModel
+                    modelTag.value = "Movie Camera" as NSString
+                    modelTag.dataType = kCMMetadataBaseDataType_UTF8 as String
+                    writer.metadata = [locationTag, makeTag, modelTag]
+                }
                 let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
                     AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: 64, AVVideoHeightKey: 64,
                     AVVideoColorPropertiesKey: [AVVideoColorPrimariesKey: isHDR ? AVVideoColorPrimaries_ITU_R_2020 : AVVideoColorPrimaries_ITU_R_709_2,
@@ -184,8 +323,37 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
                 try expect(rows.contains { $0.section == .video && $0.key == "HDR"
                     && $0.value == (isHDR ? "是" : "否（SDR）") },
                     "SDR and HLG/PQ videos must be identified from their HDR characteristics")
+                if !hasLocation {
+                    for (urls, kind, state, output) in [([url], "视频", "不适用", false),
+                        ([image, url], "Live Photo", "未合成", false), ([url], "Live Photo", "已合成", true)] {
+                        let snapshot = await MediaInspection.loadSnapshot(.init(name: suffix, sourceURLs: urls,
+                            displayedURLs: urls, kind: kind, compositionState: state, isCompositionOutput: output))
+                        try expect(snapshot.location == nil && !snapshot.inspectorRows.contains {
+                            [.capture, .location, .post].contains($0.section) || !$0.isDisplayable
+                        }, "\(suffix) \(kind) must use the same visibility rule for missing information")
+                        try expect(snapshot.inspectorRows.contains { $0.key == "音轨" && $0.value == "无音轨" },
+                            "confirmed absence of an audio track must remain visible")
+                    }
+                }
+                if hasLocation {
+                    let videoBytes = try Data(contentsOf: url)
+                    for (photos, expected) in [([url], videoLocation), ([image, url], videoLocation),
+                                               ([url, locatedImage], photoLocation)] {
+                        let snapshot = await MediaInspection.loadSnapshot(.init(name: "video GPS", sourceURLs: photos,
+                            displayedURLs: photos, kind: "Live Photo", compositionState: "未合成"))
+                        try expect(snapshot.location == expected,
+                            "real QuickTime GPS must locate videos and Live Photos, preferring still GPS regardless of file order")
+                        let expectedCamera = photos.contains(locatedImage) ? "Apple iPhone 16 Pro" : "Apple Movie Camera"
+                        try expect(snapshot.rows.filter { $0.key == "相机型号" }.map(\.value) == [expectedCamera],
+                            "QuickTime camera metadata must provide a fallback without overriding the Live Photo still")
+                    }
+                    try expect(try Data(contentsOf: url) == videoBytes && Data(contentsOf: locatedImage) == locatedBytes,
+                        "reading GPS must preserve the exact image and movie bytes")
+                    pass("real QuickTime location metadata, Live Photo movie fallback and still-location priority without media changes")
+                }
             }
             pass("HDR gain maps, HLG/PQ stills and videos, wide-gamut SDR and 10-bit SDR stills are distinguished")
+            pass("MOV, MP4, M4V, uncomposed Live Photos and composition outputs share missing-information visibility")
         }
         pass("unrecorded sources remain unknown and malformed media is inspected without inventing provenance")
 
@@ -198,7 +366,13 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             sourceField: "images_list.fileid", sha256: MediaSourceProvenance.hash(of: image))
         receipt.write(to: image)
         receipt.write(to: movie)
-        let recordedRows = await MediaInspection.load(unrecorded)
+        let savedReceipt = MediaSourceProvenance.read(from: image)
+        let recordedSnapshot = await MediaInspection.loadSnapshot(unrecorded)
+        let recordedRows = recordedSnapshot.rows
+        try expect(["帖子 ID", "博主 ID", "图片资源 ID", "媒体资源标识", "下载时 SHA-256"].allSatisfy { key in
+            recordedRows.contains { $0.key == key } && !recordedSnapshot.inspectorRows.contains { $0.key == key }
+        } && MediaSourceProvenance.read(from: image) == savedReceipt,
+            "technical IDs and hashes must stay in the read-only snapshot and file receipt while hidden from the inspector")
         let coreEnd = recordedRows.lastIndex { [.common, .image, .video].contains($0.section) }!
         let technicalStart = recordedRows.firstIndex { [.sourceDetails, .imageDetails, .videoDetails].contains($0.section) }!
         try expect(coreEnd < technicalStart,
@@ -222,6 +396,7 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         try expect(MediaPairRevision(image: image, movie: movie) == originalRevision,
             "inspection must preserve source filesystem revisions")
         pass("source post and author are retained, authentication is omitted and composition outputs are labelled separately")
+        pass("technical receipt identifiers and hashes remain intact without frontend rows")
 
         let staleImage = root.appendingPathComponent("changed-source.png")
         try png.write(to: staleImage)
@@ -579,9 +754,130 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             "changing inspector selection must not rewrite completion records")
         pass("one native scroll groups image/video forms, preserves sidebar material and leaves records intact")
 
-        let longFilename = String(repeating: "unbroken-long-filename-", count: 8) + ".png"
+        MediaPostAttribution(platform: "xhs", postID: "located-fixture",
+            postURL: URL(string: "https://www.xiaohongshu.com/explore/located-fixture"),
+            title: "带位置的照片").write(to: locatedImage)
+        let mapModel = ImporterModel(refreshOnInit: false)
+        mapModel.downloadPhotos = [locatedImage, relocatedImage, secondImage]
+        mapModel.downloadFilter = .notComposed
+        mapModel.downloadFilter = .all
+        mapModel.selection = .downloads
+        let locatedID = "photo:\(locatedImage.standardizedFileURL.path)"
+        let relocatedID = "photo:\(relocatedImage.standardizedFileURL.path)"
+        mapModel.selectedDownloadItemIDs = [locatedID]
+        let mapInspector = MediaInspectorController(model: mapModel)
+        let mapWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 880),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        mapWindow.title = "HERMES · 位置检查器验证"
+        mapWindow.contentViewController = mapInspector
+        defer { mapWindow.orderOut(nil) }
+        mapWindow.makeKeyAndOrderFront(nil)
+        mapInspector.isInspectionEnabled = true
+        try await waitUntil("the native map must load for a located photo; selection=\(mapModel.selectedDownloadItemIDs), items=\(mapModel.visibleDownloadItems.map(\.id)), status=\(mapInspector.statusText)") {
+            !mapInspector.isLoading && mapInspector.location == photoLocation
+        }
+        func currentMap() -> MKMapView? { descendants(mapInspector.view).compactMap { $0 as? MKMapView }.first }
+        try expect(mapInspector.rows.contains { $0.key == "光圈" && $0.value == "f/1.78" }
+            && mapInspector.sectionGrids[.capture] != nil,
+            "the native inspector must show actual shooting metadata above the location map")
+        for width: CGFloat in [270, 560, 340] {
+            mapWindow.setContentSize(NSSize(width: width, height: 880))
+            mapInspector.view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(40))
+            mapInspector.view.layoutSubtreeIfNeeded()
+            let map = currentMap()!
+            try expect(map.annotations.count == 1 && map.annotations[0].coordinate.latitude == photoLocation.latitude
+                && map.annotations[0].coordinate.longitude == photoLocation.longitude
+                && !map.showsUserLocation && map.layer?.cornerRadius == 10 && map.layer?.masksToBounds == true,
+                "the native rounded map must mark only the selected file's location without current-location tracking")
+            try expect(abs(map.frame.width - (mapInspector.scrollView.contentSize.width - 32)) < 0.5
+                && abs(map.frame.height - 180) < 0.5,
+                "the location map must fit the inspector at narrow and wide pane sizes")
+            let document = mapInspector.scrollView.documentView!
+            let headings = descendants(mapInspector.view).compactMap { $0 as? NSTextField }
+            let imageHeading = headings.first { $0.stringValue == "图片" }!
+            let captureHeading = headings.first { $0.stringValue == "拍摄信息" }!
+            let locationHeading = headings.first { $0.stringValue == "位置" }!
+            let postHeading = headings.first { $0.stringValue == "帖子信息" }!
+            let mapRect = map.convert(map.bounds, to: document)
+            try expect(imageHeading.convert(imageHeading.bounds, to: document).minY > mapRect.maxY
+                && captureHeading.convert(captureHeading.bounds, to: document).minY > mapRect.maxY
+                && locationHeading.convert(locationHeading.bounds, to: document).minY > mapRect.maxY
+                && postHeading.convert(postHeading.bounds, to: document).maxY < mapRect.minY,
+                "the map must follow useful media properties and precede post and technical details")
+            let marker = mapInspector.mapView(map, viewFor: map.annotations[0]) as? MKMarkerAnnotationView
+            try expect(marker?.displayPriority == .required && marker?.canShowCallout == false,
+                "the file location must use the system marker with no raw-coordinate callout")
+            try expectCleanInspectorForm(mapInspector, context: "located photo at width \(width)")
+        }
+        let retainedMap = currentMap()!
+        mapInspector.isInspectionEnabled = false
+        mapInspector.isInspectionEnabled = true
+        try expect(currentMap() === retainedMap, "reopening an unchanged inspector must retain its native map")
+        mapModel.selectedDownloadItemIDs = [photoID]
+        mapInspector.reload()
+        try expect(currentMap() == nil && mapInspector.location == nil,
+            "an uncached selection must immediately discard the previous file's pin")
+        try expect(!descendants(mapInspector.view).compactMap { $0 as? NSTextField }
+            .contains { ["位置", "拍摄信息", "帖子信息"].contains($0.stringValue) },
+            "uncached metadata must not leave empty headings or the preceding file's details")
+        try await waitUntil("a photo without GPS must finish inspecting") { !mapInspector.isLoading }
+        try expect(currentMap() == nil && !descendants(mapInspector.view).compactMap { $0 as? NSTextField }
+            .contains { ["位置", "未记录位置信息", "正在读取位置信息…"].contains($0.stringValue) },
+            "a no-GPS photo must omit the entire location section")
+        try expect(mapInspector.sectionGrids[.capture] == nil && !mapInspector.rows.contains { $0.section == .capture }
+            && !descendants(mapInspector.view).compactMap { $0 as? NSTextField }
+                .contains { ["拍摄信息", "未记录拍摄信息", "正在读取拍摄信息…", "帖子信息"].contains($0.stringValue) },
+            "missing capture and post sections must use the same rule as missing location")
+        mapModel.selectedDownloadItemIDs = [locatedID]
+        mapInspector.reload()
+        mapModel.selectedDownloadItemIDs = [photoID]
+        mapInspector.reload()
+        try expect(!mapInspector.isLoading && currentMap() == nil
+            && !descendants(mapInspector.view).compactMap { $0 as? NSTextField }
+                .contains { ["位置", "拍摄信息", "帖子信息"].contains($0.stringValue) },
+            "cached no-metadata selections must apply the same section visibility rules")
+        mapModel.selectedDownloadItemIDs = [locatedID]
+        mapInspector.reload()
+        try expect(!mapInspector.isLoading && mapInspector.location == photoLocation && currentMap() != nil,
+            "the cached selection must restore its map immediately")
+        // Replace only this regression fixture; unchanged paths must invalidate GPS too.
+        try writeGPSImage(locatedImage, latitude: 37.7749, longitude: 122.4194, latitudeRef: "N", longitudeRef: "W")
+        mapInspector.reload()
+        try await waitUntil("changed GPS at the same path must invalidate its cached location") {
+            !mapInspector.isLoading && mapInspector.location == otherPhotoLocation
+        }
+        mapModel.selectedDownloadItemIDs = [relocatedID]
+        mapInspector.reload()
+        mapModel.selectedDownloadItemIDs = [locatedID, relocatedID]
+        mapInspector.reload()
+        try await Task.sleep(for: .milliseconds(50))
+        try expect(mapInspector.rows.isEmpty && mapInspector.location == nil && currentMap() == nil,
+            "multi-selection and cancelled loads must clear the previous file's location")
+        try writeGPSImage(locatedImage, latitude: 33.865, longitude: 151.2094, latitudeRef: "S", longitudeRef: "E")
+        pass("native MapKit pin, rounded responsive layout, section order, cache invalidation and selection clearing")
+        if CommandLine.arguments.contains("--inspector-location-preview") {
+            mapModel.selectedDownloadItemIDs = [locatedID]
+            mapInspector.reload()
+            try await waitUntil("the location preview must show its actual GPS") {
+                !mapInspector.isLoading && mapInspector.location == photoLocation
+            }
+            mapWindow.center()
+            mapWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+            print("Native location preview ready")
+            fflush(stdout)
+            try await Task.sleep(for: .seconds(50))
+            return
+        }
+
+        let longFilename = String(repeating: "unbroken-long-filename-", count: 8) + ".jpg"
         let longImage = root.appendingPathComponent(longFilename)
-        try png.write(to: longImage)
+        let longCamera = String(repeating: "Very Long Camera Model ", count: 12)
+        let longLens = String(repeating: "Very Long Lens Model 24-70mm f/2.8 ", count: 12)
+        try writeJPEGImage(longImage, properties: [
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFModel: longCamera],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifLensModel: longLens]])
         MediaPostAttribution(platform: "xhs", postID: String(repeating: "unbroken-post-identifier-", count: 8),
             title: String(repeating: "很长的来源帖子标题与说明", count: 50)).write(to: longImage)
         let longReceipt = MediaSourceProvenance(state: .cloudOriginal, noteID: "long-layout-fixture",
@@ -605,6 +901,14 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         try await waitUntil("long post metadata must load into the native form") {
             !wrapInspector.isLoading && wrapInspector.sectionGrids[.image] != nil
         }
+        try expect([MediaInspection.Section.sourceDetails, .imageDetails, .videoDetails].allSatisfy { section in
+            wrapInspector.sectionGrids[section] == nil && !wrapInspector.rows.contains { $0.section == section }
+        },
+            "the native form must not expose technical receipt sections")
+        let formText = descendants(wrapInspector.view).compactMap { $0 as? NSTextField }.map(\.stringValue)
+        try expect(!formText.contains { $0.contains("unbroken-post-identifier-")
+            || $0.contains("note_pre_post_uhdr/") || $0 == longReceipt.sha256 },
+            "hidden technical values must not survive in native field views")
         func wrappedFieldHeights(at width: CGFloat) async throws -> [CGFloat] {
             wrapWindow.setContentSize(NSSize(width: width, height: 700))
             wrapInspector.view.layoutSubtreeIfNeeded()
@@ -617,8 +921,8 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
                 && wrapInspector.scrollView.contentView.bounds.maxY - titleRect.maxY < 18,
                 "the first form section must stay at the top after resize: width=\(width), title=\(titleRect), clip=\(wrapInspector.scrollView.contentView.bounds), document=\(wrapInspector.scrollView.documentView!.frame)")
             var heights: [CGFloat] = []
-            try expectCleanInspectorForm(wrapInspector, context: "long technical metadata at width \(width)")
-            for key in ["帖子 ID", "帖子标题/描述", "图片资源 ID", "媒体资源标识", "下载时 SHA-256"] {
+            try expectCleanInspectorForm(wrapInspector, context: "long shooting and post metadata at width \(width)")
+            for key in ["帖子标题/描述", "相机型号", "镜头"] {
                 let section = wrapInspector.rows.first { $0.key == key }!.section
                 let fileRows = wrapInspector.rows.filter { $0.section == section }
                 let grid = wrapInspector.sectionGrids[section]!
@@ -747,8 +1051,8 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         model.completed = [scannedPair]
         model.selection = .completed
         model.selectedCompletedIDs = [scannedPair.id]
-        try await waitUntil("a scanned native pair must retain unknown composition state and its original-source receipt") {
-            inspector.rows.contains { $0.key == "合成状态" && $0.value == "未记录合成状态" }
+        try await waitUntil("a scanned native pair must omit an unrecorded composition state and retain its original-source receipt") {
+            !inspector.isLoading && !inspector.rows.contains { $0.key == "合成状态" }
                 && inspector.rows.contains { $0.key == "原始文件" && $0.value == "原始文件（下载时已验证）" }
         }
         try expect(!inspector.rows.contains { $0.key == "原始文件" && $0.value.contains("合成产物") },
@@ -774,7 +1078,7 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         inspector.reload(force: true)
         try await waitUntil("replacement at the same output path must invalidate recorded composition and original-source claims") {
             inspector.rows.contains { $0.key == "合成状态" && $0.value == "文件已变化，合成状态待确认" }
-                && inspector.rows.contains { $0.key == "原始文件" && $0.value == "未记录，无法确认" }
+                && !inspector.isLoading && !inspector.rows.contains { $0.key == "原始文件" }
         }
         try expect(!inspector.rows.contains { $0.key == "原始文件" && $0.value.contains("合成产物") },
             "a stale completed record cannot establish that replacement output bytes are a composition")
@@ -811,7 +1115,7 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         try await waitUntil("changed source paths must not overwrite the unchanged output's captured author") {
             inspector.rows.contains { $0.key == "合成状态" && $0.value == "已合成" }
                 && inspector.rows.contains { $0.key == "博主" && $0.value == "原帖博主" }
-                && inspector.rows.contains { $0.key == "源文件原始状态" && $0.value == "未记录，无法确认" }
+                && !inspector.isLoading && !inspector.rows.contains { $0.key == "源文件原始状态" }
         }
         try expect(!inspector.rows.contains { $0.value.contains("新帖博主") || $0.value.contains("replacement-post") },
             "reused source paths from another post must not become evidence for an unchanged output")

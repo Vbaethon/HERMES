@@ -83,6 +83,68 @@ final class ThumbnailSelectionTests: XCTestCase {
         XCTAssertEqual(reportedSelection, [])
     }
 
+    func testSharingAnchorsToArtworkRatherThanPortraitOrLandscapePadding() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.window.orderOut(nil) }
+        let collection = fixture.grid.nsCollectionView
+        for size in [NSSize(width: 80, height: 160), NSSize(width: 160, height: 80)] {
+            let view = try setImage(size: size, at: IndexPath(item: 1, section: 0), in: collection)
+            let imageView = try XCTUnwrap(view.imageView)
+            let expected = imageView.convert(imageView.bounds, to: collection)
+            let anchor = try XCTUnwrap(fixture.grid.sharingAnchorRect(forIDs: ["item-1"]))
+            XCTAssertEqual(anchor, expected)
+            XCTAssertNotEqual(anchor, view.convert(view.bounds, to: collection),
+                              "Share must point to the file artwork, not the surrounding cell padding")
+        }
+        XCTAssertNil(fixture.grid.sharingAnchorRect(forIDs: []))
+        XCTAssertNil(fixture.grid.sharingAnchorRect(forIDs: ["removed-item"]))
+    }
+
+    func testMultipleSharingKeepsFirstDisplayedFileWhenRightClickingALaterSelection() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.window.orderOut(nil) }
+        let collection = fixture.grid.nsCollectionView
+        let first = try setImage(size: NSSize(width: 80, height: 160),
+                                 at: IndexPath(item: 0, section: 0), in: collection)
+        let last = try setImage(size: NSSize(width: 160, height: 80),
+                                at: IndexPath(item: 2, section: 0), in: collection)
+        fixture.grid.applySelection(["item-2"])
+        fixture.grid.applySelection(["item-2", "item-0"])
+        let menu = NSMenu(title: "Thumbnail actions")
+        fixture.grid.setContextMenuProvider { menu }
+        let lastImage = try XCTUnwrap(last.imageView)
+        let point = lastImage.convert(NSPoint(x: lastImage.bounds.midX, y: lastImage.bounds.midY),
+                                      to: collection)
+        XCTAssertTrue(collection.menu(for: try mouseEvent(.rightMouseDown, at: point, in: collection)) === menu)
+        XCTAssertEqual(collection.selectionIndexPaths,
+                       [IndexPath(item: 0, section: 0), IndexPath(item: 2, section: 0)])
+        let firstImage = try XCTUnwrap(first.imageView)
+        XCTAssertEqual(fixture.grid.sharingAnchorRect(forIDs: ["item-2", "item-0"]),
+                       firstImage.convert(firstImage.bounds, to: collection),
+                       "The last clicked file must not move sharing away from the first displayed selection")
+    }
+
+    func testSharingSkipsOffscreenSelectionAndClipsAnchorToVisibleArtwork() async throws {
+        let fixture = try await makeFixture(itemCount: 18)
+        defer { fixture.window.orderOut(nil) }
+        let collection = fixture.grid.nsCollectionView
+        let path = IndexPath(item: 6, section: 0)
+        collection.scrollToItems(at: [path], scrollPosition: .top)
+        try await Task.sleep(for: .milliseconds(50))
+        let second = try setImage(size: NSSize(width: 80, height: 160),
+                                  at: path, in: collection)
+        let imageView = try XCTUnwrap(second.imageView)
+        let artwork = imageView.convert(imageView.bounds, to: collection)
+        let scroll = try XCTUnwrap(collection.enclosingScrollView)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: artwork.midY))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        let visibleArtwork = artwork.intersection(collection.visibleRect)
+        XCTAssertFalse(visibleArtwork.isEmpty)
+        XCTAssertLessThan(visibleArtwork.height, artwork.height)
+        XCTAssertEqual(fixture.grid.sharingAnchorRect(forIDs: ["item-0", "item-6"]), visibleArtwork)
+        XCTAssertNil(fixture.grid.sharingAnchorRect(forIDs: ["item-0"]))
+    }
+
     func testModifiedPaddingClicksMatchNativeEmptySpaceSelection() async throws {
         let fixture = try await makeFixture()
         defer { fixture.window.orderOut(nil) }
@@ -165,7 +227,7 @@ final class ThumbnailSelectionTests: XCTestCase {
         XCTAssertNil(collection.indexPathForItem(at: center))
     }
 
-    private func makeFixture() async throws -> (grid: ThumbnailGridController, window: NSWindow) {
+    private func makeFixture(itemCount: Int = 3) async throws -> (grid: ThumbnailGridController, window: NSWindow) {
         _ = NSApplication.shared
         let grid = ThumbnailGridController()
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
@@ -173,7 +235,7 @@ final class ThumbnailSelectionTests: XCTestCase {
         let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = scroll
         window.orderFront(nil)
-        grid.updateItems((0..<3).map {
+        grid.updateItems((0..<itemCount).map {
             ThumbnailGridItem(id: "item-\($0)",
                               url: URL(fileURLWithPath: "/tmp/hermes-selection-fixture-\($0).png"),
                               status: .finished, mediaKind: .photo, contentVersion: 1)

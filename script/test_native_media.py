@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise native media inspection and complete-resource transfers in isolation."""
 from pathlib import Path
+import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,4 +34,20 @@ with tempfile.TemporaryDirectory(prefix="hermes-native-media-", dir=cache) as di
         ],
         check=True,
     )
+    if "--inspector-location-preview" in sys.argv:
+        # A temporary bundle lets native UI tools inspect the preview. Keep the
+        # same unique defaults domain, and remove it only after the test exits.
+        bundle = temp / "HERMES Location Preview.app"
+        contents = bundle / "Contents"
+        executable = contents / "MacOS" / binary.name
+        executable.parent.mkdir(parents=True)
+        with (contents / "Info.plist").open("wb") as info:
+            plistlib.dump({
+                "CFBundleIdentifier": binary.name,
+                "CFBundleExecutable": binary.name,
+                "CFBundleName": "HERMES Location Preview",
+                "CFBundlePackageType": "APPL",
+            }, info)
+        shutil.move(binary, executable)
+        binary = executable
     subprocess.run([str(binary), str(temp / "fixtures"), *sys.argv[1:]], check=True, timeout=90)

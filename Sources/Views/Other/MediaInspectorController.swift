@@ -1,8 +1,9 @@
 import AppKit
+import MapKit
 
 /// A continuous native AppKit inspector form with one scrolling document.
 @MainActor
-final class MediaInspectorController: NSViewController {
+final class MediaInspectorController: NSViewController, MKMapViewDelegate {
     let scrollView = NSScrollView()
     private let documentView = NSView()
     private let documentStack = NSStackView()
@@ -20,8 +21,10 @@ final class MediaInspectorController: NSViewController {
     private var isScrolledToTop = true
     private var paneTransitionCount = 0
     private var sectionContainers: [MediaInspection.Section: NSStackView] = [:]
-    private let inspectionCache: NSCache<InspectionCacheKey, InspectionCacheRows> = {
-        let cache = NSCache<InspectionCacheKey, InspectionCacheRows>()
+    private var locationMapView: MKMapView?
+    private var mapLocation: MediaInspection.Location?
+    private let inspectionCache: NSCache<InspectionCacheKey, InspectionCacheSnapshot> = {
+        let cache = NSCache<InspectionCacheKey, InspectionCacheSnapshot>()
         cache.countLimit = 64
         cache.totalCostLimit = 2 * 1024 * 1024
         return cache
@@ -30,6 +33,7 @@ final class MediaInspectorController: NSViewController {
     var isLoading: Bool { loadTask != nil }
     private(set) var sectionGrids: [MediaInspection.Section: NSGridView] = [:]
     private(set) var rows: [MediaInspection.Row] = []
+    private(set) var location: MediaInspection.Location?
     private(set) var statusText = "选择一个项目以查看信息"
     var isInspectionEnabled = false {
         didSet {
@@ -120,6 +124,9 @@ final class MediaInspectorController: NSViewController {
         }
         sectionGrids.removeAll()
         sectionContainers.removeAll()
+        locationMapView?.delegate = nil
+        locationMapView = nil
+        mapLocation = nil
         formNeedsLayout = true
     }
 
@@ -144,12 +151,14 @@ final class MediaInspectorController: NSViewController {
     private func updateForm() {
         for kind in MediaInspection.Section.allCases {
             let sectionRows = rows.filter { $0.section == kind }
-            guard !sectionRows.isEmpty else {
-                if let container = sectionContainers.removeValue(forKey: kind) {
-                    documentStack.removeArrangedSubview(container)
-                    container.removeFromSuperview()
-                }
-                sectionGrids.removeValue(forKey: kind)
+            // Every section requires actual content, regardless of file kind,
+            // metadata format, loading state or whether this is a cached load.
+            guard !sectionRows.isEmpty || (kind == .location && location != nil) else {
+                removeSection(kind)
+                continue
+            }
+            if kind == .location {
+                updateLocationSection()
                 continue
             }
             if let grid = sectionGrids[kind] {
@@ -187,28 +196,111 @@ final class MediaInspectorController: NSViewController {
             grid.column(at: 0).width = 100
             grid.translatesAutoresizingMaskIntoConstraints = false
             grid.setAccessibilityLabel("\(kind.title)详细信息")
-            let label = NSTextField(labelWithString: kind.title)
-            label.font = NSFont.systemFont(ofSize: inspectorFont.pointSize, weight: .semibold)
-            let container = NSStackView(views: [label, grid])
-            container.orientation = .vertical
-            container.alignment = .leading
-            container.spacing = 8
-            container.translatesAutoresizingMaskIntoConstraints = false
-            let index = MediaInspection.Section.allCases.prefix { $0 != kind }
-                .filter { sectionContainers[$0] != nil }.count
-            documentStack.insertArrangedSubview(container, at: index)
-            sectionContainers[kind] = container
+            let container = sectionContainers[kind] ?? makeSectionContainer(kind)
+            container.addArrangedSubview(grid)
             sectionGrids[kind] = grid
-            NSLayoutConstraint.activate([
-                container.widthAnchor.constraint(equalTo: documentStack.widthAnchor, constant: -32),
-                grid.widthAnchor.constraint(equalTo: container.widthAnchor)
-            ])
+            grid.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
         }
         formNeedsLayout = true
     }
 
-    private func display(_ result: [MediaInspection.Row], isComplete: Bool) {
-        rows = result
+    private func removeSection(_ kind: MediaInspection.Section) {
+        if let container = sectionContainers.removeValue(forKey: kind) {
+            documentStack.removeArrangedSubview(container)
+            container.removeFromSuperview()
+        }
+        sectionGrids.removeValue(forKey: kind)
+        if kind == .location {
+            locationMapView?.delegate = nil
+            locationMapView = nil
+            mapLocation = nil
+        }
+    }
+
+    private func makeSectionContainer(_ kind: MediaInspection.Section) -> NSStackView {
+        let label = NSTextField(labelWithString: kind.title)
+        label.font = NSFont.systemFont(ofSize: inspectorFont.pointSize, weight: .semibold)
+        let container = NSStackView(views: [label])
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 8
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let index = MediaInspection.Section.allCases.prefix { $0 != kind }
+            .filter { sectionContainers[$0] != nil }.count
+        documentStack.insertArrangedSubview(container, at: index)
+        sectionContainers[kind] = container
+        container.widthAnchor.constraint(equalTo: documentStack.widthAnchor, constant: -32).isActive = true
+        return container
+    }
+
+    private func updateLocationSection() {
+        guard let location else { return }
+        let container = sectionContainers[.location] ?? makeSectionContainer(.location)
+        let map: MKMapView
+        if let existing = locationMapView {
+            map = existing
+        } else {
+            map = MKMapView(frame: NSRect(x: 0, y: 0, width: 300, height: 180))
+            map.translatesAutoresizingMaskIntoConstraints = false
+            map.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat)
+            // Keep this compact preview fixed so wheel gestures scroll
+            // the inspector rather than changing the recorded location.
+            map.isScrollEnabled = false
+            map.isZoomEnabled = false
+            map.isRotateEnabled = false
+            map.isPitchEnabled = false
+            map.showsZoomControls = false
+            map.showsCompass = false
+            map.showsPitchControl = false
+            map.showsUserTrackingButton = false
+            map.showsUserLocation = false
+            map.wantsLayer = true
+            map.layer?.cornerRadius = 10
+            map.layer?.masksToBounds = true
+            map.setAccessibilityLabel("素材位置地图")
+            map.register(MKMarkerAnnotationView.self,
+                forAnnotationViewWithReuseIdentifier: "MediaLocation")
+            map.delegate = self
+            map.heightAnchor.constraint(equalToConstant: 180).isActive = true
+            locationMapView = map
+        }
+        if mapLocation != location {
+            map.removeAnnotations(map.annotations)
+            let coordinate = CLLocationCoordinate2D(latitude: location.latitude, longitude: location.longitude)
+            let annotation = MKPointAnnotation()
+            annotation.coordinate = coordinate
+            annotation.title = "拍摄位置"
+            map.addAnnotation(annotation)
+            map.setRegion(MKCoordinateRegion(center: coordinate,
+                latitudinalMeters: 1_200, longitudinalMeters: 1_200), animated: false)
+            mapLocation = location
+        }
+        let content: NSView = map
+        guard container.arrangedSubviews.last !== content else { return }
+        for old in container.arrangedSubviews.dropFirst() {
+            container.removeArrangedSubview(old)
+            old.removeFromSuperview()
+        }
+        container.addArrangedSubview(content)
+        content.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+    }
+
+    func mapView(_ mapView: MKMapView, viewFor annotation: any MKAnnotation) -> MKAnnotationView? {
+        guard annotation is MKPointAnnotation else { return nil }
+        let marker = mapView.dequeueReusableAnnotationView(withIdentifier: "MediaLocation", for: annotation)
+            as! MKMarkerAnnotationView
+        marker.displayPriority = .required
+        marker.titleVisibility = .hidden
+        marker.subtitleVisibility = .hidden
+        marker.canShowCallout = false
+        marker.animatesWhenAdded = false
+        marker.setAccessibilityLabel("拍摄位置")
+        return marker
+    }
+
+    private func display(_ result: MediaInspection.Snapshot, isComplete: Bool) {
+        rows = result.inspectorRows
+        location = result.location
         statusText = isComplete ? "" : "正在读取文件信息…"
         messageField.isHidden = true
         documentStack.isHidden = false
@@ -289,20 +381,20 @@ final class MediaInspectorController: NSViewController {
         currentRevision = revision
         let cacheKey = InspectionCacheKey(request: request, revision: revision)
         if !force, let cached = inspectionCache.object(forKey: cacheKey) {
-            display(cached.rows, isComplete: true)
+            display(cached.snapshot, isComplete: true)
             return
         }
-        display(MediaInspection.preview(request), isComplete: false)
+        display(.init(rows: MediaInspection.preview(request)), isComplete: false)
         let token = generation
         loadTask = Task { [weak self] in
-            let result = await MediaInspection.load(request)
+            let result = await MediaInspection.loadSnapshot(request)
             guard !Task.isCancelled, let self, self.generation == token, self.isInspectionEnabled else { return }
             guard MediaInspection.revision(for: request) == revision else {
                 self.reload(force: true)
                 return
             }
             self.loadTask = nil
-            let cached = InspectionCacheRows(result)
+            let cached = InspectionCacheSnapshot(result)
             self.inspectionCache.setObject(cached, forKey: cacheKey, cost: cached.cost)
             self.display(result, isComplete: true)
         }
@@ -334,8 +426,9 @@ final class MediaInspectorController: NSViewController {
     }
 
     private func showMessage(_ text: String) {
-        guard statusText != text || !rows.isEmpty || messageField.isHidden || !documentStack.isHidden else { return }
+        guard statusText != text || !rows.isEmpty || location != nil || messageField.isHidden || !documentStack.isHidden else { return }
         rows = []
+        location = nil
         statusText = text
         messageField.stringValue = text
         messageField.isHidden = false
@@ -415,8 +508,8 @@ private final class InspectionCacheKey: NSObject {
     }
 }
 
-private final class InspectionCacheRows: NSObject {
-    let rows: [MediaInspection.Row]
-    var cost: Int { rows.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count } }
-    init(_ rows: [MediaInspection.Row]) { self.rows = rows }
+private final class InspectionCacheSnapshot: NSObject {
+    let snapshot: MediaInspection.Snapshot
+    var cost: Int { snapshot.rows.reduce(32) { $0 + $1.key.utf8.count + $1.value.utf8.count } }
+    init(_ snapshot: MediaInspection.Snapshot) { self.snapshot = snapshot }
 }

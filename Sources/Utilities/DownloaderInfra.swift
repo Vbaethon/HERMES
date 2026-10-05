@@ -86,6 +86,8 @@ enum DownloaderInfra {
         private var statusSequence = 0
         private var lastPublishedStatus: DownloadStatus?
         private var hasStatusUpdates = false
+        private var lastPublishedProgress: Double?
+        private var isPublishingProgress = false
 
         init(totalCount: Int, handler: ProgressHandler?) {
             self.totalCount = max(totalCount, 1)
@@ -94,11 +96,16 @@ enum DownloaderInfra {
         }
 
         func update(index: Int, fraction: Double) async {
-            fractions[index] = min(max(fraction, 0), 1)
+            guard !Task.isCancelled, (0..<totalCount).contains(index), fraction.isFinite,
+                  !completedIndices.contains(index) else { return }
+            let next = max(fractions[index] ?? 0, min(max(fraction, 0), 1))
+            guard fractions[index] != next else { return }
+            fractions[index] = next
             await publish()
         }
 
         func complete(index: Int) async {
+            guard !Task.isCancelled, (0..<totalCount).contains(index), !completedIndices.contains(index) else { return }
             fractions[index] = 1
             completedIndices.insert(index)
             statuses.removeValue(forKey: index)
@@ -126,9 +133,17 @@ enum DownloaderInfra {
         }
 
         private func publish() async {
-            guard let handler else { return }
-            let sum = fractions.values.reduce(0, +)
-            await handler(min(max(sum / Double(totalCount), 0), 1))
+            guard let handler, !isPublishingProgress else { return }
+            isPublishingProgress = true
+            defer { isPublishingProgress = false }
+            // The handler suspends across actors. Serialize it and coalesce
+            // updates received while suspended so older callbacks cannot arrive last.
+            while !Task.isCancelled {
+                let value = min(max(fractions.values.reduce(0, +) / Double(totalCount), 0), 1)
+                if let lastPublishedProgress, value <= lastPublishedProgress { return }
+                lastPublishedProgress = value
+                await handler(value)
+            }
         }
     }
 

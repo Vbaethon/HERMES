@@ -142,8 +142,30 @@ import Foundation
             completedCount: 0, totalCount: 1, currentUnitProgress: 0, isActive: true)
         downloadProgress.update(with: progressItem, stackIndex: 0)
         expect(mask.opacity == 0 && mask.animationKeys()?.isEmpty != false, "a new task must clear the old fill immediately without inheriting its animation")
+        progressWindow.setContentSize(NSSize(width: 620, height: 40))
+        downloadProgress.layoutSubtreeIfNeeded()
+        progressItem.totalCount = 8
+        var lastVisibleEdge: CGFloat = 0
+        for tick in 0..<400 {
+            if tick < 320 && tick.isMultiple(of: 2) {
+                let units = Double(tick) / 320 * Double(progressItem.totalCount)
+                progressItem.completedCount = Int(units)
+                progressItem.currentUnitProgress = CGFloat(units - Double(progressItem.completedCount))
+                downloadProgress.update(with: progressItem, stackIndex: 0)
+            }
+            try await Task.sleep(for: .milliseconds(10))
+            let edge = CGFloat((mask.presentation()?.locations ?? mask.locations!)[2].doubleValue) * mask.bounds.width
+            expect(edge + 0.5 >= lastVisibleEdge, "frequent multi-file callbacks must never make the rendered progress edge move backward")
+            lastVisibleEdge = edge
+        }
+        progressItem.completedCount = progressItem.totalCount
+        progressItem.currentUnitProgress = 0
+        downloadProgress.update(with: progressItem, stackIndex: 0)
+        try await Task.sleep(for: .milliseconds(500))
+        expect((downloadProgress.accessibilityValue() as? Double) == 100, "switching between files must still reach exact overall completion")
         progressWindow.orderOut(nil)
         pass("download progress keeps one softened edge, full-track colors, exact accessible progress, and clean resize/completion/task-reset behavior")
+        pass("rendered multi-file progress stays monotonic during frequent callbacks and file transitions")
 
         let settingsSuiteName = "HermesSettingsRegression.\(UUID().uuidString)"
         let settingsDefaults = UserDefaults(suiteName: settingsSuiteName)!
@@ -527,6 +549,51 @@ import Foundation
         menuModel.isDownloading = false
         withExtendedLifetime(menuWindow) {}
         pass("right-click selection and eligible menu actions remain usable during downloads")
+
+        let sizingSidebar = FinderStyleSidebarController(sections: SidebarSection.allCases, selection: .downloads, count: { _ in 9999 }, onSelect: { _ in })
+        let sizingSplit = NSSplitViewController()
+        sizingSplit.splitView.isVertical = true
+        let sizingWindow = NSWindow(contentViewController: sizingSplit)
+        sizingWindow.setContentSize(NSSize(width: 1440, height: 800))
+        let sizingItem = sizingSidebar.makeSplitViewItem()
+        let sizingDetail = NSViewController()
+        sizingDetail.view = NSView()
+        let sizingDetailItem = NSSplitViewItem(viewController: sizingDetail)
+        sizingDetailItem.minimumThickness = 520
+        sizingSplit.addSplitViewItem(sizingItem)
+        sizingSplit.addSplitViewItem(sizingDetailItem)
+        sizingSplit.view.layoutSubtreeIfNeeded()
+        let sizingTable = descendants(sizingSidebar.view).compactMap { $0 as? NSTableView }.first!
+        sizingTable.layoutSubtreeIfNeeded()
+        for row in 0..<sizingTable.numberOfRows {
+            let cell = sizingTable.view(atColumn: 0, row: row, makeIfNecessary: true) as! NSTableCellView
+            cell.layoutSubtreeIfNeeded()
+            let title = cell.textField!
+            expect(title.frame.width >= title.intrinsicContentSize.width - 1, "a fresh sidebar must show full destination names beside their counts")
+        }
+        sizingSplit.splitView.setPosition(300, ofDividerAt: 0)
+        sizingWindow.setContentSize(NSSize(width: 1736, height: 800))
+        sizingSplit.view.layoutSubtreeIfNeeded()
+        expect(abs(sizingSidebar.view.frame.width - 300) <= 1, "window resizing must preserve a sidebar width chosen by the user")
+        sizingSidebar.update(sections: SidebarSection.allCases, selection: .completed, count: { _ in 77 })
+        sizingSplit.view.layoutSubtreeIfNeeded()
+        expect(abs(sizingSidebar.view.frame.width - 300) <= 1, "selection and count refresh must not reset the sidebar width")
+        withExtendedLifetime(sizingWindow) {}
+        referenceWindow.orderFront(nil)
+        referenceSplit.splitView.setPosition(300, ofDividerAt: 0)
+        referenceSplit.view.layoutSubtreeIfNeeded()
+        // Let AppKit commit the pending divider autosave before recreating.
+        try await Task.sleep(for: .milliseconds(100))
+        let reopenedMain = MainWindowController(model: ImporterModel(refreshOnInit: false))
+        reopenedMain.showWindow(nil)
+        let reopenedSplit = reopenedMain.window!.contentViewController as! NSSplitViewController
+        reopenedSplit.view.layoutSubtreeIfNeeded()
+        try await waitUntil { abs(reopenedSplit.splitViewItems[0].viewController.view.frame.width - 300) <= 1 }
+        expect(abs(reopenedSplit.splitViewItems[0].viewController.view.frame.width - 300) <= 1, "rebuilding the main window must restore the saved sidebar width after all three panes exist")
+        reopenedMain.window?.orderOut(nil)
+        referenceWindow.orderOut(nil)
+        withExtendedLifetime(reopenedMain) {}
+        pass("fresh native sidebar labels fit; resize, refresh and window recreation preserve divider adjustments")
 
         var selected: SidebarSection?
         let sidebar = FinderStyleSidebarController(sections: SidebarSection.allCases, selection: .queue, count: { _ in nil }, onSelect: { selected = $0 })

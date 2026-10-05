@@ -185,7 +185,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         splitViewController.inspectorController = inspectorController
         splitViewController.splitView.isVertical = true
         splitViewController.splitView.dividerStyle = .thin
-        splitViewController.splitView.autosaveName = "HERMESMainSplitView"
 
         let sidebarItem = sidebarController.makeSplitViewItem()
         let detailItem = NSSplitViewItem(viewController: detailController)
@@ -198,9 +197,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // Use AppKit's pane-preserving mode, including its onscreen/fullscreen
         // fallback, rather than restoring sidebar widths or resizing by hand.
         inspector.collapseBehavior = .preferResizingSplitViewWithFixedSiblings
-        inspector.isCollapsed = !inspectorDefaults.bool(forKey: Self.inspectorVisibleDefaultsKey)
+        let startsInspectorCollapsed = !inspectorDefaults.bool(forKey: Self.inspectorVisibleDefaultsKey)
+        inspector.isCollapsed = startsInspectorCollapsed
         inspectorItem = inspector
         splitViewController.addSplitViewItem(inspector)
+        // Restore only after every pane exists. Enabling autosave on an empty
+        // split view overwrites the saved divider sizes during construction.
+        splitViewController.splitView.autosaveName = "HERMESMainSplitView"
+        // A recently toggled inspector may have newer explicit visibility than
+        // the last saved frames. Keep that preference authoritative.
+        inspector.isCollapsed = startsInspectorCollapsed
         inspectorController.isInspectionEnabled = !inspector.isCollapsed
         inspectorObservation = inspector.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.inspectorVisibilityDidChange() }
