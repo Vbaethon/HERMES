@@ -11,7 +11,7 @@ struct ThumbnailGridItem: Identifiable, Hashable {
 }
 
 @MainActor
-final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSCollectionViewDelegateFlowLayout {
+final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSCollectionViewDelegateFlowLayout, NSDraggingSource {
     private enum Section {
         static let main = "main"
     }
@@ -36,12 +36,6 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         override func menu(for event: NSEvent) -> NSMenu? {
             gridController?.contextMenu(for: event)
         }
-
-        override func beginDraggingSession(with items: [NSDraggingItem], event: NSEvent,
-                                           source: any NSDraggingSource) -> NSDraggingSession {
-            let resources = gridController?.expandedDraggingItems(items) ?? items
-            return super.beginDraggingSession(with: resources, event: event, source: source)
-        }
     }
 
     private let collectionView: GridCollectionView
@@ -55,6 +49,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private var onSelectionChange: ((Set<String>) -> Void)?
     private var makeContextMenu: (() -> NSMenu?)?
     private var sharingServicePicker: NSSharingServicePicker?
+    private var exportSession: NSDraggingSession?
 
     var nsCollectionView: NSCollectionView { collectionView }
     var hasPresentedItems: Bool { !items.isEmpty }
@@ -188,7 +183,50 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool {
-        !resourceURLs(forIDs: Set(indexPaths.compactMap { dataSource.itemIdentifier(for: $0) })).isEmpty
+        guard exportSession == nil else { return false }
+        let draggingItems = nativeDraggingItems(at: indexPaths)
+        guard !draggingItems.isEmpty else { return false }
+        applySelection(Set(indexPaths.compactMap { dataSource.itemIdentifier(for: $0) }))
+        syncSelectionFromCollectionView()
+        let session = collectionView.beginDraggingSession(with: draggingItems, event: event, source: self)
+        exportSession = session
+        session.animatesToStartingPositionsOnCancelOrFail = true
+        // AppKit still owns tracking, destination negotiation and slide-back.
+        // Decline the collection's item-moving session, which hides source cells.
+        return false
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        exportSession = nil
+    }
+
+    /// Prepare independent native drag visuals before the collection can lift its cells.
+    func nativeDraggingItems(at indexPaths: Set<IndexPath>) -> [NSDraggingItem] {
+        let paths = indexPaths.sorted()
+        let ids = Set(paths.compactMap { dataSource.itemIdentifier(for: $0) })
+        guard ids.count == paths.count, !resourceURLs(forIDs: ids).isEmpty else { return [] }
+        let anchor = paths.compactMap { collectionView.item(at: $0)?.view }
+            .first.map { $0.convert($0.bounds, to: collectionView) } ?? .zero
+        let originals = paths.compactMap { path -> NSDraggingItem? in
+            guard let id = dataSource.itemIdentifier(for: path), let item = itemByID[id] else { return nil }
+            let draggingItem = NSDraggingItem(pasteboardWriter: item.url.standardizedFileURL as NSURL)
+            if let cell = collectionView.item(at: path) {
+                let components = cell.draggingImageComponents
+                draggingItem.draggingFrame = cell.view.convert(cell.view.bounds, to: collectionView)
+                draggingItem.imageComponentsProvider = components.isEmpty ? nil : { components }
+            } else {
+                // Offscreen selections carry their files without inventing another image.
+                draggingItem.draggingFrame = anchor
+            }
+            return draggingItem
+        }
+        return expandedDraggingItems(originals)
     }
 
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
@@ -219,8 +257,10 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                     result.append(original)
                 } else {
                     let resource = NSDraggingItem(pasteboardWriter: url as NSURL)
-                    let icon = NSWorkspace.shared.icon(forFile: url.path)
-                    resource.setDraggingFrame(original.draggingFrame.offsetBy(dx: 8, dy: -8), contents: icon)
+                    // The motion file travels with its still; it needs no second
+                    // visual or synchronous filesystem icon lookup on drag start.
+                    resource.draggingFrame = original.draggingFrame
+                    resource.imageComponentsProvider = nil
                     result.append(resource)
                 }
             }

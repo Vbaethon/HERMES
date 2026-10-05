@@ -17,10 +17,28 @@ enum SystemWindowBackgroundController {
 }
 
 final class SystemPageBackgroundView: NSView {
-    override var isOpaque: Bool { true }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
 
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isOpaque: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // Retain a solid native background instead of rasterizing the entire
+        // page each time the split view changes its width.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }

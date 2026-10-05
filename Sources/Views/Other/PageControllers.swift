@@ -16,6 +16,7 @@ final class DetailPagesController: NSViewController {
     private let noticeButton = NSButton(title: "查看操作详情", target: nil, action: nil)
     private var noticeHeight: NSLayoutConstraint!
     private var lastPresentedNotice: String?
+    private var pageConstraints: [NSLayoutConstraint] = []
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ImporterModel, startDownload: @escaping () -> Void) {
@@ -52,15 +53,6 @@ final class DetailPagesController: NSViewController {
         ])
         for controller in [queueController, downloadController, completedController] {
             addChild(controller)
-            let page = controller.view
-            page.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(page)
-            NSLayoutConstraint.activate([
-                page.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                page.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                page.topAnchor.constraint(equalTo: noticeButton.bottomAnchor),
-                page.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-            ])
         }
         for controller in thumbnailPageControllers {
             controller.setVisible(false)
@@ -90,8 +82,27 @@ final class DetailPagesController: NSViewController {
         }
         let selectionChanged = activeSelection != selection
         if selectionChanged {
-            controller(for: activeSelection)?.setVisible(false)
+            if let previous = controller(for: activeSelection) as? NSViewController {
+                controller(for: activeSelection)?.setVisible(false)
+                NSLayoutConstraint.deactivate(pageConstraints)
+                pageConstraints.removeAll()
+                previous.view.removeFromSuperview()
+            }
             activeSelection = selection
+            if let current = controller(for: selection) as? NSViewController {
+                // Retain each controller and its scroll state, while only the
+                // visible page participates in the window's resize and glass.
+                let page = current.view
+                page.translatesAutoresizingMaskIntoConstraints = false
+                view.addSubview(page)
+                pageConstraints = [
+                    page.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                    page.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                    page.topAnchor.constraint(equalTo: noticeButton.bottomAnchor),
+                    page.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+                ]
+                NSLayoutConstraint.activate(pageConstraints)
+            }
         }
         switch selection {
         case .queue:

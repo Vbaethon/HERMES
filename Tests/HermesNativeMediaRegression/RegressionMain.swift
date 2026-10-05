@@ -426,10 +426,16 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         let split = first.window!.contentViewController as! NSSplitViewController
         try expect(split.splitViewItems.count == 3 && split.splitViewItems.last!.isCollapsed,
             "the native inspector split item must start collapsed")
+        try expect(split.splitView.dividerThickness == 0,
+            "native pane materials must distinguish the main window sections without divider spacing")
         try await Task.sleep(for: .milliseconds(50))
         first.window!.setContentSize(NSSize(width: 1360, height: 800))
         split.splitView.setPosition(280, ofDividerAt: 0)
         first.window!.contentView!.layoutSubtreeIfNeeded()
+        let emptyDownloadBar = descendants(split.view).compactMap { $0 as? DownloadBarView }.first!
+        let emptyProgressStack = descendants(split.view).compactMap { $0 as? DownloadProgressStackView }.first!
+        try expect(abs(emptyDownloadBar.frame.width - 720) < 0.5,
+            "an empty download input must retain its preferred width in a wide native pane: actual=\(emptyDownloadBar.frame.width)")
         let sidebarBeforeInspector = split.splitViewItems[0].viewController.view.frame.width
         let windowBeforeInspector = first.window!.frame
         first.window!.makeKeyAndOrderFront(nil)
@@ -443,6 +449,8 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         print("Inspector toggle geometry: sidebar \(sidebarBeforeInspector) → \(split.splitViewItems[0].viewController.view.frame.width), window \(windowBeforeInspector) → \(first.window!.frame), panes=\(split.splitViewItems.map { $0.viewController.view.frame.width })")
         try expect(abs(split.splitViewItems[0].viewController.view.frame.width - sidebarBeforeInspector) < 0.5,
             "opening the inspector must preserve the user's sidebar width when the content has room")
+        try expect(abs(first.window!.frame.width - windowBeforeInspector.width) < 0.5,
+            "opening the native inspector must use space inside a window with sufficient room")
         try expect(first.inspectorVisible && !split.splitViewItems.last!.isCollapsed,
             "opening the inspector must expand its native split item")
         try expect(defaults.bool(forKey: "HERMESInspectorVisible.v1"), "opening the inspector must persist immediately")
@@ -567,9 +575,12 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             try expect(NSApp.sendAction(item.action!, to: item.target, from: item),
                 "pane regression must use the real system toolbar action")
             try await waitUntil("native pane animation must finish") { !inspector.isPaneTransitioning }
-            try await Task.sleep(for: .milliseconds(50))
+            // Allow AppKit's transition and queued layout work to settle
+            // before comparing final geometry across repeated cycles.
+            try await Task.sleep(for: .milliseconds(350))
             layoutWindow()
         }
+        try await Task.sleep(for: .milliseconds(350))
         for windowWidth: CGFloat in [1200, 1360] {
             first.setInspectorVisible(false)
             first.window!.setContentSize(NSSize(width: windowWidth, height: 800))
@@ -580,13 +591,28 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
                 try await Task.sleep(for: .milliseconds(50))
                 layoutWindow()
                 let chosenWidth = sidebarWidth()
+                try expect(abs(chosenWidth - width) < 0.5,
+                    "the native sidebar divider must reach the user's requested width: requested=\(width), actual=\(chosenWidth)")
                 let frame = first.window!.frame
-                for _ in 0..<2 {
+                let contentWidth = split.splitViewItems[1].viewController.view.frame.width
+                for toggleIndex in 0..<6 {
                     try await togglePane(.toggleInspector)
                     try expect(abs(sidebarWidth() - chosenWidth) < 0.5 && !sidebarItem.isCollapsed,
                         "inspector toggles must preserve independently chosen sidebar widths: window=\(windowWidth), chosen=\(chosenWidth), actual=\(sidebarWidth()), collapsed=\(sidebarItem.isCollapsed), frame=\(first.window!.frame), panes=\(split.splitViewItems.map { $0.viewController.view.frame.width })")
-                    try expect(first.window!.frame.height == frame.height,
-                        "native horizontal pane actions must preserve window height")
+                    try expect(abs(first.window!.frame.width - frame.width) < 0.5
+                        && first.window!.frame.height == frame.height,
+                        "native inspector toggles must allocate space inside a window with sufficient room: before=\(frame), after=\(first.window!.frame), collapsed=\(split.splitViewItems[2].isCollapsed)")
+                    let expectedInputWidth = min(CGFloat(720), split.splitViewItems[1].viewController.view.frame.width - 88)
+                    try expect(abs(emptyDownloadBar.frame.width - expectedInputWidth) < 0.5,
+                        "the empty input must use its comfortable width when possible and yield only to the available pane: expected=\(expectedInputWidth), actual=\(emptyDownloadBar.frame.width)")
+                    let expectedProgressWidth = min(expectedInputWidth * 0.9, 620)
+                    try expect(abs(emptyProgressStack.frame.width - expectedProgressWidth) < 0.5,
+                        "progress must retain its proportional width and maximum inside the native pane: expected=\(expectedProgressWidth), actual=\(emptyProgressStack.frame.width)")
+                    if toggleIndex % 2 == 1 {
+                        try expect(abs(first.window!.frame.width - frame.width) < 0.5
+                            && abs(split.splitViewItems[1].viewController.view.frame.width - contentWidth) < 0.5,
+                            "each inspector open/close cycle must restore window and content widths without cumulative drift: before=\(frame), after=\(first.window!.frame), content=\(contentWidth) → \(split.splitViewItems[1].viewController.view.frame.width), cycle=\((toggleIndex + 1) / 2)")
+                    }
                 }
             }
         }
@@ -640,6 +666,15 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             model.completedAddToAlbum.toggle()
             try await Task.sleep(for: .milliseconds(100))
             layoutWindow()
+            let detail = split.splitViewItems[1].viewController
+            let attachedPages = detail.children.filter { $0.view.superview === detail.view }
+            try expect(attachedPages.count == 1
+                && attachedPages[0].view.isHidden == false,
+                "only the visible page must participate in native pane layout and glass rendering")
+            if page == .downloads {
+                try expect(descendants(detail.view).contains { $0 === emptyDownloadBar },
+                    "page switches must retain the existing download input and controller state")
+            }
             try expect(first.window!.frame == stableFrame && abs(sidebarWidth() - chosenSidebarWidth) < 0.5,
                 "page toolbars and import preference switches must not rewrite window or sidebar sizes")
         }
@@ -650,7 +685,7 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
         try await waitUntil("layout regressions must restore the selected media form") {
             !inspector.isLoading && inspector.sectionGrids[.image] != nil && inspector.sectionGrids[.video] != nil
         }
-        pass("page and preference changes retain the native window frame and sidebar width")
+        pass("page switches retain controller state and native pane geometry with only one page attached")
         try expectCleanInspectorForm(inspector, context: "initial pair after pane/selection changes")
         for kind in MediaInspection.Section.allCases where inspector.sectionGrids[kind] != nil {
             let grid = inspector.sectionGrids[kind]!

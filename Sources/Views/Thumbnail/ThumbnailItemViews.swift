@@ -123,6 +123,26 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         }
     }
 
+    override var draggingImageComponents: [NSDraggingImageComponent] {
+        guard let imageView, let image = imageView.image?.copy() as? NSImage else { return [] }
+        view.layoutSubtreeIfNeeded()
+        var frame = imageView.convert(imageView.bounds, to: view)
+        guard !frame.isEmpty else { return [] }
+        // AppKit drag components use bottom-left coordinates, even in flipped cells.
+        if view.isFlipped { frame.origin.y = view.bounds.maxY - frame.maxY }
+        let shadow = NSImage(size: frame.size, flipped: false) { bounds in
+            NSBezierPath(roundedRect: bounds,
+                         xRadius: ThumbnailCollectionStyle.imageCornerRadius,
+                         yRadius: ThumbnailCollectionStyle.imageCornerRadius).addClip()
+            image.draw(in: bounds)
+            return true
+        }
+        let component = NSDraggingImageComponent(key: .icon)
+        component.frame = frame
+        component.contents = shadow
+        return [component]
+    }
+
     func setSelectedAppearance(_ selected: Bool) {
         updateBorderAppearance(isSelected: selected)
     }
@@ -379,6 +399,42 @@ final class ThumbnailImageView: NSImageView {
 }
 
 final class ThumbnailBadgeLabel: NSTextField {
+    private struct TextLayout {
+        let value: String
+        let text: NSString
+        let attributes: [NSAttributedString.Key: Any]
+        let textHeight: CGFloat
+        let badgeSize: NSSize
+    }
+    private var cachedTextLayout: TextLayout?
+
+    fileprivate var badgeSize: NSSize { textLayout().badgeSize }
+
+    private func textLayout() -> TextLayout {
+        let value = stringValue
+        if let cachedTextLayout, cachedTextLayout.value == value { return cachedTextLayout }
+        let text = value as NSString
+        let font = ThumbnailBadgeStyle.font(for: value)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineBreakMode = .byClipping
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: ThumbnailBadgeStyle.textColor,
+            .paragraphStyle: paragraphStyle
+        ]
+        let layout = TextLayout(
+            value: value,
+            text: text,
+            attributes: attributes,
+            textHeight: ceil(text.size(withAttributes: attributes).height),
+            badgeSize: NSSize(width: ceil(text.size(withAttributes: [.font: font]).width)
+                + ThumbnailBadgeStyle.horizontalPadding * 2, height: ThumbnailBadgeStyle.height)
+        )
+        cachedTextLayout = layout
+        return layout
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
     }
@@ -396,22 +452,14 @@ final class ThumbnailBadgeLabel: NSTextField {
             bottom: 0,
             right: ThumbnailBadgeStyle.horizontalPadding
         )
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .center
-        paragraphStyle.lineBreakMode = .byClipping
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: ThumbnailBadgeStyle.font(for: stringValue),
-            .foregroundColor: ThumbnailBadgeStyle.textColor,
-            .paragraphStyle: paragraphStyle
-        ]
-        let textSize = (stringValue as NSString).size(withAttributes: attributes)
+        let layout = textLayout()
         let textRect = NSRect(
             x: bounds.minX + textInsets.left,
-            y: bounds.midY - ceil(textSize.height) / 2,
+            y: bounds.midY - layout.textHeight / 2,
             width: bounds.width - textInsets.left - textInsets.right,
-            height: ceil(textSize.height)
+            height: layout.textHeight
         )
-        (stringValue as NSString).draw(in: textRect.integral, withAttributes: attributes)
+        layout.text.draw(in: textRect.integral, withAttributes: layout.attributes)
     }
 }
 
@@ -423,6 +471,8 @@ final class ThumbnailItemView: NSView {
     weak var placeholderLabel: NSTextField?
     weak var ringView: ThumbnailStateRingView?
     private var interactiveFrame: NSRect = .zero
+    private var measuredFailureText: String?
+    private var failureFittingSize: NSSize = .zero
     var onEffectiveAppearanceChanged: (() -> Void)?
 
     override func viewDidChangeEffectiveAppearance() {
@@ -490,17 +540,14 @@ final class ThumbnailItemView: NSView {
 
     private func updateBadgeFrames() {
         let baseFrame = interactiveFrame.isEmpty ? bounds.insetBy(dx: 8, dy: 8) : interactiveFrame
-        if let failureLabel, !failureLabel.isHidden {
-            let size = failureLabel.fittingSize
-            failureLabel.frame = NSRect(x: baseFrame.minX + 4, y: baseFrame.maxY - size.height - 4,
-                                       width: min(size.width + 8, baseFrame.width - 8), height: size.height)
-        }
+        updateFailureFrame(in: baseFrame)
         if let placeholderLabel, !placeholderLabel.isHidden {
             let frame = NSRect(x: baseFrame.minX + 8, y: baseFrame.minY + 12, width: max(0, baseFrame.width - 16), height: 18)
             if placeholderLabel.frame != frame { placeholderLabel.frame = frame }
         }
         if let badgeLabel, !badgeLabel.isHidden {
-            let labelSize = ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
+            let labelSize = (badgeLabel as? ThumbnailBadgeLabel)?.badgeSize
+                ?? ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
             let origin = NSPoint(
                 x: baseFrame.maxX - labelSize.width - ThumbnailBadgeStyle.inset,
                 y: baseFrame.minY + ThumbnailBadgeStyle.inset
@@ -508,5 +555,18 @@ final class ThumbnailItemView: NSView {
             let frame = NSRect(origin: origin, size: labelSize).integral
             if badgeLabel.frame != frame { badgeLabel.frame = frame }
         }
+    }
+
+    private func updateFailureFrame(in baseFrame: NSRect) {
+        guard let failureLabel, !failureLabel.isHidden else { return }
+        let text = failureLabel.stringValue
+        if measuredFailureText != text {
+            measuredFailureText = text
+            failureFittingSize = failureLabel.fittingSize
+        }
+        let frame = NSRect(x: baseFrame.minX + 4, y: baseFrame.maxY - failureFittingSize.height - 4,
+                           width: min(failureFittingSize.width + 8, baseFrame.width - 8), height: failureFittingSize.height)
+        guard failureLabel.frame != frame else { return }
+        failureLabel.frame = frame
     }
 }

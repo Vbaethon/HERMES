@@ -337,8 +337,13 @@ final class CircularGlassIconButton: NSView {
     var isEnabled: Bool {
         get { button.isEnabled }
         set {
-            button.isEnabled = newValue
-            button.contentTintColor = newValue ? nil : .secondaryLabelColor
+            if button.isEnabled != newValue {
+                button.isEnabled = newValue
+            }
+            let tintColor: NSColor? = newValue ? nil : .secondaryLabelColor
+            if button.contentTintColor != tintColor {
+                button.contentTintColor = tintColor
+            }
         }
     }
 
@@ -404,9 +409,18 @@ final class CircularGlassIconButton: NSView {
     private func updateCircularGlassRadius() {
         let radius = min(bounds.width, bounds.height) / 2
         guard radius.isFinite, radius > 0 else { return }
-        glassSurface.cornerRadius = radius
-        glassSurface.layer?.cornerRadius = radius
-        glassSurface.layer?.masksToBounds = true
+        // Pane resizing moves this fixed-size button without changing its curve.
+        if glassSurface.cornerRadius != radius {
+            glassSurface.cornerRadius = radius
+        }
+        if let glassLayer = glassSurface.layer {
+            if glassLayer.cornerRadius != radius {
+                glassLayer.cornerRadius = radius
+            }
+            if !glassLayer.masksToBounds {
+                glassLayer.masksToBounds = true
+            }
+        }
     }
 }
 
@@ -964,8 +978,12 @@ final class DownloadTaskProgressBarView: NSView {
 
     private func updateGlassRadius() {
         let radius = bounds.height / 2
-        glassSurface.cornerRadius = radius
-        fillClipView.layer?.cornerRadius = radius
+        if glassSurface.cornerRadius != radius {
+            glassSurface.cornerRadius = radius
+        }
+        if let fillLayer = fillClipView.layer, fillLayer.cornerRadius != radius {
+            fillLayer.cornerRadius = radius
+        }
     }
 
     private func animateProgress(to progress: CGFloat, animated: Bool) {
@@ -1185,9 +1203,12 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         view.addSubview(downloadBar)
 
         let preferredDownloadBarWidth = downloadBar.widthAnchor.constraint(equalToConstant: DownloadInputMetrics.barWidth)
-        preferredDownloadBarWidth.priority = .defaultHigh
+        // A comfortable input width must yield before native pane widths, so
+        // opening the inspector doesn't squeeze a user-resized sidebar.
+        let preferredBarWidthPriority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue + 1)
+        preferredDownloadBarWidth.priority = preferredBarWidthPriority
         let preferredProgressWidth = progressStack.widthAnchor.constraint(equalTo: downloadBar.widthAnchor, multiplier: DownloadInputMetrics.progressWidthMultiplier)
-        preferredProgressWidth.priority = .defaultHigh
+        preferredProgressWidth.priority = preferredBarWidthPriority
         NSLayoutConstraint.activate([
             emptyView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             emptyView.trailingAnchor.constraint(equalTo: view.trailingAnchor),

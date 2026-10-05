@@ -20,13 +20,82 @@ enum ThumbnailCollectionAnimation {
 
 /// This grid has fixed-size items and no scrolling supplementary views. A
 /// viewport translation must not invalidate every item's layout on each tick.
-private final class ThumbnailFlowLayout: NSCollectionViewFlowLayout {
+class ThumbnailFlowLayout: NSCollectionViewFlowLayout {
+    private struct ResizeAnchor {
+        let indexPath: IndexPath
+        let offsetFromTop: CGFloat
+        var expectedOrigin: CGFloat
+    }
+
+    private var preparedViewportSize: NSSize?
+    private var resizeAnchor: ResizeAnchor?
+
+    override func prepare() {
+        super.prepare()
+        preparedViewportSize = collectionView?.enclosingScrollView?.contentView.bounds.size
+    }
+
     override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
-        guard let collectionView else { return true }
         if sectionHeadersPinToVisibleBounds || sectionFootersPinToVisibleBounds {
             return super.shouldInvalidateLayout(forBoundsChange: newBounds)
         }
-        return collectionView.bounds.size != newBounds.size
+        // AppKit supplies the visible viewport here; collectionView.bounds is
+        // the entire document and can be thousands of points taller.
+        guard let preparedViewportSize else { return true }
+        if preparedViewportSize == newBounds.size {
+            if let anchor = resizeAnchor, abs(newBounds.minY - anchor.expectedOrigin) > 0.5 {
+                resizeAnchor = nil
+            }
+            return false
+        }
+        return true
+    }
+
+    override func invalidationContext(forBoundsChange newBounds: NSRect) -> NSCollectionViewLayoutInvalidationContext {
+        let context = super.invalidationContext(forBoundsChange: newBounds)
+        guard scrollDirection == .vertical, !sectionHeadersPinToVisibleBounds, !sectionFootersPinToVisibleBounds,
+              let collectionView, let clipView = collectionView.enclosingScrollView?.contentView,
+              let preparedViewportSize, preparedViewportSize.width != newBounds.width,
+              collectionView.numberOfSections == 1, itemSize.width > 0, itemSize.height > 0,
+              resizeAnchor != nil || newBounds.minY > 0 else { return context }
+
+        if let anchor = resizeAnchor, abs(newBounds.minY - anchor.expectedOrigin) > 0.5 {
+            resizeAnchor = nil
+        }
+        if resizeAnchor == nil {
+            let oldViewport = NSRect(origin: newBounds.origin, size: preparedViewportSize)
+            let first = layoutAttributesForElements(in: oldViewport)
+                .filter { $0.representedElementCategory == .item && $0.frame.intersects(oldViewport) }
+                .min { $0.frame.minY == $1.frame.minY ? $0.frame.minX < $1.frame.minX : $0.frame.minY < $1.frame.minY }
+            if let first, let path = first.indexPath {
+                resizeAnchor = ResizeAnchor(indexPath: path, offsetFromTop: first.frame.minY - newBounds.minY,
+                                            expectedOrigin: newBounds.minY)
+            }
+        }
+        guard var anchor = resizeAnchor else { return context }
+        let count = collectionView.numberOfItems(inSection: 0)
+        guard anchor.indexPath.item < count else { resizeAnchor = nil; return context }
+        let availableWidth = newBounds.width - sectionInset.left - sectionInset.right
+        let columns = max(1, Int(floor((availableWidth + minimumInteritemSpacing) / (itemSize.width + minimumInteritemSpacing))))
+        let rowStride = itemSize.height + minimumLineSpacing
+        let desiredOrigin = sectionInset.top + CGFloat(anchor.indexPath.item / columns) * rowStride - anchor.offsetFromTop
+        context.contentOffsetAdjustment.y = desiredOrigin - newBounds.minY
+
+        // Let NSClipView apply its native boundary clamp. Remember that clamped
+        // origin without replacing the item's desired offset, so widening near
+        // the bottom and narrowing again restores the same item position.
+        let rows = (count + columns - 1) / columns
+        let contentHeight = sectionInset.top + CGFloat(rows) * rowStride - minimumLineSpacing + sectionInset.bottom
+        let documentRect = clipView.documentRect
+        let maxOrigin = max(documentRect.minY, documentRect.maxY + contentHeight - collectionView.bounds.height - newBounds.height)
+        anchor.expectedOrigin = min(max(desiredOrigin, documentRect.minY), maxOrigin)
+        resizeAnchor = anchor
+        return context
+    }
+
+    override func prepare(forCollectionViewUpdates updateItems: [NSCollectionViewUpdateItem]) {
+        resizeAnchor = nil
+        super.prepare(forCollectionViewUpdates: updateItems)
     }
 }
 

@@ -188,15 +188,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let sidebarItem = sidebarController.makeSplitViewItem()
         let detailItem = NSSplitViewItem(viewController: detailController)
+        // Native glass hugs at 250; the comfortable input width uses 251.
+        // Pane widths take precedence, with the sidebar retained before the
+        // content pane. Stay below AppKit's drag-resize priority of 490.
+        sidebarItem.holdingPriority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue + 3)
+        detailItem.holdingPriority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue + 2)
         detailItem.minimumThickness = 520
         detailItem.canCollapse = false
 
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(detailItem)
         let inspector = NSSplitViewItem(inspectorWithViewController: inspectorController)
-        // Use AppKit's pane-preserving mode, including its onscreen/fullscreen
-        // fallback, rather than restoring sidebar widths or resizing by hand.
-        inspector.collapseBehavior = .preferResizingSplitViewWithFixedSiblings
+        // Let AppKit allocate inspector space inside the window. Its
+        // pane-preserving window resize mode adds 1pt on every round trip
+        // on macOS 27, even when the split view has zero-thickness dividers.
+        inspector.collapseBehavior = .preferResizingSiblingsWithFixedSplitView
         let startsInspectorCollapsed = !inspectorDefaults.bool(forKey: Self.inspectorVisibleDefaultsKey)
         inspector.isCollapsed = startsInspectorCollapsed
         inspectorItem = inspector
@@ -476,6 +482,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 final class MainSplitViewController: NSSplitViewController {
     weak var inspectorController: MediaInspectorController?
 
+    override func loadView() {
+        splitView = MainWindowSplitView()
+        super.loadView()
+    }
+
     override func toggleSidebar(_ sender: Any?) {
         animatePaneToggle { super.toggleSidebar(sender) }
     }
@@ -492,4 +503,11 @@ final class MainSplitViewController: NSSplitViewController {
             MainActor.assumeIsolated { self?.inspectorController?.endPaneTransition() }
         }
     }
+}
+
+/// Native pane materials distinguish the sections. NSSplitView's public
+/// divider hooks remove the line while preserving its layout and drag regions.
+private final class MainWindowSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 0 }
+    override func drawDivider(in rect: NSRect) {}
 }

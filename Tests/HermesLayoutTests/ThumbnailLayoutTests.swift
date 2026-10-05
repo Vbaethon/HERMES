@@ -23,10 +23,16 @@ final class ThumbnailLayoutTests: XCTestCase {
         let before = Set(grid.nsCollectionView.visibleItems().compactMap { grid.nsCollectionView.indexPath(for: $0) })
         XCTAssertNotNil(grid.nsCollectionView.layer)
         XCTAssertNotNil(scroll.contentView.layer)
-        let bounds = grid.nsCollectionView.bounds
-        XCTAssertFalse(layout.shouldInvalidateLayout(forBoundsChange: bounds.offsetBy(dx: 0, dy: 250)))
+        let bounds = scroll.contentView.bounds
+        XCTAssertGreaterThan(grid.nsCollectionView.bounds.height, bounds.height)
+        for offset in [0.0, 250.0, 500.0] {
+            XCTAssertFalse(layout.shouldInvalidateLayout(forBoundsChange: bounds.offsetBy(dx: 0, dy: offset)),
+                           "AppKit passes viewport bounds, whose height differs from the document")
+        }
         XCTAssertTrue(layout.shouldInvalidateLayout(forBoundsChange:
             NSRect(origin: bounds.origin, size: NSSize(width: bounds.width + 150, height: bounds.height))))
+        XCTAssertTrue(layout.shouldInvalidateLayout(forBoundsChange:
+            NSRect(origin: bounds.origin, size: NSSize(width: bounds.width, height: bounds.height + 75))))
         let distant = try XCTUnwrap(layout.layoutAttributesForItem(at: IndexPath(item: 150, section: 0)))
         scroll.contentView.scroll(to: NSPoint(x: 0, y: distant.frame.minY))
         scroll.reflectScrolledClipView(scroll.contentView)
