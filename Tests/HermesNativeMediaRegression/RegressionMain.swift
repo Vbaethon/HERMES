@@ -9,12 +9,29 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
     let description: String
 }
 
+@MainActor
+private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
+    let wrapped: any NSTableViewDataSource
+    private(set) var rowCountRequests = 0
+
+    init(wrapping dataSource: any NSTableViewDataSource) {
+        wrapped = dataSource
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        rowCountRequests += 1
+        return wrapped.numberOfRows?(in: tableView) ?? 0
+    }
+}
+
 @main enum NativeMediaRegression {
     @MainActor static func main() {
         precondition(Bundle.main.bundleIdentifier != "com.codex.Hermes")
         _ = NSApplication.shared
         if CommandLine.arguments.contains("--inspector-location-preview") {
             NSApp.setActivationPolicy(.regular)
+        } else {
+            NSApp.setActivationPolicy(.accessory)
         }
         Task { @MainActor in
             do {
@@ -438,13 +455,68 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             "an empty download input must retain its preferred width in a wide native pane: actual=\(emptyDownloadBar.frame.width)")
         let sidebarBeforeInspector = split.splitViewItems[0].viewController.view.frame.width
         let windowBeforeInspector = first.window!.frame
+        let sidebarTable = descendants(split.splitViewItems[0].viewController.view)
+            .compactMap { $0 as? NSTableView }.first!
+        let originalRowSize = sidebarTable.rowSizeStyle
+        var smallTitleSize: CGFloat?
+        var largeTitleSize: CGFloat?
+        for rowSize in [NSTableView.RowSizeStyle.small, .medium, .large, .default] {
+            // AppKit owns row heights and forwards its effective size to cell
+            // views. No application reload or global preference write is needed.
+            sidebarTable.rowSizeStyle = rowSize
+            sidebarTable.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(30))
+            let cell = sidebarTable.view(atColumn: 0, row: 0, makeIfNecessary: true) as! NSTableCellView
+            try expect(cell.rowSizeStyle == sidebarTable.effectiveRowSizeStyle,
+                "native sidebar cells must follow row-size changes without application reloads")
+            try expect(abs(sidebarTable.rect(ofRow: 0).height - sidebarTable.rowHeight) < 0.5,
+                "AppKit must update sidebar row heights without application reloads")
+            if rowSize == .small { smallTitleSize = cell.textField!.font!.pointSize }
+            if rowSize == .large { largeTitleSize = cell.textField!.font!.pointSize }
+        }
+        try expect(smallTitleSize! < largeTitleSize!,
+            "sidebar typography must follow the native cell row-size callback")
+        sidebarTable.rowSizeStyle = originalRowSize
+        try expect(model.selection == .downloads,
+            "native row-size changes must retain the current navigation destination")
+        let sidebarCounter = SidebarReloadCounter(wrapping: sidebarTable.dataSource!)
+        let sidebarDelegate = sidebarTable.delegate
+        // Swapping an NSTableView data source can reset selection. Keep test
+        // instrumentation from sending that setup change to the real model.
+        sidebarTable.delegate = nil
+        sidebarTable.dataSource = sidebarCounter
+        sidebarTable.delegate = sidebarDelegate
+        defer { sidebarTable.dataSource = sidebarCounter.wrapped }
+        (sidebarCounter.wrapped as! FinderStyleSidebarController.Coordinator).reloadDataAndApplySelection()
+        try await Task.sleep(for: .milliseconds(200))
+        let beforePreferenceChange = sidebarCounter.rowCountRequests
+        defaults.set(true, forKey: "SidebarUnrelatedPreferenceRegression")
+        for _ in 0..<3 {
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        try expect(sidebarCounter.rowCountRequests == beforePreferenceChange,
+            "unrelated preference changes must not reload the sidebar table")
         first.window!.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         let nativeToggle = first.window!.toolbar!.items.first { $0.itemIdentifier == .toggleInspector }!
+        let toolbarBeforeInspector = first.window!.toolbar!
+        let sidebarToggleBeforeInspector = toolbarBeforeInspector.items.first { $0.itemIdentifier == .toggleSidebar }!
+        let beforeInspectorToggle = sidebarCounter.rowCountRequests
         try expect(nativeToggle.action != nil, "the system inspector toolbar item must expose its native action")
         try expect(NSApp.sendAction(nativeToggle.action!, to: nativeToggle.target, from: nativeToggle),
             "the actual native toolbar inspector action must reach the split-view responder")
         try await waitUntil("the actual toolbar action must open the inspector") { first.inspectorVisible }
         try await waitUntil("the native inspector animation must finish") { !first.inspectorController.isPaneTransitioning }
+        try await Task.sleep(for: .milliseconds(100))
+        try expect(sidebarCounter.rowCountRequests == beforeInspectorToggle,
+            "the native inspector toolbar action must not reload the sidebar table")
+        try expect(first.window!.toolbar === toolbarBeforeInspector
+            && toolbarBeforeInspector.items.first { $0.itemIdentifier == .toggleSidebar } === sidebarToggleBeforeInspector,
+            "the native inspector action must retain the toolbar and sidebar toggle instances")
+        try expect(model.selection == .downloads,
+            "counting sidebar reloads must preserve the current navigation destination")
+        pass("native row-size changes update sidebar cells directly; unrelated defaults and inspector actions do not reload its table")
         first.window!.contentView!.layoutSubtreeIfNeeded()
         print("Inspector toggle geometry: sidebar \(sidebarBeforeInspector) → \(split.splitViewItems[0].viewController.view.frame.width), window \(windowBeforeInspector) → \(first.window!.frame), panes=\(split.splitViewItems.map { $0.viewController.view.frame.width })")
         try expect(abs(split.splitViewItems[0].viewController.view.frame.width - sidebarBeforeInspector) < 0.5,
@@ -472,9 +544,14 @@ private struct NativeMediaFailure: Error, CustomStringConvertible {
             && !(inspector.view is NSVisualEffectView) && !inspector.view.isOpaque,
             "the transparent form must let the split item's system glass show through")
         model.selectedDownloadItemIDs = [pairID]
-        try await waitUntil("single selection must populate native common, image and video form sections") {
-            !inspector.isLoading && inspector.sectionGrids[.common] != nil
-                && inspector.sectionGrids[.image] != nil && inspector.sectionGrids[.video] != nil
+        do {
+            try await waitUntil("single selection must populate native common, image and video form sections") {
+                !inspector.isLoading && inspector.sectionGrids[.common] != nil
+                    && inspector.sectionGrids[.image] != nil && inspector.sectionGrids[.video] != nil
+            }
+        } catch {
+            print("Inspector diagnostics: selection=\(String(describing: model.selection)), selected=\(model.selectedDownloadItemIDs), visible=\(first.inspectorVisible), enabled=\(inspector.isInspectionEnabled), transitioning=\(inspector.isPaneTransitioning), loading=\(inspector.isLoading), status=\(inspector.statusText)")
+            throw error
         }
         if CommandLine.arguments.contains("--sidebar-performance") {
             // Measure main-run-loop stalls during real native pane actions. This

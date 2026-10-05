@@ -104,7 +104,6 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
         ])
 
         coordinator.tableView = tableView
-        coordinator.startObservingSystemRowSizeChanges()
         coordinator.reloadDataAndApplySelection()
     }
 
@@ -127,11 +126,6 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
         weak var controller: NativeSidebarController?
         weak var tableView: NSTableView?
         private var isApplyingSelection = false
-        private var userDefaultsObserver: NotificationObserver?
-
-        deinit {
-            userDefaultsObserver?.invalidate()
-        }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
             controller?.sections.count ?? 0
@@ -155,20 +149,6 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
                 rowSizeStyle: tableView.effectiveRowSizeStyle
             )
             return cell
-        }
-
-        func startObservingSystemRowSizeChanges() {
-            guard userDefaultsObserver == nil else { return }
-            let observer = NotificationCenter.default.addObserver(
-                forName: UserDefaults.didChangeNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.reloadDataAndApplySelection()
-                }
-            }
-            userDefaultsObserver = NotificationObserver(observer)
         }
 
         func tableViewSelectionDidChange(_ notification: Notification) {
@@ -205,24 +185,6 @@ final class NativeSidebarController<Destination: SidebarDestination>: NSViewCont
             guard allowsRepeatedSelection || section != controller.selection else { return }
             controller.onSelect(section)
         }
-    }
-}
-
-private final class NotificationObserver: @unchecked Sendable {
-    private var observer: NSObjectProtocol?
-
-    init(_ observer: NSObjectProtocol) {
-        self.observer = observer
-    }
-
-    deinit {
-        invalidate()
-    }
-
-    func invalidate() {
-        guard let observer else { return }
-        NotificationCenter.default.removeObserver(observer)
-        self.observer = nil
     }
 }
 
@@ -297,6 +259,9 @@ private final class FinderSidebarCellView: NSTableCellView {
 
     override var rowSizeStyle: NSTableView.RowSizeStyle {
         didSet {
+            // NSTableView forwards its effective system row size directly.
+            // Observing all UserDefaults changes would reload the sidebar
+            // whenever an unrelated preference or pane autosave is written.
             applySourceListMetrics(isSelected: currentSelectionState)
         }
     }
