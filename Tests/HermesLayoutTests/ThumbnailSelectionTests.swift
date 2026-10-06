@@ -92,7 +92,8 @@ final class ThumbnailSelectionTests: XCTestCase {
             let imageView = try XCTUnwrap(view.imageView)
             let expected = imageView.convert(imageView.bounds, to: collection)
             let anchor = try XCTUnwrap(fixture.grid.sharingAnchorRect(forIDs: ["item-1"]))
-            XCTAssertEqual(anchor, expected)
+            XCTAssertLessThan(abs(anchor.minX - expected.minX) + abs(anchor.minY - expected.minY)
+                + abs(anchor.width - expected.width) + abs(anchor.height - expected.height), 0.00001)
             XCTAssertNotEqual(anchor, view.convert(view.bounds, to: collection),
                               "Share must point to the file artwork, not the surrounding cell padding")
         }
@@ -119,9 +120,11 @@ final class ThumbnailSelectionTests: XCTestCase {
         XCTAssertEqual(collection.selectionIndexPaths,
                        [IndexPath(item: 0, section: 0), IndexPath(item: 2, section: 0)])
         let firstImage = try XCTUnwrap(first.imageView)
-        XCTAssertEqual(fixture.grid.sharingAnchorRect(forIDs: ["item-2", "item-0"]),
-                       firstImage.convert(firstImage.bounds, to: collection),
-                       "The last clicked file must not move sharing away from the first displayed selection")
+        let anchor = try XCTUnwrap(fixture.grid.sharingAnchorRect(forIDs: ["item-2", "item-0"]))
+        let expected = firstImage.convert(firstImage.bounds, to: collection)
+        XCTAssertLessThan(abs(anchor.minX - expected.minX) + abs(anchor.minY - expected.minY)
+            + abs(anchor.width - expected.width) + abs(anchor.height - expected.height), 0.00001,
+            "The last clicked file must not move sharing away from the first displayed selection")
     }
 
     func testSharingSkipsOffscreenSelectionAndClipsAnchorToVisibleArtwork() async throws {

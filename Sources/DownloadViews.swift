@@ -80,8 +80,11 @@ private enum DownloadInputMetrics {
         contentHeight(for: rawLineCount) + verticalPadding * 2
     }
 
-    static func downloadCollectionBottomInset(for rawLineCount: Int) -> CGFloat {
-        barHeight(for: rawLineCount) + bottomPadding + progressBottomSpacing + progressStackHeight + 12
+    static func downloadCollectionBottomInset(for rawLineCount: Int, showsProgress: Bool) -> CGFloat {
+        // Equal spacing above the visible overlay and below the input. Hidden
+        // progress views must not leave a permanent empty band in the document.
+        barHeight(for: rawLineCount) + bottomPadding * 2
+            + (showsProgress ? progressBottomSpacing + progressStackHeight : 0)
     }
 }
 
@@ -1185,7 +1188,8 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         progressStack.translatesAutoresizingMaskIntoConstraints = false
 
         let bottomInset = DownloadInputMetrics.downloadCollectionBottomInset(
-            for: DownloadInputMetrics.rawLineCount(for: model.downloadShareText)
+            for: DownloadInputMetrics.rawLineCount(for: model.downloadShareText),
+            showsProgress: !model.downloadProgressItems.isEmpty
         )
         let pair = DownloadCollectionView.make(
             items: model.visibleDownloadItems,
@@ -1302,7 +1306,7 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         emptyView.message = hasItems ? "请在工具栏选择“全部项目”。" : model.downloadStatusText
         let rawLineCount = downloadBar.laidOutLineCount
         let bottomInset = DownloadInputMetrics.downloadCollectionBottomInset(
-            for: rawLineCount
+            for: rawLineCount, showsProgress: !model.downloadProgressItems.isEmpty
         )
 
         guard let scrollView, let coordinator else { return }
@@ -1325,5 +1329,6 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
 
     private func reloadProgress() {
         progressStack.update(with: model.downloadProgressItems, animated: true)
+        reload()
     }
 }

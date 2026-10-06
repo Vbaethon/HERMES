@@ -819,10 +819,10 @@ import Foundation
         let older1 = try pair(ordering.downloadOutputFolder, "z-first")
         let older2 = try pair(ordering.downloadOutputFolder, "a-second")
         let newer1 = try pair(ordering.downloadOutputFolder, "m-newest")
-        let orderedSources = [newer1, older1, older2]
-        let orders = [MediaDisplayOrder(postID: "newer", downloadedAt: 200, index: 1),
-                      MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 1),
-                      MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 2)]
+        let orderedSources = [older1, older2, newer1]
+        let orders = [MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 1),
+                      MediaDisplayOrder(postID: "older", downloadedAt: 100, index: 2),
+                      MediaDisplayOrder(postID: "newer", downloadedAt: 200, index: 1)]
         for (source, order) in zip(orderedSources, orders) {
             order.write(to: source.imageURL)
             order.write(to: source.videoURL)
@@ -830,7 +830,7 @@ import Foundation
         }
         ordering.refreshDownloads()
         try await waitUntil { ordering.visibleDownloadItems.count == 3 }
-        expect(ordering.visibleDownloadItems.map(\.imageURL) == orderedSources.map(\.imageURL), "newest post first and opaque names retain original photo index")
+        expect(ordering.visibleDownloadItems.map(\.imageURL) == orderedSources.map(\.imageURL), "newest post last and opaque names retain original photo index")
         pass("downloads sort by post download time then original item index")
         var exports: [String: PairItem] = [:]
         for source in orderedSources { exports[source.id] = try pair(ordering.outputFolder, source.imageURL.deletingPathExtension().lastPathComponent) }
@@ -857,8 +857,8 @@ import Foundation
         ordering.refreshCompleted()
         try await waitUntil { ordering.completed.count == 3 }
         expect(ordering.completed.map(\.displayOrder) == orders.map(Optional.init), "export metadata survives source deletion and record recreation")
-        try fm.removeItem(at: ordering.completed[0].imageURL)
-        try fm.removeItem(at: ordering.completed[0].movieURL!)
+        try fm.removeItem(at: ordering.completed[2].imageURL)
+        try fm.removeItem(at: ordering.completed[2].movieURL!)
         ordering.refreshCompleted()
         try await waitUntil { ordering.completed.count == 2 }
         expect(ordering.completed.map { $0.displayOrder?.index } == [1, 2], "deleted outputs disappear after scan without disturbing surviving post order")

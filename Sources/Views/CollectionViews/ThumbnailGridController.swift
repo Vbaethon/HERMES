@@ -11,7 +11,7 @@ struct ThumbnailGridItem: Identifiable, Hashable {
 }
 
 @MainActor
-final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSCollectionViewDelegateFlowLayout, NSDraggingSource {
+final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDraggingSource {
     private enum Section {
         static let main = "main"
     }
@@ -21,6 +21,41 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
 
         override var intrinsicContentSize: NSSize {
             NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            gridController?.zoom.attachIfNeeded()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            gridController?.zoom.attachIfNeeded()
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            gridController?.zoom?.viewportChanged()
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            gridController?.zoom.finishForInteraction()
+            super.mouseDown(with: event)
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            gridController?.zoom.finishForInteraction()
+            super.scrollWheel(with: event)
+        }
+
+        override func keyDown(with event: NSEvent) {
+            switch event.charactersIgnoringModifiers {
+            case "+", "=": gridController?.zoom.step(1)
+            case "-": gridController?.zoom.step(-1)
+            default:
+                gridController?.zoom.finishForInteraction()
+                super.keyDown(with: event)
+            }
         }
 
         override func indexPathForItem(at point: NSPoint) -> IndexPath? {
@@ -50,6 +85,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private var makeContextMenu: (() -> NSMenu?)?
     private var sharingServicePicker: NSSharingServicePicker?
     private var exportSession: NSDraggingSession?
+    private(set) var zoom: ThumbnailGridZoomController!
 
     var nsCollectionView: NSCollectionView { collectionView }
     var hasPresentedItems: Bool { !items.isEmpty }
@@ -83,6 +119,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         collectionView.gridController = self
         collectionView.delegate = self
         ThumbnailCollectionStyle.prepare(collectionView, sectionInset: sectionInset)
+        zoom = ThumbnailGridZoomController(collection: collectionView, items: { [weak self] in self?.items ?? [] },
+                                           sectionInset: sectionInset)
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
     }
@@ -106,6 +144,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         }
         guard presentedItems != items else { return }
         let previousIDs = items.map(\.id)
+        if previousIDs != presentedItems.map(\.id) { zoom.itemsWillChange(count: presentedItems.count) }
         itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
         items = presentedItems
 
@@ -121,10 +160,14 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         snapshot.appendSections([Section.main])
         snapshot.appendItems(presentedItems.map(\.id), toSection: Section.main)
 
-        let shouldAnimate = animatingDifferences && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        // The first native snapshot must open at the newest end immediately;
+        // animating an insertion from an empty document briefly reveals its top.
+        let shouldAnimate = animatingDifferences && !previousIDs.isEmpty
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ThumbnailCollectionAnimation.duration(animated: shouldAnimate)
             dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
+                self?.zoom.itemsDidChange()
                 self?.updateVisibleItems()
             }
         }
@@ -142,12 +185,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     }
 
     func updateSectionInset(_ inset: NSEdgeInsets) {
-        guard let layout = collectionView.collectionViewLayout as? NSCollectionViewFlowLayout,
-              !ThumbnailCollectionStyle.insetsEqual(layout.sectionInset, inset) else {
-            return
-        }
-        layout.sectionInset = inset
-        layout.invalidateLayout()
+        zoom.attachIfNeeded()
+        zoom.updateSectionInset(inset)
     }
 
     func setSelectionHandler(_ handler: @escaping (Set<String>) -> Void) {

@@ -47,6 +47,9 @@ let package = Package(
             sources: [
                 "UIModels.swift", "Utilities/FileSystemUtilities.swift",
                 "Views/CollectionViews/ThumbnailGridController.swift",
+                "Views/CollectionViews/ThumbnailGridZoomController.swift",
+                "Views/CollectionViews/ThumbnailZoomGeometry.swift",
+                "Views/CollectionViews/ThumbnailZoomOverlay.swift",
                 "Utilities/NativeMediaResources.swift",
                 "Views/Thumbnail/ThumbnailService.swift",
                 "Views/Thumbnail/ThumbnailItemViews.swift",

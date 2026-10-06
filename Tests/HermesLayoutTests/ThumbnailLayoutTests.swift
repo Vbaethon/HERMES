@@ -44,7 +44,7 @@ final class ThumbnailLayoutTests: XCTestCase {
         XCTAssertTrue(after.contains(IndexPath(item: 150, section: 0)))
         grid.updateSectionInset(ThumbnailCollectionStyle.sectionInset(additionalBottomInset: 90))
         grid.nsCollectionView.layoutSubtreeIfNeeded()
-        XCTAssertEqual((layout as? NSCollectionViewFlowLayout)?.sectionInset.bottom, 90)
+        XCTAssertEqual((layout as? ThumbnailGridLayout)?.sectionInset.bottom, 90)
         grid.updateItems([], animatingDifferences: false)
         XCTAssertFalse(grid.hasPresentedItems)
     }

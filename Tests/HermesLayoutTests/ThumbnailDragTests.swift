@@ -148,6 +148,12 @@ final class ThumbnailDragTests: XCTestCase {
         }, animatingDifferences: false)
         scroll.layoutSubtreeIfNeeded()
         collection.layoutSubtreeIfNeeded()
+        await Task.yield()
+        // The chronological grid opens at the newest end. This export fixture
+        // intentionally exercises the first visible item plus a distant item.
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        collection.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(150))
         let first = IndexPath(item: 0, section: 0)
         let distant = IndexPath(item: 39, section: 0)
@@ -173,7 +179,8 @@ final class ThumbnailDragTests: XCTestCase {
         let component = try XCTUnwrap(draggingItems.first?.imageComponents?.first)
         let shadow = try XCTUnwrap(component.contents as? NSImage)
         XCTAssertFalse(shadow === image)
-        XCTAssertEqual(component.frame, sourceFrame)
+        XCTAssertLessThan(abs(component.frame.minX - sourceFrame.minX) + abs(component.frame.minY - sourceFrame.minY)
+            + abs(component.frame.width - sourceFrame.width) + abs(component.frame.height - sourceFrame.height), 0.00001)
         XCTAssertTrue(collection.item(at: first) === source)
         XCTAssertTrue(sourceImageView.image === image)
         XCTAssertEqual(sourceImageView.frame, sourceFrame)

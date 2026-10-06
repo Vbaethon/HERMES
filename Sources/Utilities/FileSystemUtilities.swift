@@ -94,7 +94,7 @@ struct MediaDisplayOrder: Codable, Hashable, Sendable {
         return entries.sorted { lhs, rhs in
             if lhs.order.postID != rhs.order.postID {
                 let leftDate = dates[lhs.order.postID]!, rightDate = dates[rhs.order.postID]!
-                if leftDate != rightDate { return leftDate > rightDate }
+                if leftDate != rightDate { return leftDate < rightDate }
                 return lhs.order.postID < rhs.order.postID
             }
             if lhs.order.index != rhs.order.index { return lhs.order.index < rhs.order.index }

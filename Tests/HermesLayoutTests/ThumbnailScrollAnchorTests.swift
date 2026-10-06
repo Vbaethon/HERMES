@@ -243,6 +243,8 @@ final class ThumbnailScrollAnchorTests: XCTestCase {
         split.addSplitViewItem(inspector)
         fixture.window.contentViewController = split
         fixture.window.setContentSize(NSSize(width: 1250, height: 480))
+        fixture.window.orderFront(nil)
+        defer { fixture.window.orderOut(nil) }
         split.view.layoutSubtreeIfNeeded()
         fixture.settle()
         fixture.scroll(to: 1000)
@@ -250,10 +252,26 @@ final class ThumbnailScrollAnchorTests: XCTestCase {
         let initialOrigin = fixture.scroll.contentView.bounds.origin.y
         let initialWidth = fixture.scroll.frame.width
         for _ in 0..<4 {
+            let expectedCollapsed = !inspector.isCollapsed
             split.toggleInspector(nil)
-            try await Task.sleep(for: .milliseconds(350))
+            // Wait for AppKit to finish, rather than toggling again halfway
+            // through a native animation on a busy test host.
+            let deadline = Date().addingTimeInterval(3)
+            var previousWidth = fixture.scroll.frame.width
+            var stableFrames = 0
+            while Date() < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+                split.view.layoutSubtreeIfNeeded()
+                let settledWidth = expectedCollapsed
+                    ? abs(fixture.scroll.frame.width - initialWidth) <= 0.5
+                    : fixture.scroll.frame.width < initialWidth - 200
+                stableFrames = abs(fixture.scroll.frame.width - previousWidth) <= 0.25 ? stableFrames + 1 : 0
+                previousWidth = fixture.scroll.frame.width
+                if inspector.isCollapsed == expectedCollapsed && settledWidth && stableFrames >= 3 { break }
+            }
             split.view.layoutSubtreeIfNeeded()
             fixture.settle()
+            XCTAssertEqual(inspector.isCollapsed, expectedCollapsed)
             XCTAssertEqual(try fixture.offset(of: anchor.path), anchor.offset, accuracy: 0.5)
             if inspector.isCollapsed {
                 XCTAssertEqual(fixture.scroll.frame.width, initialWidth, accuracy: 0.5)

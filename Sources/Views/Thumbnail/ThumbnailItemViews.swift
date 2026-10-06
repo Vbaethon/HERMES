@@ -10,6 +10,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var badgeTask: Task<Void, Never>?
     private var unavailableMessage: String?
     private var previewMessage: String?
+    private var requestedThumbnailSide: CGFloat = 0
     private struct Appearance: Equatable {
         let url: URL?
         let status: PairItem.Status
@@ -101,6 +102,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask = nil
         representedURL = nil
         representedContentVersion = nil
+        requestedThumbnailSide = 0
         unavailableMessage = nil
         previewMessage = nil
         lastAppearance = nil
@@ -120,6 +122,18 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     override var isSelected: Bool {
         didSet {
             if oldValue != isSelected { updateBorderAppearance(isSelected: isSelected) }
+        }
+    }
+
+    override func apply(_ layoutAttributes: NSCollectionViewLayoutAttributes) {
+        super.apply(layoutAttributes)
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        // Keep the displayed bitmap while requesting enough pixels for a larger
+        // settled preset. Resizing/status changes must not restart its fade.
+        if let url = representedURL,
+           ceil(min(view.bounds.width, view.bounds.height)) > requestedThumbnailSide {
+            startThumbnailLoad(for: url)
         }
     }
 
@@ -147,6 +161,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: selected)
     }
 
+    func retainZoomThumbnail(_ image: CGImage, for url: URL, contentVersion: TimeInterval) {
+        guard representedURL == url, representedContentVersion == contentVersion else { return }
+        let scale = view.window?.backingScaleFactor ?? 2
+        showLoadedThumbnail(NSImage(cgImage: image,
+            size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)), animated: false)
+        updateBorderAppearance(isSelected: isSelected)
+    }
+
     func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0, unavailableMessage: String? = nil) {
         if representedURL == url, representedContentVersion == contentVersion, self.unavailableMessage == unavailableMessage {
             thumbnailStatus = status
@@ -170,6 +192,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailView?.setBadge(nil)
         representedURL = url
         representedContentVersion = contentVersion
+        requestedThumbnailSide = 0
         self.unavailableMessage = unavailableMessage
         previewMessage = nil
         thumbnailView?.placeholderLabel?.isHidden = true
@@ -190,20 +213,27 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailTask?.cancel()
         let displayScale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let contentVersion = representedContentVersion ?? 0
+        let pointSize = max(ThumbnailCollectionStyle.cellSide, ceil(min(view.bounds.width, view.bounds.height)))
+        requestedThumbnailSide = pointSize
         let allowsCachedThumbnail = unavailableMessage == nil
         if allowsCachedThumbnail, let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
-            pointSize: ThumbnailCollectionStyle.cellSide, scale: displayScale, contentVersion: contentVersion) {
+            pointSize: pointSize, scale: displayScale, contentVersion: contentVersion) {
             thumbnailTask = nil
             showLoadedThumbnail(cached, animated: false)
             updateBorderAppearance(isSelected: isSelected)
             return
+        }
+        if imageView?.image == nil, allowsCachedThumbnail,
+           let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
+                pointSize: ThumbnailCollectionStyle.cellSide, scale: displayScale, contentVersion: contentVersion) {
+            showLoadedThumbnail(cached, animated: false)
         }
         thumbnailTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(35))
             guard !Task.isCancelled else { return }
             let result = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,
-                pointSize: ThumbnailCollectionStyle.cellSide,
+                pointSize: pointSize,
                 scale: displayScale,
                 contentVersion: contentVersion,
                 allowsCachedThumbnail: allowsCachedThumbnail

@@ -1,0 +1,178 @@
+macOS 照片缩略图缩放反推记录 — 2026-10-06
+
+环境：本机 macOS 27.0.1 (26A434)。参考用户观察、已安装的 Photos.app
+以及本机系统框架。只读分析；没有访问照片图库数据库，没有注入 Photos
+进程，也没有在 Demo 中加载或调用私有框架。
+
+从本机依赖、导出符号、Objective-C 元数据和 ARM64e 方法体确认的内容：
+
+1. Photos.app 依赖 PhotosUICore、GridZero、Tungsten 私有框架。
+   GridZero 的 PXStepZoomInteraction 有 numberOfZoomSteps / initialZoomStep
+   初始化参数，并处理 NSMagnificationGestureRecognizer。
+   PXStepZoomInteractionViewModel 有 zoomStep / interactiveZooming 状态。
+
+2. GridZero 中存在独立的 PXZoomablePhotosAlphaAnimator。
+   它分别保存目标列索引、呈现列索引、自动淡化状态，并在 _tick 和
+   _updateTransitionInfo 中更新。设置中存在 enableAutoCrossfade、
+   enableCrossfadeFallback、alphaCrossfadeMinDuration / MaxDuration 等参数。
+   这证明该实现有专门的透明度呈现机制；不能据此确认当前界面所有开关的值。
+
+3. PXZoomablePhotosLayout 的 _performAnchorAlignmentVisualShiftWithBaseLayout:
+   方法体调用 getBestAnchorColumns:forItemLayouts:startingAtBaseLayout:
+   anchorItem:normalizedScaleCenterInAnchor:biasTowardsCenter:，再对其他布局调用
+   _performVisualShiftWithLayout:movingItem:toColumn:。
+   后者最终调用 shiftItem:toColumn:topPaddingRows:hideIncompleteRows:。
+   这是提前选择锚点列、改变网格行起点的具体代码路径，而不是逐项移动动画。
+
+4. _isAllowedToShiftItem:inLayout: 用估计的一屏项目数和
+   shiftingRequiredScreensTopDistance 判断是否允许改变行起点。
+   如果不能改变，叠化回退分支会采用相邻的视觉锚点项目，索引计算包含
+   anchorItem + desiredColumn - currentColumn，并限制在有效项目范围。
+   因此不能一概假定每个档位都必须平移整张网格来固定同一张图。
+
+5. _scaleForLayout: 读取相邻布局的列数倒数和行高度来计算缩放。
+   _updateZoomTransforms / 其 block 为各子布局读取视觉锚点的 frame 和
+   normalizedScaleCenter，设置 CGAffineTransform。
+   Tungsten 的 PXGZoomLayout 还保存 primaryLayer、layers、
+   anchorObjectReference 和 anchorViewportCenter。
+
+6. 通过 Swift 类元数据只读定位到 PXStepZoomInteraction.addTransition 的
+   方法体 0x24CA7EAD8：调用 createAnimation，设置 scope=1、curve=0、
+   duration=0.3，再调用 createTransitionWithAnimations。
+   后续交互调用 setIsInteractive: 与 setFractionCompleted:。
+   这是交互式布局 transition 的代码，不应把它等同于全屏统一淡化。
+
+7. PXZoomablePhotosSettings.setDefaultValues 的方法体和只读常量确认：
+   macPinchGestureDampening = 0.5
+   pinchSmoothingDuration = 1/30 秒
+   sliderSmoothingDuration = 0.2 秒
+   rubberBandEffect = 1
+   zoomOutRubberBanding = 5，zoomInRubberBanding = 0.5
+   zoomSpringStiffness = 150，zoomSpringDamping = 1
+   shiftingRequiredScreensTopDistance = 2
+   alphaModeTransitionDuration = 0.3 秒
+   alphaCrossfadeMinDuration = 0.2 秒，alphaCrossfadeMaxDuration = 1.5 秒
+   这些是本机框架初始化的默认值，不能直接当作 Photos 当前运行配置。
+
+8. 本轮进一步解码 147 个相关的 shared-cache Objective-C 调用 stub，确认
+   _updateZoom 取得相邻布局并在循环中调用 setAlpha:；_updateZoomTransforms
+   的 block 对各子布局读取 visualAnchorAssetReferenceItemByLayout、
+   indexPath、frameForItem:，再使用归一化缩放中心与 _scaleForLayout:
+   生成变换。透明度与几何是两条处理路径，不能把透明度变化当成重新排布。
+   _performAnchorAlignmentVisualShiftWithBaseLayout: 统一规划所有布局，
+   也有图库起点、内容移动策略和特定层的回退条件；并非每对列数各写一套动画。
+
+9. Tungsten 的 PXGZoomLayout._configureSublayouts 读取共享的
+   anchorObjectReference / anchorViewportCenter，并在子布局循环中分别调用
+   setAnchorObjectReference: / setAnchorViewportCenter:。这是父容器共享
+   焦点引用和视口中心的实际代码。不能从类名或静态按钮画面推断完整手势曲线。
+
+由 3、5、8、9 和用户实际观察支持的解释：焦点附近相同照片先在两个网格中
+对齐；当同一图像、尺寸和位置吻合时，透明度交接在视觉上仍是连续缩放，
+周围位置不吻合的图片才明显呈现叠化。这是调用关系支持的解释，尚未通过
+逐帧跟踪 Photos 进程的渲染数据直接证明。未确认原版存在 Demo 这种独立
+永久不透明的焦点行图层；Demo 使用该公开 API 实现来保持已接受的视觉规则。
+
+主要方法定位（本机系统缓存中的未加 slide 地址，仅供本版本复核）：
+GridZero PXZoomablePhotosLayout _scaleForLayout:                  0x24CA66608
+GridZero PXZoomablePhotosLayout _isAllowedToShiftItem:inLayout:    0x24CA6FAE4
+GridZero PXZoomablePhotosLayout _performVisualShiftWithLayout:…   0x24CA6FB4C
+GridZero PXZoomablePhotosLayout getBestAnchorColumns:…            0x24CA6FCEC
+GridZero PXZoomablePhotosLayout _updateZoom                       0x24CA69F24
+GridZero PXZoomablePhotosLayout _updateZoomTransforms             0x24CA6C834
+GridZero PXZoomablePhotosLayout transforms block                 0x24CA6CE24
+Tungsten PXGZoomLayout _configureSublayouts                       0x29E1503D4
+工具：xcrun dyld_info -disassemble /System/Library/PrivateFrameworks/GridZero.framework/GridZero
+选择器通过独立辅助进程只读解码 Objective-C 调用 stub；没有创建私有布局实例。
+
+证据边界：上述是本机框架中的真实实现，不等于已经获得 Photos.app 当前
+图库视图的完整运行调用链。默认参数已恢复；运行时配置、完整淡化曲线、档位阈值及处理链尚未
+全部确认或逐帧测量。不能宣称“完全复制苹果源码”或“动画已经一模一样”。
+
+当前 Demo 1.9 修复与原生性核查：
+2026-10-06：撤销交互不同的 1.6 默认 FlowLayout / NSScrollView 整体缩放方案。
+恢复用户认可的焦点行连续缩放、周围叠化、四档展示和原生视图交接代码。
+替代方案的两份源码已删除，构建重新使用原先四份源码。
+1.7 恢复后原先 4064 项检查通过。1.8 在此基础上只修正顶部空位与最小档阻力，
+5299 项检查通过。1.9 修正随后发现的焦点叠化，6355 项检查通过；
+硬件触控板表现不由该检查代替。
+
+AppKit 允许通过 NSCollectionViewLayout 扩展布局，Core Animation 允许应用
+规划图层的几何和透明度。这是公开原生机制；不能把“使用系统默认布局”
+等同于“Photos 的原生交互”。复刻交互的布局规则不能为默认化而删除。
+现有输入、视图复用、滚动、动画时钟、图层渲染和控件分别由 AppKit 与
+Core Animation 负责。兼容列选择、透明度权重、弹性换算和弹簧近似仍是应用
+实现，不是恢复出的苹果源码，也不能称为全部采用系统默认行为。
+顶部空位来自 leadingSlots 被持久交给最终网格。当前方案只在计划的前导格
+会进入可见首行时预先使用完整首行布局，保留原焦点索引；完成后没有横向
+回正阶段。已有中部偏移在滚回首行时清理，保留媒体顺序。
+这项可见首行判定是 Demo 边界规则，未宣称复制原版的两屏阈值。
+1.8 曾通过相邻视觉锚点回退，并淡化未对齐的源焦点图片，导致 9↔7、7↔5
+出现用户指出的焦点叠化。1.9 删除两项处理，不改变已经认可的主体交互。
+
+1.8 保留最大 3 列端的原有弹性；9 列端改为连续、有有限压缩范围的强阻力。
+一般输入下缩小幅度明显更小，长期输入也不会将网格缩至零。松手后仍由原有
+AppKit 动画驱动回弹；反向输入立即响应，中断重新捏合没有尺寸跳变。
+强度参考已核实的 zoomOutRubberBanding=5；压缩映射仍是公开 API 原型的
+近似公式，不是已恢复的 Photos 原版弹性函数，也不能宣称系统默认曲线。
+
+已恢复实现的机制：
+- NSCollectionView 负责静止布局、选择和滚动；缩放时不插值各项目的 x/y。
+- 四套网格在显示前计算完行列、行起点和视觉锚点。
+- 行起点在叠化结束后保留，交给原生集合视图；不再横向回正。
+- 联合选择四档网格的兼容锚点列，焦点行的同一张照片在两套布局中共享几何。
+  动画到达档位时横向偏移自然为零；没有松手后的横向回正阶段。
+- 手势开始时的焦点行锁定为一组不透明图层，直接连续缩放。
+  新进入的照片只随网格叠化，不随透明度改变重新提升为不透明前景。
+  9↔7、7↔5、5↔3 共用这一个规则，没有按档位单独的缩放分支。
+  焦点行缩出窗口的照片被裁切；它们在新布局其他行里的副本仍正常叠化。
+- 尺寸和周围网格透明度由同一手势进度直接控制，不再用独立时钟追赶输入。
+  手指停止时画面停止，反向输入立即反向；不把焦点行整体淡出。
+- 带不透明背景的网格容器按正确的 source-over 权重混合，避免中间帧变暗。
+- 动画结束时图层和原生网格的 frame、行起点与滚动位置一致。
+  最终图层继续覆盖到原生单元格完成布局，避免暴露未完成的布局。
+- 所有网格共用垂直边界修正，避免图库首尾的焦点图片因各自夹紧滚动位置
+  而形成分离的副本。
+- 手势输入采用 0.5 阻尼；大图端没有固定伸展上限，小图端强阻力渐近于有限
+  压缩范围，均持续跟手而非硬截断输入。
+  松手曲线参考 stiffness=150、damping=1 的临界阻尼参数，不增加列数。
+- AppKit 的 NSMagnificationGestureRecognizer 负责输入，NSAnimation 负责
+  松手与按钮动画的主运行循环驱动及普通动画曲线，不再使用 CADisplayLink。
+- 图库起点第一行不留前导空位；所有布局保留原焦点引用，源焦点行仍持续
+  不透明缩放。与正常区域使用同一呈现路径，不按档位分出不同的透明度规则。
+
+1.9 检查范围：
+- 68 张媒体、五种窗口宽度、四个源档位与多种指针索引；可见首行均从首格
+  展示，端点没有横向补正；视觉锚点始终指向有效图片。
+- 900 张媒体的中部焦点对齐后滚回起点，首行恢复完整，媒体顺序和数量不变。
+- 首行、中部和尾部六个相邻缩放方向均保持原焦点；直接检查真实 CALayer
+  中源焦点行的 opacity 始终为 1，且新进入的照片不会被提升到前景。
+- 第一帧至交接最后一帧的焦点尺寸与位置一致；最终仍可见的前景照片与
+  目标原生网格位置吻合，避免移除覆盖层时闪出另一套布局。
+- 最小/最大端点强度比较、400 次持续输入、反向、回弹中断和交接。
+以上为布局、状态和原生视图检查，不是触控板实测或 FPS 测量。
+
+焦点行保留的视觉要求来自用户对系统 Photos 的实际观察。其确切渲染分支
+尚未通过完整运行调用链确认。Demo 的兼容列选择、透明度分配、弹性阻力和
+手势量到尺寸的换算仍属于公开 API 近似实现；已核实的部分默认值用作参考。Demo 只使用 AppKit、QuartzCore、ImageIO。
+实际窗口慢放已观察到叠化中间帧；触控板实际跟手性仍需要人工比较。
+本轮通过 Photos 的原生缩放按钮确认了 3→5→7 的端点布局；按钮操作与
+静态截图不能作为已经测量双指手势中间帧或回弹曲线的证据。
+
+2026-10-07 末行核对：本机 Photos 的图库显示 5238 个项目，5 列与 7 列
+均不能整除项目总数，但底部实际窗口的末行仍完整，最新项目在右下角。
+此为系统原生按钮操作后的窗口观察，未读取或改写 Photos 图库。正式版
+将行起点从最新一端计算，并在首次展示与已到底的尺寸变化后使用
+NSClipView.scroll(to:) 跟随文档底部。中部仍用已确认的兼容焦点规划。
+缩放层保留在 NSCollectionView 文档中，原生集合视图不再设为透明。
+依据苹果 HIG，工具栏背景与滚动边缘效果应采用系统行为，不添加自定义
+工具栏背景来掩盖内容交接；这些指南没有规定本应用的列数或焦点算法。
+https://developer.apple.com/design/human-interface-guidelines/toolbars
+https://developer.apple.com/design/human-interface-guidelines/scroll-views
+
+公开手势 API 文档：
+https://developer.apple.com/documentation/appkit/nsmagnificationgesturerecognizer
+https://developer.apple.com/documentation/appkit/nsmagnificationgesturerecognizer/magnification
+https://developer.apple.com/documentation/appkit/nscollectionviewlayout
+https://developer.apple.com/documentation/appkit/nsanimation
+https://developer.apple.com/documentation/quartzcore/calayer

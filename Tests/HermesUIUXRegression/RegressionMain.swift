@@ -657,6 +657,56 @@ import Foundation
         host.view.layoutSubtreeIfNeeded()
         expect(!scroll.hasVerticalScroller && bar.frame.height < longHeight, "short text must shrink input")
         pass("wrapped long input at wide and narrow widths; scroll, caret and height recovery")
+        let spacingModel = ImporterModel(refreshOnInit: false)
+        spacingModel.downloadPhotos = (0..<71).map { root.appendingPathComponent("spacing-\($0).png") }
+        spacingModel.downloadFilter = .notComposed
+        spacingModel.downloadFilter = .all
+        try await waitUntil { spacingModel.visibleDownloadItems.count == 71 }
+        // Exercise the actual retained/off-window page, split view and native
+        // toolbar lifecycle. Never scroll manually to prepare this assertion.
+        let spacingMain = MainWindowController(model: spacingModel)
+        spacingMain.showWindow(nil)
+        let spacingWindow = spacingMain.window!
+        spacingWindow.setContentSize(NSSize(width: 1309, height: 660))
+        defer { spacingWindow.orderOut(nil) }
+        spacingModel.selection = .downloads
+        try await Task.sleep(for: .milliseconds(100))
+        let spacingRoot = spacingWindow.contentView!
+        spacingRoot.layoutSubtreeIfNeeded()
+        let spacingCollection = descendants(spacingRoot).compactMap { $0 as? NSCollectionView }.first!
+        let spacingScroll = spacingCollection.enclosingScrollView!
+        let spacingLayout = spacingCollection.collectionViewLayout as! ThumbnailGridLayout
+        let spacingBar = descendants(spacingRoot).compactMap { $0 as? DownloadBarView }.first!
+        let spacingPageView = spacingBar.superview!
+        func spacingMaximum() -> CGFloat { max(0, spacingLayout.collectionViewContentSize.height - spacingScroll.contentSize.height) }
+        func checkSpacing() {
+            spacingRoot.layoutSubtreeIfNeeded()
+            let last = spacingLayout.layoutAttributesForItem(at: IndexPath(item: 70, section: 0))!.frame
+            let cell = spacingPageView.convert(last, from: spacingCollection)
+            let barFrame = spacingBar.frame
+            let above = cell.minY - barFrame.maxY
+            let below = barFrame.minY - spacingPageView.bounds.minY
+            expect(abs(above - below) <= 1, "at the bottom, the input must have equal upper/lower margins without a hidden progress reservation")
+            expect(abs(spacingScroll.contentView.documentVisibleRect.minY - spacingMaximum()) <= 1, "startup, native toolbar and input height changes must keep the newest bottom pinned")
+            expect(abs(last.maxX - (spacingLayout.viewportSize.width - spacingLayout.metrics.right)) <= 1, "the newest row must finish at its last column")
+        }
+        checkSpacing()
+        for width in [1000.0, 1200.0, 1309.0] {
+            spacingWindow.setContentSize(NSSize(width: width, height: 660))
+            spacingRoot.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(60))
+            checkSpacing()
+        }
+        let spacingBefore = spacingScroll.contentView.documentVisibleRect.minY
+        spacingModel.downloadShareText = (1...8).map { "布局测试第\($0)行" }.joined(separator: "\n")
+        try await Task.sleep(for: .milliseconds(60))
+        checkSpacing()
+        expect(spacingScroll.contentView.documentVisibleRect.minY > spacingBefore + 50, "growing input must move the last thumbnail row upward")
+        spacingModel.downloadShareText = ""
+        try await Task.sleep(for: .milliseconds(60))
+        checkSpacing()
+        expect(abs(spacingScroll.contentView.documentVisibleRect.minY - spacingBefore) <= 1, "shrinking input restores the same bottom geometry")
+        pass("real main-window gallery opens at newest, stays pinned through native resize and keeps equal input margins through growth/shrink")
         let empty = EmptyStateView(title: "当前筛选下没有项目", symbolName: "photo", message: "")
         model.completedFilter = .added
         empty.showAllAction = { model.completedFilter = .all }
