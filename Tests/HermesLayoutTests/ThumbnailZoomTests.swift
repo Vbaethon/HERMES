@@ -96,6 +96,43 @@ final class ThumbnailZoomTests: XCTestCase {
         }
     }
 
+    func testBadgesStaySuppressedThroughSettlementAndRevealOnlyAfterNativeHandoff() async throws {
+        let (grid, scroll, window) = fixture(count: 70)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let index = 68
+        let frame = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
+                                          metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
+        XCTAssertTrue(zoom.badgesSuppressed)
+        for case let cell as ThumbnailCollectionItem in grid.nsCollectionView.visibleItems() {
+            XCTAssertEqual((cell.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, 0)
+        }
+        zoom.changeGesture(magnification: 0.2)
+        zoom.endGesture()
+        XCTAssertTrue(zoom.badgesSuppressed, "A released finger does not reveal badges while layout is still settling")
+        zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+        XCTAssertTrue(zoom.badgesSuppressed, "Keep metadata suppressed until the native cells replace the held overlay")
+        await Task.yield()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(zoom.overlay.isHidden)
+        XCTAssertFalse(zoom.badgesSuppressed)
+        for case let cell as ThumbnailCollectionItem in grid.nsCollectionView.visibleItems() {
+            XCTAssertEqual((cell.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, 1)
+        }
+
+        let currentFrame = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
+                                                 metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: currentFrame.midX, y: currentFrame.midY))
+        XCTAssertTrue(zoom.badgesSuppressed, "A new gesture cancels the previous native reveal")
+        let reused = ThumbnailCollectionItem()
+        zoom.prepareBadgeAppearance(for: reused)
+        (reused.view as? ThumbnailItemView)?.setBadge("JPG")
+        XCTAssertEqual((reused.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, 0)
+        zoom.finishForInteraction()
+        _ = scroll
+    }
+
     func testHandoffRetainsTheDisplayedFocalBitmapBeforeAsyncCellLoading() async throws {
         let (grid, scroll, window) = fixture()
         defer { window.orderOut(nil) }
@@ -152,22 +189,30 @@ final class ThumbnailZoomTests: XCTestCase {
                 zoom.zoom(to: from)
                 zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
                 await Task.yield()
+                // Each direction starts at the native bottom. A previous zoom
+                // may legitimately keep an older cursor focus above the tail.
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: zoom.maximumOrigin))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                zoom.viewportChanged()
                 assertNewestRowIsFull(zoom)
                 XCTAssertEqual(scroll.contentView.bounds.minY, zoom.maximumOrigin, accuracy: 0.5)
                 let layout = zoom.layout, metrics = layout.metrics, width = layout.viewportSize.width
                 let focal = count - 1
                 let frame = layout.spec.frame(index: focal, width: width, metrics: metrics)
                 zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
-                XCTAssertTrue(try XCTUnwrap(zoom.plan).pinsToNewest)
+                let plan = try XCTUnwrap(zoom.plan)
+                XCTAssertTrue(plan.pinsToNewest)
                 let ratio = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[to], metrics: metrics) / frame.width
                 zoom.changeGesture(magnification: ratio * ratio - 1)
                 XCTAssertEqual(zoom.overlay.focalOpacity(at: focal), 1)
                 zoom.endGesture()
                 zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
                 assertNewestRowIsFull(zoom)
-                XCTAssertEqual(scroll.contentView.bounds.minY, zoom.maximumOrigin, accuracy: 0.5)
-                let expected = layout.spec.frame(index: focal, width: width, metrics: metrics)
-                    .offsetBy(dx: 0, dy: -scroll.contentView.bounds.minY)
+                let nativeFrame = layout.spec.frame(index: focal, width: width, metrics: metrics)
+                let desiredOrigin = nativeFrame.minY + nativeFrame.height * plan.anchor.unitPoint.y - plan.anchor.viewportPoint.y
+                XCTAssertEqual(scroll.contentView.bounds.minY, min(zoom.maximumOrigin, max(0, desiredOrigin)), accuracy: 0.5,
+                               "Zoom preserves the cursor point whenever native scroll boundaries permit it")
+                let expected = nativeFrame.offsetBy(dx: 0, dy: -scroll.contentView.bounds.minY)
                 let displayed = try XCTUnwrap(zoom.overlay.focalFrames[focal])
                 XCTAssertEqual(displayed.midX, expected.midX, accuracy: 0.01)
                 XCTAssertEqual(displayed.midY, expected.midY, accuracy: 0.01)

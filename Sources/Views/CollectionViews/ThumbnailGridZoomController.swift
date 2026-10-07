@@ -71,6 +71,11 @@ final class ThumbnailGridZoomController: NSObject {
     private var handoffGeneration = 0
     private var imageTasks: [Int: Task<Void, Never>] = [:]
     private var imageGeneration = 0
+    private var imageDisplayLink: CADisplayLink?
+    private var imagesNeedDisplay = false
+    private var badgeBitmaps: [String: (image: CGImage?, size: CGSize)] = [:]
+    private var badgeBackingScale: CGFloat = 0
+    private(set) var badgesSuppressed = false
     private var lastPinchFactor: CGFloat = 1
     private var hasShownNewest = false
     private var pendingItems: ItemChange?
@@ -90,6 +95,15 @@ final class ThumbnailGridZoomController: NSObject {
         let start: CFTimeInterval
         let duration: CFTimeInterval
         let curve: NSAnimation
+    }
+
+    @MainActor private final class ImageDisplayTarget: NSObject {
+        weak var owner: ThumbnailGridZoomController?
+        init(owner: ThumbnailGridZoomController) { self.owner = owner }
+        @objc func displayPendingImages(_ displayLink: CADisplayLink) {
+            guard let owner else { displayLink.invalidate(); return }
+            if owner.imagesNeedDisplay { owner.applyOverlay() }
+        }
     }
 
     init(collection: NSCollectionView, items: @escaping () -> [ThumbnailGridItem], sectionInset: NSEdgeInsets) {
@@ -195,8 +209,25 @@ final class ThumbnailGridZoomController: NSObject {
                         height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics,
                         endsAtNewest: true, pinsToNewest: isAtNewest)
         alpha = ZoomAlphaPresentation(level: layout.spec.level)
-        overlay.setAssets(makeArtwork())
+        overlay.setAssets(makeArtwork(), count: layout.count)
+        let badgeOpacity = collection?.visibleItems().compactMap { item -> Float? in
+            guard let label = (item.view as? ThumbnailItemView)?.badgeLabel, !label.isHidden else { return nil }
+            return label.layer?.presentation()?.opacity ?? Float(label.alphaValue)
+        }.first ?? (badgesSuppressed ? 0 : 1)
+        overlay.beginBadgeSuppression(animated: true, fromOpacity: badgeOpacity)
+        setBadgesSuppressed(true, animated: true)
         prefetchPlanImages()
+    }
+
+    func prepareBadgeAppearance(for cell: ThumbnailCollectionItem) {
+        cell.setZoomBadgeSuppressed(badgesSuppressed, animated: false)
+    }
+
+    private func setBadgesSuppressed(_ suppressed: Bool, animated: Bool) {
+        badgesSuppressed = suppressed
+        for case let cell as ThumbnailCollectionItem in collection?.visibleItems() ?? [] {
+            cell.setZoomBadgeSuppressed(suppressed, animated: animated)
+        }
     }
 
     func beginGesture(at point: CGPoint) {
@@ -210,10 +241,12 @@ final class ThumbnailGridZoomController: NSObject {
     }
 
     @objc private func handlePinch(_ recognizer: NSMagnificationGestureRecognizer) {
-        guard let collection else { return }
+        guard collection != nil else { return }
         if recognizer.state == .began {
             lastPinchFactor = 1
-            beginGesture(at: recognizer.location(in: collection))
+            // A trackpad gesture's location is recognizer-specific. Photos-like
+            // zoom uses the visible mouse pointer, just like keyboard zoom.
+            beginGesture(at: pointerInDocument())
         }
         if recognizer.state == .began || recognizer.state == .changed || recognizer.state == .ended {
             let factor = max(0.01, 1 + recognizer.magnification)
@@ -370,6 +403,7 @@ final class ThumbnailGridZoomController: NSObject {
 
     private func applyOverlay() {
         guard let plan, !applying, let scroll, let collection else { return }
+        imagesNeedDisplay = false
         handoffGeneration += 1
         applying = true
         defer { applying = false }
@@ -396,7 +430,11 @@ final class ThumbnailGridZoomController: NSObject {
             context.allowsImplicitAnimation = false
             collection.setFrameSize(layout.collectionViewContentSize)
             layout.invalidateLayout()
-            collection.layoutSubtreeIfNeeded()
+            // Install the target viewport before asking AppKit for its cells.
+            // Laying out at the old scroll origin first creates a second set
+            // of offscreen cells during the same native handoff.
+            // Startup/toolbar sizing still needs AppKit's initial layout pass.
+            if !deferHandoff { collection.layoutSubtreeIfNeeded() }
             let documentOrigin = CGPoint(x: 0, y: min(maximumOrigin, max(0, origin)))
             scroll.contentView.scroll(to: scroll.contentView.convert(documentOrigin, from: collection))
             scroll.reflectScrolledClipView(scroll.contentView)
@@ -422,8 +460,16 @@ final class ThumbnailGridZoomController: NSObject {
                 for item in collection.visibleItems() { item.view.layoutSubtreeIfNeeded() }
                 self.overlay.isHidden = true
                 self.cancelImageTasks()
+                // Wait for layout and elastic settlement before revealing the
+                // native metadata. No unrelated fixed-delay timer is needed.
+                self.setBadgesSuppressed(false, animated: true)
                 CATransaction.commit()
             }
+        } else if plan == nil {
+            // Reduce Motion can commit without ever revealing the overlay.
+            // It needs the same prefetch/display-clock cleanup as a handoff.
+            cancelImageTasks()
+            setBadgesSuppressed(false, animated: false)
         }
     }
 
@@ -438,28 +484,68 @@ final class ThumbnailGridZoomController: NSObject {
         }
     }
 
-    private func makeArtwork() -> [ZoomArtwork] {
+    private func planImageCandidates() -> Set<Int> {
+        guard let plan else { return [] }
+        let width = layout.viewportSize.width, height = layout.viewportSize.height
+        var candidates = Set<Int>()
+        for level in 0..<4 {
+            let p = CGFloat(level)
+            let center = plan.focusCenter(width: width, height: height, count: layout.count, position: p)
+            let state = ZoomLayerState(spec: plan.specs[level], position: p, width: width, focusCenter: center,
+                weights: [0, 0, 0, 0], metrics: layout.metrics)
+            candidates.formUnion(state.visibleIndices(count: layout.count, width: width, height: height, metrics: layout.metrics))
+        }
+        // The strongly resisted nine-column overshoot still reveals a few more
+        // rows in tall windows. Include its full asymptotic range up front.
+        let reducedCenter = plan.focusCenter(width: width, height: height, count: layout.count,
+                                            position: 0, elasticScale: 0.8)
+        let reduced = ZoomLayerState(spec: plan.specs[0], position: 0, width: width,
+            focusCenter: reducedCenter, weights: [0, 0, 0, 0], elasticScale: 0.8, metrics: layout.metrics)
+        candidates.formUnion(reduced.visibleIndices(count: layout.count, width: width, height: height, metrics: layout.metrics))
+        return candidates
+    }
+
+    private func makeArtwork() -> [Int: ZoomArtwork] {
         let scale = collection?.window?.backingScaleFactor ?? 2
-        return items().enumerated().map { index, item in
+        if badgeBackingScale != scale { badgeBitmaps.removeAll(); badgeBackingScale = scale }
+        let entries = items()
+        let sizes = ZoomGeometry.columns.map {
+            max(ThumbnailCollectionStyle.cellSide, ceil(ZoomGeometry.side(width: layout.viewportSize.width,
+                columns: $0, metrics: layout.metrics)))
+        }
+        var artwork: [Int: ZoomArtwork] = [:]
+        for index in planImageCandidates() where entries.indices.contains(index) {
+            let item = entries[index]
             let cell = collection?.item(at: IndexPath(item: index, section: 0)) as? ThumbnailCollectionItem
             let view = cell?.view as? ThumbnailItemView
-            let image = cell?.imageView?.image ?? SystemThumbnailProvider.shared.cachedThumbnail(for: item.url,
+            let image = cell?.imageView?.image ?? sizes.reversed().lazy.compactMap {
+                SystemThumbnailProvider.shared.cachedThumbnail(for: item.url, pointSize: $0,
+                    scale: scale, contentVersion: item.contentVersion)
+            }.first ?? SystemThumbnailProvider.shared.cachedThumbnail(for: item.url,
                 pointSize: ThumbnailCollectionStyle.cellSide, scale: scale, contentVersion: item.contentVersion)
             var value = ZoomArtwork(image: image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
-            let badge: NSTextField?
-            if let label = view?.badgeLabel, !label.isHidden { badge = label }
-            else if let text = item.mediaKind.formatBadgeText(for: item.url) {
-                let label = ThumbnailBadgeLabel(labelWithString: text)
-                label.frame.size = ThumbnailBadgeStyle.size(for: text)
-                badge = label
-            } else { badge = nil }
-            if let badge { value.badge = Self.bitmap(badge); value.badgeSize = badge.bounds.size }
+            let loadedLabel = view?.badgeLabel
+            let text = loadedLabel.flatMap { $0.stringValue.isEmpty ? nil : $0.stringValue }
+                ?? item.mediaKind.formatBadgeText(for: item.url)
+            if let text {
+                if let cached = badgeBitmaps[text] { value.badge = cached.image; value.badgeSize = cached.size }
+                else {
+                    // Snapshot the native label style with full opacity. A live
+                    // label may already be fading out for the previous pinch.
+                    let badge = ThumbnailBadgeLabel(labelWithString: text)
+                    badge.frame.size = ThumbnailBadgeStyle.size(for: text)
+                    collection?.effectiveAppearance.performAsCurrentDrawingAppearance { value.badge = Self.bitmap(badge) }
+                    value.badgeSize = badge.bounds.size
+                    badgeBitmaps[text] = (value.badge, value.badgeSize)
+                }
+            }
             if let ring = view?.ringView, !ring.isHidden { value.ringColor = ring.layer?.borderColor }
             if let failure = view?.failureLabel, !failure.isHidden {
                 value.failure = Self.bitmap(failure); value.failureSize = failure.bounds.size
             }
-            return value
+            artwork[index] = value
         }
+        return artwork
     }
 
     private static func bitmap(_ view: NSView) -> CGImage? {
@@ -470,18 +556,16 @@ final class ThumbnailGridZoomController: NSObject {
 
     private func prefetchPlanImages() {
         guard let plan else { return }
-        let width = layout.viewportSize.width, height = layout.viewportSize.height
-        var candidates = Set<Int>()
-        for level in 0..<4 {
-            let p = CGFloat(level)
-            let center = plan.focusCenter(width: width, height: height, count: layout.count, position: p)
-            let state = ZoomLayerState(spec: plan.specs[level], position: p, width: width, focusCenter: center,
-                weights: [0, 0, 0, 0], metrics: layout.metrics)
-            candidates.formUnion(state.visibleIndices(count: layout.count, width: width, height: height, metrics: layout.metrics))
-        }
+        let candidates = planImageCandidates()
         let entries = items(), generation = imageGeneration
-        let pointSize = ZoomGeometry.side(width: width, columns: 3, metrics: layout.metrics)
+        let pointSize = max(ThumbnailCollectionStyle.cellSide, ceil(ZoomGeometry.side(
+            width: layout.viewportSize.width, columns: 3, metrics: layout.metrics)))
         let scale = collection?.window?.backingScaleFactor ?? 2
+        if imageDisplayLink == nil, let collection {
+            imageDisplayLink = collection.displayLink(target: ImageDisplayTarget(owner: self),
+                selector: #selector(ImageDisplayTarget.displayPendingImages(_:)))
+            imageDisplayLink?.add(to: .main, forMode: .common)
+        }
         for index in candidates.sorted(by: { abs($0 - plan.anchor.index) < abs($1 - plan.anchor.index) }) where entries.indices.contains(index) {
             let item = entries[index]
             imageTasks[index] = Task { [weak self] in
@@ -491,7 +575,9 @@ final class ThumbnailGridZoomController: NSObject {
                       let image = result.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
                 self.overlay.replaceImage(image, at: index)
                 self.imageTasks[index] = nil
-                self.applyOverlay()
+                // Image completions can arrive in a burst. The native display
+                // clock coalesces them; finger input still renders immediately.
+                self.imagesNeedDisplay = true
             }
         }
     }
@@ -500,5 +586,8 @@ final class ThumbnailGridZoomController: NSObject {
         imageGeneration += 1
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        imageDisplayLink?.invalidate()
+        imageDisplayLink = nil
+        imagesNeedDisplay = false
     }
 }

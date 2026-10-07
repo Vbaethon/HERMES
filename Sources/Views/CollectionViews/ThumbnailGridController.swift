@@ -102,6 +102,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
                   let gridItem = (collectionView as? GridCollectionView)?.gridController?.itemByID[itemID] else {
                 return item
             }
+            (collectionView as? GridCollectionView)?.gridController?.zoom.prepareBadgeAppearance(for: thumbnailItem)
             thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion, unavailableMessage: gridItem.unavailableMessage)
             thumbnailItem.onCompositionPresentationEnded = { [weak grid = (collectionView as? GridCollectionView)?.gridController] in
                 // Reuse can happen inside a snapshot application; refresh on the next turn.
@@ -179,6 +180,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
         for case let cell as ThumbnailCollectionItem in collectionView.visibleItems() {
             guard let path = collectionView.indexPath(for: cell),
                   let id = dataSource.itemIdentifier(for: path), let item = itemByID[id] else { continue }
+            zoom.prepareBadgeAppearance(for: cell)
             cell.configure(with: item.url, status: item.status, mediaKind: item.mediaKind,
                            contentVersion: item.contentVersion, unavailableMessage: item.unavailableMessage)
         }

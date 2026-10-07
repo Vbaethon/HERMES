@@ -52,10 +52,42 @@ enum ZoomGeometry {
 
     static func nearestIndex(to point: CGPoint, count: Int, width: CGFloat, spec: ZoomGridSpec, metrics: ZoomMetrics = .demo) -> Int? {
         guard count > 0 else { return nil }
-        return (0..<count).min {
-            distance(point, to: spec.frame(index: $0, width: width, metrics: metrics)) <
-                distance(point, to: spec.frame(index: $1, width: width, metrics: metrics))
+        let columns = Self.columns[spec.level]
+        let pitch = side(width: width, columns: columns, metrics: metrics) + metrics.gap
+        guard pitch.isFinite, pitch > 0, metrics.gap >= 0, point.x.isFinite, point.y.isFinite,
+              metrics.top.isFinite, spec.leadingSlots >= 0 else {
+            // Invalid geometry is not delivered by AppKit; preserve the old
+            // distance/tie semantics rather than converting NaN to an integer.
+            return (0..<count).min {
+                distance(point, to: spec.frame(index: $0, width: width, metrics: metrics)) <
+                    distance(point, to: spec.frame(index: $1, width: width, metrics: metrics))
+            }
         }
+        let firstSlot = spec.leadingSlots, lastSlot = firstSlot + count - 1
+        let firstRow = firstSlot / columns, lastRow = lastSlot / columns
+        let row = Int(min(CGFloat(lastRow), max(CGFloat(firstRow), floor((point.y - metrics.top) / pitch))))
+        // Only the rows bordering the pointer and either incomplete boundary
+        // can win. A complete nearer row dominates any farther complete row.
+        // A partial boundary can instead lose to its neighbouring complete row.
+        let rows = Set([row - 1, row, row + 1, firstRow, firstRow + 1, lastRow - 1, lastRow])
+        var nearest: Int?
+        var nearestDistance = CGFloat.infinity
+        for row in rows where (firstRow...lastRow).contains(row) {
+            let first = max(firstSlot, row * columns)
+            let last = min(lastSlot, row * columns + columns - 1)
+            guard first <= last else { continue }
+            // Each supported preset has at most nine columns. Checking these
+            // few cells retains exact rectangle-gap and equal-distance ties.
+            for slot in first...last {
+                let index = slot - firstSlot
+                let candidate = distance(point, to: spec.frame(index: index, width: width, metrics: metrics))
+                if nearest == nil || candidate < nearestDistance || (candidate == nearestDistance && index < nearest!) {
+                    nearest = index
+                    nearestDistance = candidate
+                }
+            }
+        }
+        return nearest
     }
 
     static func distance(_ point: CGPoint, to frame: CGRect) -> CGFloat {
@@ -156,7 +188,7 @@ struct ZoomPlan {
                 // Plan both library boundaries before the incoming grid becomes
                 // visible. Interior focal alignment uses the same pivot family;
                 // newest-visible layouts use the same chronological end slots.
-                return pinsToNewest || origin < firstRowBottom || lastRowTop < origin + height ? canonical : shifted
+                return origin < firstRowBottom || lastRowTop < origin + height ? canonical : shifted
             }
             if offset == 0 || origin >= shifted.frame(index: 0, width: width, metrics: metrics).maxY + metrics.gap {
                 return shifted
@@ -168,11 +200,16 @@ struct ZoomPlan {
         }
     }
 
-    func focusCenterX(width: CGFloat, position: CGFloat) -> CGFloat {
+    func focusCenterX(width: CGFloat, position: CGFloat, elasticScale: CGFloat = 1) -> CGFloat {
         let p = ZoomGeometry.clamped(position), lower = Int(floor(p)), upper = min(3, lower + 1)
         let a = specs[lower].frame(index: specs[lower].visualAnchorIndex, width: width, metrics: metrics).midX
         let b = specs[upper].frame(index: specs[upper].visualAnchorIndex, width: width, metrics: metrics).midX
+        let side = ZoomGeometry.side(width: width, position: p, metrics: metrics)
+        // Fixed-width endpoint columns constrain the normal zoom pivot. An
+        // elastic extension has no new endpoint slot: scale it around the same
+        // normalized point instead of leaving the photo center stationary.
         return ZoomGeometry.mix(a, b, p - CGFloat(lower))
+            + (0.5 - anchor.unitPoint.x) * side * (elasticScale - 1)
     }
 
     func focusCenter(width: CGFloat, height: CGFloat, count: Int, position: CGFloat,
@@ -186,11 +223,11 @@ struct ZoomPlan {
                 (ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[level], metrics: metrics) + metrics.gap)
             let centerY = spec.frame(index: spec.visualAnchorIndex, width: width, metrics: metrics).midY * scale
             let maxOrigin = max(0, spec.height(count: count, width: width, metrics: metrics) * scale - height)
-            return centerY - (pinsToNewest ? maxOrigin : min(maxOrigin, max(0, centerY - desiredY)))
+            return centerY - min(maxOrigin, max(0, centerY - desiredY))
         }
         // All grids use one boundary adjustment. Independently clamping each
         // grid's scroll origin separates their focal rows near the library ends.
-        return CGPoint(x: focusCenterX(width: width, position: p),
+        return CGPoint(x: focusCenterX(width: width, position: p, elasticScale: elasticScale),
                        y: ZoomGeometry.mix(boundedY(lower), boundedY(upper), p - CGFloat(lower)))
     }
 }

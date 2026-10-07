@@ -1,6 +1,11 @@
 import AppKit
 import QuartzCore
 
+enum ThumbnailZoomBadgeAnimation {
+    // The decoration-alpha transition in this macOS Photos build uses 0.2s.
+    static let duration: TimeInterval = 0.2
+}
+
 struct ZoomLayerState {
     let spec: ZoomGridSpec
     let scale: CGFloat
@@ -56,6 +61,10 @@ final class ThumbnailZoomOverlay: NSView {
         let badge = CALayer()
         let ring = CALayer()
         let failure = CALayer()
+        private var imageContents: CGImage?
+        private var badgeContents: CGImage?
+        private var failureContents: CGImage?
+        private var imageAspect: CGFloat = 1
 
         override init() {
             super.init()
@@ -66,7 +75,6 @@ final class ThumbnailZoomOverlay: NSView {
             ring.cornerCurve = .continuous
             addSublayer(artwork)
             addSublayer(ring)
-            addSublayer(badge)
             addSublayer(failure)
         }
         override init(layer: Any) { super.init(layer: layer) }
@@ -74,59 +82,109 @@ final class ThumbnailZoomOverlay: NSView {
 
         @MainActor func update(_ value: ZoomArtwork, cell: CGRect, scale: CGFloat) {
             frame = cell
-            let aspect = value.image.map { CGFloat($0.width) / CGFloat($0.height) } ?? 1
-            let w = min(cell.width, cell.height * aspect), h = min(cell.height, cell.width / aspect)
+            // Core Animation retains the bitmap until it changes. Reassigning
+            // every tile's contents on each gesture event needlessly rebuilds
+            // the same render state, including the AppKit badge snapshots.
+            if imageContents !== value.image {
+                imageContents = value.image
+                artwork.contents = value.image
+                imageAspect = value.image.map { CGFloat($0.width) / CGFloat($0.height) } ?? 1
+            }
+            let w = min(cell.width, cell.height * imageAspect), h = min(cell.height, cell.width / imageAspect)
             let photo = CGRect(x: (cell.width - w) / 2, y: (cell.height - h) / 2, width: w, height: h)
             artwork.frame = photo
-            artwork.contents = value.image
             artwork.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius / scale
-            ring.isHidden = value.ringColor == nil
+            ring.isHidden = value.image == nil || value.ringColor == nil
             ring.frame = photo.insetBy(dx: -4 / scale, dy: -4 / scale)
             ring.borderColor = value.ringColor
             ring.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth / scale
             ring.cornerRadius = (ThumbnailCollectionStyle.imageCornerRadius + 4) / scale
-            badge.isHidden = value.badge == nil
-            badge.contents = value.badge
+            // An offscreen asset can have badge text before its thumbnail is
+            // available. It must not leave a floating badge on an empty tile.
+            badge.isHidden = isHidden || value.image == nil || value.badge == nil
+            if badgeContents !== value.badge {
+                badgeContents = value.badge
+                badge.contents = value.badge
+                if let image = value.badge, value.badgeSize.width > 0 {
+                    badge.contentsScale = CGFloat(image.width) / value.badgeSize.width
+                }
+            }
             let badgeSize = CGSize(width: value.badgeSize.width / scale, height: value.badgeSize.height / scale)
             badge.frame = CGRect(x: photo.maxX - badgeSize.width - ThumbnailBadgeStyle.inset / scale,
                                  y: photo.maxY - badgeSize.height - ThumbnailBadgeStyle.inset / scale,
                                  width: badgeSize.width, height: badgeSize.height)
+                .offsetBy(dx: cell.minX, dy: cell.minY)
             failure.isHidden = value.failure == nil
-            failure.contents = value.failure
+            if failureContents !== value.failure {
+                failureContents = value.failure
+                failure.contents = value.failure
+                if let image = value.failure, value.failureSize.width > 0 {
+                    failure.contentsScale = CGFloat(image.width) / value.failureSize.width
+                }
+            }
             failure.frame = CGRect(x: photo.minX + 4 / scale, y: photo.minY + 4 / scale,
                                    width: min(value.failureSize.width / scale, max(0, photo.width - 8 / scale)),
                                    height: value.failureSize.height / scale)
+        }
+
+        func setPresentationHidden(_ hidden: Bool) {
+            isHidden = hidden
+            badge.isHidden = hidden || imageContents == nil || badgeContents == nil
         }
     }
 
     private final class Grid {
         let viewport = CALayer()
         let root = CALayer()
+        let decorations = CALayer()
         var tiles: [Int: Tile] = [:]
+        private var visibleRange = 0..<0
+        private var reusableTiles: [Tile] = []
         init() {
             viewport.masksToBounds = true
             viewport.allowsGroupOpacity = true
             root.anchorPoint = .zero
             root.position = .zero
+            decorations.anchorPoint = .zero
+            decorations.position = .zero
+            root.addSublayer(decorations)
             viewport.addSublayer(root)
         }
         func tile(at index: Int) -> Tile {
             if let tile = tiles[index] { return tile }
-            let tile = Tile()
-            root.addSublayer(tile)
+            let tile = reusableTiles.popLast() ?? Tile()
+            root.insertSublayer(tile, below: decorations)
+            decorations.addSublayer(tile.badge)
             tiles[index] = tile
             return tile
         }
-        func retain(_ indices: Set<Int>) {
-            for index in Array(tiles.keys) where !indices.contains(index) {
-                tiles.removeValue(forKey: index)?.removeFromSuperlayer()
+        func retain(_ indices: Range<Int>) {
+            guard indices != visibleRange else { return }
+            for index in visibleRange where !indices.contains(index) {
+                if let tile = tiles.removeValue(forKey: index) {
+                    tile.removeFromSuperlayer()
+                    tile.badge.removeFromSuperlayer()
+                    reusableTiles.append(tile)
+                }
             }
+            visibleRange = indices
         }
     }
 
     private let grids = (0..<4).map { _ in Grid() }
     private let focalGrid = Grid()
-    private var assets: [ZoomArtwork] = []
+    private var assets: [Int: ZoomArtwork] = [:]
+    private var assetCount = 0
+    private var resolvedBackground: CGColor?
+    private var badgesSuppressed = false
+    /// The gallery fill behind any transparent collection/scroll backgrounds.
+    var backgroundColor: NSColor = .windowBackgroundColor {
+        didSet {
+            guard backgroundColor != oldValue else { return }
+            resolvedBackground = nil
+            updateBackgroundIfNeeded()
+        }
+    }
     private(set) var states: [ZoomLayerState] = []
     private(set) var focalFrames: [Int: CGRect] = [:]
     override var isFlipped: Bool { true }
@@ -143,17 +201,87 @@ final class ThumbnailZoomOverlay: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func setAssets(_ values: [ZoomArtwork]) { assets = values }
-    func image(at index: Int) -> CGImage? { assets.indices.contains(index) ? assets[index].image : nil }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        resolvedBackground = nil
+        updateBackgroundIfNeeded()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        resolvedBackground = nil
+        updateBackgroundIfNeeded()
+    }
+
+    private func updateBackgroundIfNeeded() {
+        guard resolvedBackground == nil else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolvedBackground = backgroundColor.cgColor
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.backgroundColor = resolvedBackground
+        for grid in grids { grid.viewport.backgroundColor = resolvedBackground }
+        CATransaction.commit()
+    }
+
+    func setAssets(_ values: [ZoomArtwork]) {
+        setAssets(Dictionary(uniqueKeysWithValues: values.enumerated().map { ($0.offset, $0.element) }),
+                  count: values.count)
+    }
+    func setAssets(_ values: [Int: ZoomArtwork], count: Int) {
+        assetCount = max(0, count)
+        assets = values
+    }
+    func image(at index: Int) -> CGImage? { assets[index]?.image }
     func replaceImage(_ image: CGImage, at index: Int) {
-        guard assets.indices.contains(index) else { return }
-        assets[index].image = image
+        guard (0..<assetCount).contains(index) else { return }
+        assets[index, default: ZoomArtwork()].image = image
+    }
+
+    func beginBadgeSuppression(animated: Bool, fromOpacity: Float? = nil) {
+        if let fromOpacity, fromOpacity.isFinite {
+            let opacity = min(1, max(0, fromOpacity))
+            badgesSuppressed = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for grid in grids + [focalGrid] {
+                grid.decorations.removeAnimation(forKey: "thumbnailZoomBadgeOpacity")
+                grid.decorations.opacity = opacity
+            }
+            CATransaction.commit()
+        }
+        setZoomBadgeSuppressed(true, animated: animated)
+    }
+
+    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
+        guard badgesSuppressed != suppressed else { return }
+        badgesSuppressed = suppressed
+        let target: Float = suppressed ? 0 : 1
+        for grid in grids + [focalGrid] {
+            let layer = grid.decorations
+            let current = layer.presentation()?.opacity ?? layer.opacity
+            layer.removeAnimation(forKey: "thumbnailZoomBadgeOpacity")
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.opacity = target
+            CATransaction.commit()
+            if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && current != target {
+                let animation = CABasicAnimation(keyPath: "opacity")
+                animation.fromValue = current
+                animation.toValue = target
+                animation.duration = ThumbnailZoomBadgeAnimation.duration
+                animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                layer.add(animation, forKey: "thumbnailZoomBadgeOpacity")
+            }
+        }
     }
 
     func render(position: CGFloat, plan: ZoomPlan, weights: [CGFloat], elasticScale: CGFloat = 1) {
-        guard !assets.isEmpty, bounds.width > 0 else { return }
+        guard assetCount > 0, bounds.width > 0 else { return }
+        updateBackgroundIfNeeded()
         let width = bounds.width, height = bounds.height, metrics = plan.metrics
-        let center = plan.focusCenter(width: width, height: height, count: assets.count,
+        let center = plan.focusCenter(width: width, height: height, count: assetCount,
                                       position: position, elasticScale: elasticScale)
         states = plan.specs.map {
             ZoomLayerState(spec: $0, position: position, width: width, focusCenter: center,
@@ -163,7 +291,8 @@ final class ThumbnailZoomOverlay: NSView {
         let master = states[plan.sourceSpec.level]
         let columns = ZoomGeometry.columns[master.spec.level]
         let rowStart = ((plan.anchor.index + master.spec.leadingSlots) / columns) * columns - master.spec.leadingSlots
-        for index in max(0, rowStart)..<min(assets.count, rowStart + columns) {
+        let focalRange = max(0, rowStart)..<min(assetCount, rowStart + columns)
+        for index in focalRange {
             focalFrames[index] = master.cellFrame(index: index, width: width, metrics: metrics)
         }
 
@@ -172,34 +301,33 @@ final class ThumbnailZoomOverlay: NSView {
         for (level, grid) in grids.enumerated() {
             let state = states[level]
             grid.viewport.frame = bounds
-            grid.viewport.backgroundColor = NSColor.windowBackgroundColor.cgColor
             grid.viewport.isHidden = state.weight == 0
             grid.viewport.opacity = state.opacity
             guard state.weight > 0 else { continue }
             grid.root.setAffineTransform(CGAffineTransform(a: state.scale, b: 0, c: 0, d: state.scale,
                                                           tx: state.offset.x, ty: state.offset.y))
-            let visible = state.visibleIndices(count: assets.count, width: width, height: height, metrics: metrics)
-            grid.retain(Set(visible))
+            let visible = state.visibleIndices(count: assetCount, width: width, height: height, metrics: metrics)
+            grid.retain(visible)
             for index in visible {
                 let tile = grid.tile(at: index)
                 let canonical = state.spec.frame(index: index, width: width, metrics: metrics)
                 let side = state.side / state.scale
-                tile.update(assets[index], cell: CGRect(x: canonical.midX - side / 2, y: canonical.midY - side / 2,
+                tile.update(assets[index] ?? ZoomArtwork(), cell: CGRect(x: canonical.midX - side / 2, y: canonical.midY - side / 2,
                                                        width: side, height: side), scale: state.scale)
                 let displayed = state.cellFrame(index: index, width: width, metrics: metrics)
-                tile.isHidden = focalFrames[index].map {
+                tile.setPresentationHidden(focalFrames[index].map {
                     abs($0.midX - displayed.midX) + abs($0.midY - displayed.midY) < 0.01
-                } ?? false
+                } ?? false)
             }
         }
         focalGrid.viewport.frame = CGRect(x: metrics.left, y: 0,
             width: max(0, width - metrics.left - metrics.right), height: height)
-        focalGrid.retain(Set(focalFrames.keys))
+        focalGrid.retain(focalRange)
         for (index, cell) in focalFrames {
             let tile = focalGrid.tile(at: index)
-            tile.isHidden = false
+            tile.setPresentationHidden(false)
             tile.opacity = 1
-            tile.update(assets[index], cell: cell.offsetBy(dx: -metrics.left, dy: 0), scale: 1)
+            tile.update(assets[index] ?? ZoomArtwork(), cell: cell.offsetBy(dx: -metrics.left, dy: 0), scale: 1)
         }
         CATransaction.commit()
     }

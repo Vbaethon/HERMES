@@ -686,7 +686,7 @@ import Foundation
             let barFrame = spacingBar.frame
             let above = cell.minY - barFrame.maxY
             let below = barFrame.minY - spacingPageView.bounds.minY
-            expect(abs(above - below) <= 1, "at the bottom, the input must have equal upper/lower margins without a hidden progress reservation")
+            expect(abs(above - below) <= 1, "at the bottom, the input must have equal upper/lower margins without a hidden progress reservation; above=\(above), below=\(below), origin=\(spacingScroll.contentView.documentVisibleRect.minY), maximum=\(spacingMaximum()), viewport=\(spacingLayout.viewportSize)")
             expect(abs(spacingScroll.contentView.documentVisibleRect.minY - spacingMaximum()) <= 1, "startup, native toolbar and input height changes must keep the newest bottom pinned")
             expect(abs(last.maxX - (spacingLayout.viewportSize.width - spacingLayout.metrics.right)) <= 1, "the newest row must finish at its last column")
         }

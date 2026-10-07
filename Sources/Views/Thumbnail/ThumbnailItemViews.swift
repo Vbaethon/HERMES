@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 final class ThumbnailCollectionItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("ThumbnailCollectionItem")
@@ -68,6 +69,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeLabel.isBordered = false
         badgeLabel.drawsBackground = false
         badgeLabel.lineBreakMode = .byClipping
+        badgeLabel.wantsLayer = true
         badgeLabel.isHidden = true
         rootView.addSubview(badgeLabel)
         rootView.badgeLabel = badgeLabel
@@ -116,6 +118,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         imageView?.image = nil
         imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
+        thumbnailView?.finishZoomBadgeAnimation()
         thumbnailView?.updateImageFrame(for: nil)
     }
 
@@ -161,6 +164,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: selected)
     }
 
+    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
+        thumbnailView?.setZoomBadgeSuppressed(suppressed, animated: animated)
+    }
+
     func retainZoomThumbnail(_ image: CGImage, for url: URL, contentVersion: TimeInterval) {
         guard representedURL == url, representedContentVersion == contentVersion else { return }
         let scale = view.window?.backingScaleFactor ?? 2
@@ -175,7 +182,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             let kindChanged = self.mediaKind != mediaKind
             self.mediaKind = mediaKind
             if kindChanged { badgeTask?.cancel(); badgeTask = nil; thumbnailView?.setBadge(nil) }
-            if kindChanged || (mediaKind.showsDuration && badgeTask == nil && thumbnailView?.badgeLabel?.isHidden == true) {
+            if kindChanged || (mediaKind.showsDuration && badgeTask == nil && thumbnailView?.badgeLabel?.stringValue.isEmpty == true) {
                 loadBadgeIfNeeded(for: url, mediaKind: mediaKind)
             }
             updateBorderAppearance(isSelected: isSelected)
@@ -503,6 +510,7 @@ final class ThumbnailItemView: NSView {
     private var interactiveFrame: NSRect = .zero
     private var measuredFailureText: String?
     private var failureFittingSize: NSSize = .zero
+    private var zoomBadgeSuppressed = false
     var onEffectiveAppearanceChanged: (() -> Void)?
 
     override func viewDidChangeEffectiveAppearance() {
@@ -557,8 +565,31 @@ final class ThumbnailItemView: NSView {
         }
         guard badgeLabel.stringValue != text || badgeLabel.isHidden else { return }
         badgeLabel.stringValue = text
-        badgeLabel.isHidden = false
         updateBadgeFrames()
+    }
+
+    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
+        guard zoomBadgeSuppressed != suppressed else { return }
+        zoomBadgeSuppressed = suppressed
+        guard let badgeLabel else { return }
+        let target: CGFloat = suppressed ? 0 : 1
+        let current = CGFloat(badgeLabel.layer?.presentation()?.opacity ?? Float(badgeLabel.alphaValue))
+        badgeLabel.layer?.removeAnimation(forKey: "opacity")
+        badgeLabel.alphaValue = current
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && current != target {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = ThumbnailZoomBadgeAnimation.duration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                badgeLabel.animator().alphaValue = target
+            }
+        } else {
+            badgeLabel.alphaValue = target
+        }
+    }
+
+    func finishZoomBadgeAnimation() {
+        badgeLabel?.layer?.removeAnimation(forKey: "opacity")
+        badgeLabel?.alphaValue = zoomBadgeSuppressed ? 0 : 1
     }
 
     private func updateRingFrame() {
@@ -575,7 +606,13 @@ final class ThumbnailItemView: NSView {
             let frame = NSRect(x: baseFrame.minX + 8, y: baseFrame.minY + 12, width: max(0, baseFrame.width - 16), height: 18)
             if placeholderLabel.frame != frame { placeholderLabel.frame = frame }
         }
-        if let badgeLabel, !badgeLabel.isHidden {
+        if let badgeLabel {
+            // Format/duration text can arrive before the asynchronous image.
+            // Keep it for reuse, but never position a free-standing badge on
+            // the cell's fallback bounds while there is no displayed artwork.
+            let showsBadge = !interactiveFrame.isEmpty && !badgeLabel.stringValue.isEmpty
+            badgeLabel.isHidden = !showsBadge
+            guard showsBadge else { return }
             let labelSize = (badgeLabel as? ThumbnailBadgeLabel)?.badgeSize
                 ?? ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
             let origin = NSPoint(

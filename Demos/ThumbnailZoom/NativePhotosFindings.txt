@@ -176,3 +176,36 @@ https://developer.apple.com/documentation/appkit/nsmagnificationgesturerecognize
 https://developer.apple.com/documentation/appkit/nscollectionviewlayout
 https://developer.apple.com/documentation/appkit/nsanimation
 https://developer.apple.com/documentation/quartzcore/calayer
+
+2026-10-07 角标时序核对（本机 macOS 27.0.1 / 26A434）：
+
+- GridZero 的 PXZoomablePhotosLayout 保存独立的
+  _decorationAlphaAnimator（实例偏移 1240），initWithViewModel: 在
+  0x24CA64B48 起以 initWithValue:1 创建，并订阅装饰透明度的变更。
+- _updateZoom 的 0x24CA6AFC0–0x24CA6B0A4 读取
+  hideBadgesDuringZoom。启用时，zoomState.isAnimating 仍为真，且交互
+  正在进行或缩放值偏离 1 至少 0.001，就把装饰 alpha 目标设为 0；
+  稳定后设为 1。zoomState 的 +0x38 标志同时由 layout.isAnimating
+  方法读取；+0x3a 在 _updateZoomState 中来自 isPinching 与
+  isInteractiveZooming 的合并状态。
+- 该分支调用 performChangesWithDuration:curve:changes:，地址
+  0x24CA6B098 读取 0x24CAAD550 的 float64，独立只读解码结果为
+  0.2 秒；curve 参数是私有枚举值 1。尚未确认该枚举对应公开曲线。
+- _updateDecorationVisibility（0x24CA6B414）读取 animator 的
+  presentationValue 与 value，再经装饰图层的 setAlpha: 更新呈现。
+  这条已核对分支未出现独立的固定延迟调用。用户观察到的“结束后
+  延迟”与等待布局/弹性动画结束再恢复的机制一致；不能据此编造
+  额外固定毫秒数，也未测量 Photos 当前运行实例的实际帧间隔。
+
+本次公开 API 实现：metadata 在手势、回弹、原生视图交接期间保持统一
+抑制；交接完成后才用 0.2 秒淡入。不额外加入任意固定延迟。Overlay
+每个 grid 的角标共用 decorations 父层 opacity，render 不改这个 opacity；
+新进入的层因此不会在缩放中突然显示角标。正式原生 cell 保留 NSTextField
+角标与文本，仅由 NSAnimationContext 管理 alpha；重入从 presentation
+opacity 取消旧动画，新复用 cell 与异步文字服从相同状态，无图仍隐藏。
+淡入/淡出使用公开 easeInEaseOut，属于尚未核实私有 curve=1 的近似。
+以上实现不加载、链接或调用 Photos 私有框架。
+
+公开动画 API 依据：
+https://developer.apple.com/documentation/appkit/nsanimationcontext/duration
+https://developer.apple.com/documentation/quartzcore/cabasicanimation
