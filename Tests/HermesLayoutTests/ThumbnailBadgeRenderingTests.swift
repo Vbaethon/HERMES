@@ -24,20 +24,26 @@ final class ThumbnailBadgeRenderingTests: XCTestCase {
         defer { window.orderOut(nil); window.close() }
 
         let badge = try XCTUnwrap(view.badgeLabel)
-        let reference = NSTextField(labelWithString: "")
-        reference.isBordered = false
-        reference.drawsBackground = false
-        reference.alignment = .center
-        reference.lineBreakMode = .byClipping
-        reference.textColor = ThumbnailBadgeStyle.textColor
+        let reference = NSView()
+        let nativeLabel = NSTextField(labelWithString: "")
+        nativeLabel.alignment = .center
+        nativeLabel.lineBreakMode = .byClipping
+        nativeLabel.textColor = ThumbnailBadgeStyle.textColor
+        nativeLabel.wantsLayer = true
+        nativeLabel.translatesAutoresizingMaskIntoConstraints = false
+        reference.addSubview(nativeLabel)
+        NSLayoutConstraint.activate([
+            nativeLabel.centerXAnchor.constraint(equalTo: reference.centerXAnchor),
+            nativeLabel.centerYAnchor.constraint(equalTo: reference.centerYAnchor)
+        ])
         reference.wantsLayer = true
         reference.layer?.cornerRadius = ThumbnailBadgeStyle.cornerRadius
         reference.layer?.masksToBounds = true
         view.addSubview(reference)
         for text in ["PNG", "HEIC", "JPG", "WEBP", "0:09", "12:34", "PNG"] {
             view.setBadge(text)
-            reference.stringValue = text
-            reference.font = ThumbnailBadgeStyle.font(for: text)
+            nativeLabel.stringValue = text
+            nativeLabel.font = ThumbnailBadgeStyle.font(for: text)
             reference.frame = badge.frame.offsetBy(dx: -60, dy: 0)
             item.isSelected.toggle()
             view.layoutSubtreeIfNeeded()
@@ -54,6 +60,15 @@ final class ThumbnailBadgeRenderingTests: XCTestCase {
             let differences = zip(actual, expected).filter { $0 != $1 }.count
             XCTAssertEqual(differences, 0,
                            "\(text): the displayed badge must match one native label, including after selection and reuse")
+            let label = try XCTUnwrap(badge.subviews.first as? NSTextField)
+            XCTAssertEqual(label.frame.height, label.intrinsicContentSize.height,
+                           "The background must not stretch AppKit's native text line")
+            let alignment = label.alignmentRect(forFrame: label.frame)
+            // Native alignment rects can round to half a backing pixel.
+            let rounding = 0.5 / window.backingScaleFactor
+            XCTAssertEqual(alignment.midX, badge.bounds.midX, accuracy: rounding)
+            XCTAssertEqual(alignment.midY, badge.bounds.midY, accuracy: rounding)
+            try assertTextCentered(in: actual, size: badge.bounds.size, scale: window.backingScaleFactor, text: text)
 
             // Pinch artwork takes a snapshot before attaching the label to a window.
             let unattached = ThumbnailBadgeLabel(labelWithString: text)
@@ -78,7 +93,28 @@ final class ThumbnailBadgeRenderingTests: XCTestCase {
             let nativeSnapshotPixels = try pixels(of: snapshotLayer, scale: window.backingScaleFactor)
             XCTAssertEqual(zip(zoomPixels, nativeSnapshotPixels).filter { $0 != $1 }.count, 0,
                            "\(text): zoom artwork must retain the same native text and rounded background")
+            try assertTextCentered(in: zoomPixels, size: badge.bounds.size, scale: scale, text: text)
         }
+    }
+
+    private func assertTextCentered(in pixels: Data, size: NSSize, scale: CGFloat, text: String) throws {
+        let width = Int(ceil(size.width * scale))
+        let height = Int(ceil(size.height * scale))
+        var xs: [Int] = [], ys: [Int] = []
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = (y * width + x) * 4
+                if pixels[offset] > 180 && pixels[offset + 1] > 180 && pixels[offset + 2] > 180 {
+                    xs.append(x); ys.append(y)
+                }
+            }
+        }
+        let minX = try XCTUnwrap(xs.min()), maxX = try XCTUnwrap(xs.max())
+        let minY = try XCTUnwrap(ys.min()), maxY = try XCTUnwrap(ys.max())
+        XCTAssertEqual(Double(minX + maxX) / 2, Double(width - 1) / 2, accuracy: 1,
+                       "\(text): visible glyphs must have balanced left and right padding")
+        XCTAssertEqual(Double(minY + maxY) / 2, Double(height - 1) / 2, accuracy: 1,
+                       "\(text): visible glyphs must have balanced top and bottom padding")
     }
 
     func testBadgeRetainsReadableStaticTextSemanticsWhenItsValueChanges() throws {

@@ -599,3 +599,56 @@ TeamIdentifier=FJP7ATDRW3。安装前后及启动后 77/43 条记录、13 项
 业务设置、242 个媒体/收据文件的校验保持一致。安装版 HEIC/JPG
 和视频时长角标清晰，完整往返滚动后文字正常；旧管理版本由事务
 安装流程清理。
+
+2026-10-07 3.0.10 角标居中与列表扫描边界修正：
+
+原生 NSTextField 的 alignment=.center 只解决水平对齐。10 点系统字体
+的原生控件行高为 13 点，原来把控件拉高到 16 点黑底，实际字形向上
+偏约 1.5 点。现在文字使用标准 NSTextField(labelWithString:)，保持
+intrinsicContentSize，由 AppKit Auto Layout 的 centerX/centerY 约束
+居中到圆角背景。背景容器只负责黑底，不绘制文字；文字仍由 AppKit
+管理栅格和无障碍 cell。PNG/HEIC/JPG/WEBP 与单宽数字时长共用
+这一实现，缩放缓存截图也先完成同一原生布局。可见字形的上下、左右
+边距以像素验证，原生 alignment rect 允许半个屏幕像素的量化误差。
+参考：
+https://developer.apple.com/library/archive/documentation/UserExperience/Conceptual/AutolayoutPG/ViewswithIntrinsicContentSize.html
+
+用户要求移除只作用于当前列表，手动刷新仍恢复磁盘文件，因此没有
+添加持久化排除记录。FSEvents 通知和应用内删除改为只核对当前列表
+已有的资源，不递归发现目录里的其他文件，也不把下载页已有的普通
+资源重新加入被移除的完成记录。配对资源缺失一个成员时，已有项目
+仍更新为幸存的单照片/视频；不可访问的目录仍保留记录。后台线程
+核对元数据，主线程通过版本、目录与活动下载身份检查后合并差异。
+手动刷新、启动、选择目录和下载收尾保留各自明确的扫描入口。
+旧扫描在移除之后返回时丢弃其结果，不因移除自动重启扫描；随后
+新发起的手动刷新仍能完整恢复。没有变化的列表和状态不重复发布。
+Apple 将文件事件定位为变更提示，事件可能合并、丢失，不能把事件
+本身当作集合成员关系。这里“自动核对已有项目、手动发现”是按用户
+要求制定的产品规则，不声称获取了 Photos 未公开的内部代码。
+参考：
+https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html
+
+开始、下载器、已完成三个图库页面原已共用 ThumbnailGridController，
+其原生 NSCollectionView/NSScrollView、NSCollectionViewPrefetching、
+缩略图缓存与栅格复用继续集中在此。没有再叠加一套滚动调度器。
+
+验证：27 项角标、原生文本缓存与缩放 artwork 专项测试通过，包含
+选中状态切换、控件复用、空值及未附加窗口的截图。真实递归文件事件
+回归覆盖先移除再删除、外部删除、不发现未知文件、手动恢复和在途
+扫描失效，使用隔离偏好域与临时文件，不改变用户媒体。
+74 个本地媒体的六轮 120Hz 同源滚动对照，五/三/九列各首次与重访
+6 秒；新旧均无超过 25ms 的间隔。九列首次/重访 P95 旧为
+17.54/16.97ms、新为 16.96/16.66ms；三列旧为 11.71/8.35ms、
+新为 8.38/8.35ms。新实现主线程滚动工作 P95 六轮最高 2.37ms。
+这支持此次原生居中改动没有明显滚动退化，不能概括为所有场景恒定
+120fps。编译和其他界面测试没有与最终测量同时运行。
+
+最终共享应用回归通过：60 个模型场景、18 组实际主窗口 UI/UX、
+27 项原生媒体检查。3.0.10（681）已替换并启动 /Applications/HERMES.app，
+严格签名校验通过，TeamIdentifier=FJP7ATDRW3。安装替换前后的
+78/43 条记录、13 项业务设置、241 个媒体/收据文件校验保持一致。
+启动后核对时，一张下载 JPG 已实际移到用户废纸篓，完成记录随之
+成为 77 条；其余媒体散列和非记录业务设置保持一致。用户已确认
+这是其刚刚执行的删除操作，保留当前废纸篓及列表状态。
+安装版深色外观 HEIC/JPG/时长黑底角标已目视确认居中，图库上下
+完整往返后文字复用正常；没有操作用户媒体的移除或废纸篓功能。

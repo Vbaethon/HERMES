@@ -8,7 +8,7 @@ import Foundation
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
         let fm = FileManager.default
         var checks = 0
-        func pass(_ name: String) { checks += 1; print("PASS: \(name)") }
+        func pass(_ name: String) { checks += 1; print("PASS: \(name)"); fflush(stdout) }
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
             precondition(condition(), message)
         }
@@ -1266,7 +1266,7 @@ import Foundation
             try fm.removeItem(at: watchedOutput.videoURL)
             try fm.removeItem(at: watchedDownload.videoURL)
             try await waitUntil {
-                watched.completed.count == 2 && watched.completed.allSatisfy { $0.mediaKind == .photo }
+                watched.completed.count == 1 && watched.completed.allSatisfy { $0.mediaKind == .photo }
                     && watched.downloadPairs.isEmpty && watched.visibleDownloadItems.first?.mediaKind == .photo
             }
             expect(watched.visibleDownloadItems.first?.imageURL == watchedDownload.imageURL, "automatic download refresh must keep the available cover")
@@ -1275,6 +1275,89 @@ import Foundation
             try await waitUntil { watched.completed.isEmpty && watched.visibleDownloadItems.isEmpty }
         }
         pass("recursive filesystem monitoring refreshes both pages after local member deletion and complete removal")
+
+        do {
+            let membership = try model("manual-discovery-membership")
+            let hiddenExport = try pair(membership.outputFolder, "hidden")
+            let deletedExport = try pair(membership.outputFolder, "deleted")
+            let hiddenPhoto = membership.downloadOutputFolder.appendingPathComponent("hidden.jpg")
+            let deletedPhoto = membership.downloadOutputFolder.appendingPathComponent("deleted.jpg")
+            let watchedPhoto = membership.downloadOutputFolder.appendingPathComponent("watched.jpg")
+            for url in [hiddenPhoto, deletedPhoto, watchedPhoto] { try Data("fixture".utf8).write(to: url) }
+            membership.refreshCompleted(); membership.refreshDownloads()
+            try await waitUntil { membership.completed.count == 5 && membership.visibleDownloadItems.count == 3 && !membership.hasActiveWork }
+            let realCompletedScanner = membership.completedScanner
+            let realDownloadScanner = membership.downloadScanner
+            actor ScanCalls {
+                var count = 0
+                func add() { count += 1 }
+            }
+            let calls = ScanCalls()
+            membership.completedScanner = { folder in await calls.add(); return try await realCompletedScanner(folder) }
+            membership.downloadScanner = { folder, excluded in await calls.add(); return await realDownloadScanner(folder, excluded) }
+            membership.startMonitoringLocalFiles()
+            defer { membership.stopMonitoringLocalFiles() }
+            membership.selectedCompletedIDs = [hiddenExport.imageURL.path]
+            membership.clearVisibleCompleted(deleteFiles: false)
+            membership.selectedDownloadItemIDs = ["photo:\(hiddenPhoto.path)"]
+            membership.clearVisibleDownloads(deleteFiles: false)
+            membership.trashFiles = { urls in
+                for url in urls { try! fm.removeItem(at: url) }
+                return nil
+            }
+            membership.selectedCompletedIDs = [deletedExport.imageURL.path]
+            membership.clearVisibleCompleted(deleteFiles: true)
+            membership.selectedDownloadItemIDs = ["photo:\(deletedPhoto.path)"]
+            membership.clearVisibleDownloads(deleteFiles: true)
+            let newExport = membership.outputFolder.appendingPathComponent("new.jpg")
+            let newDownload = membership.downloadOutputFolder.appendingPathComponent("new.jpg")
+            try Data("new".utf8).write(to: newExport)
+            try Data("new".utf8).write(to: newDownload)
+            try fm.removeItem(at: watchedPhoto)
+            try await waitUntil { !membership.visibleDownloadItems.contains { $0.imageURL == watchedPhoto } && !membership.hasActiveWork }
+            expect(!membership.completed.contains { $0.imageURL == hiddenExport.imageURL || $0.imageURL == newExport }, "file notifications must not rediscover removed or unknown exports")
+            expect(membership.visibleDownloadItems.isEmpty, "deleting another item or receiving filesystem events must not restore removed sources")
+            expect(fm.fileExists(atPath: hiddenPhoto.path) && fm.fileExists(atPath: hiddenExport.imageURL.path) && fm.fileExists(atPath: hiddenExport.videoURL.path), "list removal must preserve both native resources")
+            let automaticScans = await calls.count
+            expect(automaticScans == 0, "automatic changes must reconcile current membership without directory discovery")
+            membership.refreshCompleted(); membership.refreshDownloads()
+            try await waitUntil { membership.completed.contains { $0.imageURL == hiddenExport.imageURL }
+                && membership.completed.contains { $0.imageURL == newExport }
+                && membership.visibleDownloadItems.count == 2 && !membership.hasActiveWork }
+            expect(Set(membership.visibleDownloadItems.map(\.imageURL)) == Set([hiddenPhoto, newDownload]), "manual refresh must restore retained files and discover new files")
+        }
+        pass("remove then delete and native file notifications preserve list membership; manual refresh restores retained files without exclusions")
+
+        do {
+            let late = try model("removal-during-discovery")
+            let output = try pair(late.outputFolder, "kept-on-disk")
+            let original = record(output)
+            late.completed = [original]
+            actor RemovalGate {
+                var continuation: CheckedContinuation<[CompletedItem], Never>?
+                var calls = 0
+                func scan(_ item: CompletedItem) async -> [CompletedItem] {
+                    calls += 1
+                    if calls > 1 { return [item] }
+                    return await withCheckedContinuation { continuation = $0 }
+                }
+                func release(_ item: CompletedItem) { continuation?.resume(returning: [item]); continuation = nil }
+            }
+            let gate = RemovalGate()
+            late.completedScanner = { _ in await gate.scan(original) }
+            late.refreshCompleted()
+            try await waitUntilAsync { await gate.calls == 1 }
+            late.selectedCompletedIDs = [original.id]
+            late.clearVisibleCompleted(deleteFiles: false)
+            await gate.release(original)
+            try await waitUntil { !late.hasActiveWork }
+            expect(late.completed.isEmpty, "an older scan result must not undo a later removal")
+            let scansAfterRemoval = await gate.calls
+            expect(scansAfterRemoval == 1, "a removal must not automatically retry directory discovery")
+            late.refreshCompleted()
+            try await waitUntil { late.completed.count == 1 && !late.hasActiveWork }
+        }
+        pass("removal cancels stale discovery without an automatic retry; a later explicit refresh still restores the file")
 
         print("PASS: \(checks) model safety scenarios; no real downloads or Photos writes")
     }

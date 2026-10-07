@@ -214,6 +214,8 @@ final class ImporterModel: ObservableObject {
     private var localFileMonitor: LocalMediaFolderMonitor?
     private var monitoredLocalFolderPaths = Set<String>()
     private var localFileRefreshTask: Task<Void, Never>?
+    private var localFileReconciliationTask: Task<Void, Never>?
+    private var needsLocalFileReconciliation = false
     private var downloadModifiedTimesByPath: [String: TimeInterval] = [:] { didSet { downloadPresentationIsDirty = true } }
     private var downloadPresentationIsDirty = true
     private var downloadDisplayOrdersByPath: [String: MediaDisplayOrder] = [:]
@@ -257,6 +259,7 @@ final class ImporterModel: ObservableObject {
     var hasActiveWork: Bool {
         fileOperationsBusy || isDownloading || activeDownloadTask != nil || !pendingDownloadTasks.isEmpty
             || pendingImportScans > 0 || isRefreshingCompleted || isRefreshingDownloads
+            || localFileReconciliationTask != nil
     }
     var canMoveOutputFolder: Bool { !hasActiveWork }
 
@@ -495,16 +498,22 @@ final class ImporterModel: ObservableObject {
     // An unrelated download does not lock the library. Files being written or
     // produced by the active task remain untouched until that task settles.
     func downloadFilesAvailableForAction(_ urls: [URL]) -> Bool {
+        Self.downloadFilesAvailableForAction(urls, downloading: isDownloading,
+            activeRoot: activeDownloadOutputRoot, activeRevisions: activeDownloadFileRevisions)
+    }
+
+    private nonisolated static func downloadFilesAvailableForAction(_ urls: [URL], downloading: Bool,
+        activeRoot: URL?, activeRevisions: [String: MediaFileRevision]) -> Bool {
         urls.allSatisfy { url in
             let file = url.standardizedFileURL
-            if isDownloading && FileManager.default.fileExists(atPath: file.appendingPathExtension("part").path) {
+            if downloading && FileManager.default.fileExists(atPath: file.appendingPathExtension("part").path) {
                 return false
             }
             let physicalFile = file.resolvingSymlinksInPath()
-            guard let root = activeDownloadOutputRoot,
+            guard let root = activeRoot,
                   Self.contains(physicalFile, in: root.resolvingSymlinksInPath()) else { return true }
-            return activeDownloadFileRevisions[physicalFile.path] == MediaFileRevision(file)
-                && activeDownloadFileRevisions[physicalFile.path] != nil
+            return activeRevisions[physicalFile.path] == MediaFileRevision(file)
+                && activeRevisions[physicalFile.path] != nil
         }
     }
 
@@ -566,6 +575,9 @@ final class ImporterModel: ObservableObject {
         monitoredLocalFolderPaths.removeAll()
         localFileRefreshTask?.cancel()
         localFileRefreshTask = nil
+        localFileReconciliationTask?.cancel()
+        localFileReconciliationTask = nil
+        needsLocalFileReconciliation = false
     }
 
     func refreshLocalFileMonitoring() {
@@ -590,9 +602,81 @@ final class ImporterModel: ObservableObject {
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             guard let self, !Task.isCancelled, self.localFileMonitoringStarted else { return }
             self.localFileRefreshTask = nil
-            self.refreshDownloads()
-            self.refreshCompleted()
+            self.reconcileKnownLocalMedia()
         }
+    }
+
+    /// File notifications update the current collection; only an explicit scan
+    /// discovers files outside it. Removing a row needs no persistent exclusion.
+    private func reconcileKnownLocalMedia() {
+        guard !isPreparingToQuit else { return }
+        guard !fileOperationsBusy, localFileReconciliationTask == nil else {
+            needsLocalFileReconciliation = true
+            return
+        }
+        needsLocalFileReconciliation = false
+        let downloadVersion = downloadMutationVersion
+        let completedVersion = completedMutationVersion
+        let folders = [outputFolder, downloadOutputFolder]
+        let roots = folders + (activeDownloadOutputRoot.map { [$0] } ?? [])
+        let activeID = activeDownloadTask?.id
+        let activeRoot = activeDownloadOutputRoot
+        let activeRevisions = activeDownloadFileRevisions
+        let downloading = isDownloading
+        let history = completed
+        let downloadHistory = downloadCompleted
+        var seen = Set<URL>()
+        let urls = (downloadPairs.flatMap { [$0.imageURL, $0.videoURL] }
+            + downloadPhotos + downloadVideos).filter { seen.insert($0).inserted }
+        localFileReconciliationTask = Task { [weak self] in
+            // File metadata and pairing stay off the scrolling/main thread.
+            let snapshot = await Task.detached(priority: .utility) {
+                Self.reconciledSnapshot(history: history, downloadHistory: downloadHistory, urls: urls,
+                    roots: roots, downloading: downloading, activeRoot: activeRoot, activeRevisions: activeRevisions)
+            }.value
+            guard let self, !Task.isCancelled, !self.isPreparingToQuit else { return }
+            self.localFileReconciliationTask = nil
+            guard folders == [self.outputFolder, self.downloadOutputFolder],
+                  activeID == self.activeDownloadTask?.id, downloadVersion == self.downloadMutationVersion,
+                  completedVersion == self.completedMutationVersion, !self.fileOperationsBusy else {
+                self.needsLocalFileReconciliation = true
+                if !self.fileOperationsBusy { self.reconcileKnownLocalMedia() }
+                return
+            }
+            self.applyReconciledHistory(snapshot.0, downloadRecords: snapshot.1)
+            self.applyDownloadedItems(snapshot.2, discoversCompletedItems: false, reconcilesHistory: false)
+            if self.needsLocalFileReconciliation { self.reconcileKnownLocalMedia() }
+        }
+    }
+
+    private nonisolated static func reconciledSnapshot(history: [CompletedItem], downloadHistory: [CompletedItem],
+        urls: [URL], roots: [URL], downloading: Bool, activeRoot: URL?, activeRevisions: [String: MediaFileRevision])
+        -> ([CompletedItem], [CompletedItem], DownloadScanResult) {
+        let accessed = roots.filter { $0.startAccessingSecurityScopedResource() }
+        defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
+        let availableRoots = availableLocalMediaRoots(roots)
+        let usable: ([URL]) -> Bool = {
+            downloadFilesAvailableForAction($0, downloading: downloading,
+                activeRoot: activeRoot, activeRevisions: activeRevisions)
+        }
+        let records = sortedCompletedItems(history.compactMap {
+            reconciledLocalRecord($0, availableRoots: availableRoots, usable: usable)
+        })
+        let downloadRecords = sortedCompletedItems(downloadHistory.compactMap {
+            reconciledLocalRecord($0, availableRoots: availableRoots, usable: usable)
+        })
+        let retained = urls.filter { !isConfirmedMissing($0, availableRoots: availableRoots) }
+        let images = retained.filter(FileSystemUtilities.isImage)
+        let movies = retained.filter(FileSystemUtilities.isVideo)
+        let pairs = uniqueMediaPairs(images: images, videos: movies)
+        let paired = Set(pairs.flatMap { [$0.imageURL, $0.videoURL] })
+        var scan = DownloadScanResult(pairs: pairs, photos: images.filter { !paired.contains($0) },
+            videos: movies.filter { !paired.contains($0) })
+        for url in retained {
+            if let revision = MediaFileRevision(url) { scan.modifiedTimesByPath[url.path] = revision.modified }
+            if let order = MediaDisplayOrder.read(from: url) { scan.displayOrdersByPath[url.path] = order }
+        }
+        return (records, downloadRecords, scan)
     }
 
     private var importScanGeneration = 0
@@ -1256,6 +1340,7 @@ final class ImporterModel: ObservableObject {
                 self.needsAnotherDownloadRefresh = false
                 guard let folder = self.authorizedDownloadOutputFolderForUserAction() else { break }
                 let mutationVersion = self.downloadMutationVersion
+                let deletionRevision = self.thumbnailDeletionRevision
                 let scannedItems = await self.downloadScanner(folder, self.downloadComposedFolder)
                 guard !self.isPreparingToQuit else { break }
                 guard self.downloadOutputFolder == folder else {
@@ -1274,19 +1359,21 @@ final class ImporterModel: ObservableObject {
                 if self.operationNotices[.downloads] == "下载文件夹暂时不可访问，已保留现有列表及记录。" {
                     self.operationNotices.removeValue(forKey: .downloads)
                 }
-                self.applyDownloadedItems(scannedItems)
+                self.applyDownloadedItems(scannedItems,
+                    discoversCompletedItems: deletionRevision == self.thumbnailDeletionRevision)
             } while self.needsAnotherDownloadRefresh && !self.isPreparingToQuit
             self.isRefreshingDownloads = false
         }
     }
 
-    private func applyDownloadedItems(_ scannedItems: DownloadScanResult) {
+    private func applyDownloadedItems(_ scannedItems: DownloadScanResult,
+        discoversCompletedItems: Bool = true, reconcilesHistory: Bool = true) {
         var scannedItems = scannedItems
         scannedItems.pairs.removeAll { !downloadFilesAvailableForAction([$0.imageURL, $0.videoURL]) }
         scannedItems.photos.removeAll { !downloadFilesAvailableForAction([$0]) }
         scannedItems.videos.removeAll { !downloadFilesAvailableForAction([$0]) }
         let oldPairs = Dictionary(downloadPairs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        downloadPairs = scannedItems.pairs.map { pair in
+        let updatedPairs = scannedItems.pairs.map { pair in
             var updated = pair
             if let existing = oldPairs[pair.id] {
                 updated.status = existing.status
@@ -1294,10 +1381,11 @@ final class ImporterModel: ObservableObject {
             }
             return updated
         }
+        if downloadPairs != updatedPairs { downloadPairs = updatedPairs }
         // Active-task resources were filtered above; unrelated settled media can
         // enter completion history even while another download is still running.
         var records = completed
-        for url in scannedItems.photos + scannedItems.videos {
+        for url in (discoversCompletedItems ? scannedItems.photos + scannedItems.videos : []) {
             guard let revision = MediaFileRevision(url) else { continue }
             let item = CompletedItem(imagePath: url.standardizedFileURL.path,
                 modifiedTime: revision.modified, displayOrder: scannedItems.displayOrdersByPath[url.path],
@@ -1310,11 +1398,11 @@ final class ImporterModel: ObservableObject {
             saveCompletedRecords()
             retainVisibleCompletedSelection()
         }
-        downloadPhotos = scannedItems.photos
-        downloadVideos = scannedItems.videos
-        downloadModifiedTimesByPath = scannedItems.modifiedTimesByPath
-        downloadDisplayOrdersByPath = scannedItems.displayOrdersByPath
-        reconcileCompletedHistoryWithLocalFiles()
+        if downloadPhotos != scannedItems.photos { downloadPhotos = scannedItems.photos }
+        if downloadVideos != scannedItems.videos { downloadVideos = scannedItems.videos }
+        if downloadModifiedTimesByPath != scannedItems.modifiedTimesByPath { downloadModifiedTimesByPath = scannedItems.modifiedTimesByPath }
+        if downloadDisplayOrdersByPath != scannedItems.displayOrdersByPath { downloadDisplayOrdersByPath = scannedItems.displayOrdersByPath }
+        if reconcilesHistory { reconcileCompletedHistoryWithLocalFiles() }
         // A scan describes what is currently available, not the lifetime of a record.
         // Retain legacy, temporarily missing and other-directory records; only validated
         // current source/output revisions contribute to the composed filter.
@@ -1325,7 +1413,8 @@ final class ImporterModel: ObservableObject {
         let summary = itemCount == 0 ? "输入分享链接开始下载。" : "已识别 \(itemCount) 个素材，已合成 \(composedCount) 组。"
         let unpairedNotice = (!downloadPhotos.isEmpty || !downloadVideos.isEmpty)
             ? " 部分素材未配对：合成需要同一文件夹内同名照片和视频各一份；同名多份不会自动选择。" : ""
-        downloadStatusText = lastDownloadFailure.map { "下载存在失败：\($0)\n\(summary)" } ?? (summary + unpairedNotice)
+        let status = lastDownloadFailure.map { "下载存在失败：\($0)\n\(summary)" } ?? (summary + unpairedNotice)
+        if downloadStatusText != status { downloadStatusText = status }
     }
 
     /// A task may finish in the folder selected when it was queued, after the user
@@ -1431,7 +1520,11 @@ final class ImporterModel: ObservableObject {
                 record.sourceImagePath == pair.imageURL.path && record.sourceVideoPath == pair.videoURL.path
             }
         }.map(\.id))
-        if !removedIDs.isEmpty { thumbnailDeletionRevision += 1 }
+        if !removedIDs.isEmpty {
+            thumbnailDeletionRevision += 1
+            needsAnotherDownloadRefresh = false
+            needsAnotherCompletedRefresh = false
+        }
         ThumbnailCollectionAnimation.perform {
             downloadPairs.removeAll { removedPairIDs.contains($0.id) }
             downloadPhotos.removeAll { removedIDs.contains("photo:\($0.standardizedFileURL.path)") }
@@ -1452,8 +1545,7 @@ final class ImporterModel: ObservableObject {
             saveCompletedRecords()
             retainVisibleCompletedSelection()
             reconcileCompletedHistoryWithLocalFiles()
-            refreshCompleted()
-            refreshDownloads()
+            reconcileKnownLocalMedia()
         }
         downloadStatusText = Self.clearMessage(count: removedIDs.count, deleteFiles: deleteFiles, errors: errors)
         if !errors.isEmpty { operationNotices[.downloads] = downloadStatusText }
@@ -1721,7 +1813,7 @@ final class ImporterModel: ObservableObject {
         return sortedCompletedItems(Array(byID.values))
     }
 
-    private static func validateLegacyRecord(_ record: CompletedItem) -> CompletedItem {
+    private nonisolated static func validateLegacyRecord(_ record: CompletedItem) -> CompletedItem {
         var item = record
         if item.moviePath == nil, let current = MediaFileRevision(item.imageURL) {
             if item.standaloneRevision != current { item.importedToPhotos = false }
@@ -1746,12 +1838,17 @@ final class ImporterModel: ObservableObject {
     }
 
     private func resumeCompletedRefreshIfNeeded() {
+        if needsLocalFileReconciliation { reconcileKnownLocalMedia() }
         if needsAnotherCompletedRefresh { needsAnotherCompletedRefresh = false; refreshCompleted() }
         if needsAnotherDownloadRefresh { needsAnotherDownloadRefresh = false; refreshDownloads() }
     }
 
     private func availableLocalMediaRoots() -> [URL] {
-        ([outputFolder, downloadOutputFolder] + (activeDownloadOutputRoot.map { [$0] } ?? [])).filter { folder in
+        Self.availableLocalMediaRoots([outputFolder, downloadOutputFolder] + (activeDownloadOutputRoot.map { [$0] } ?? []))
+    }
+
+    private nonisolated static func availableLocalMediaRoots(_ folders: [URL]) -> [URL] {
+        folders.filter { folder in
             Self.withSecurityScopedAccess(to: folder) {
                 (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) != nil
             }
@@ -1760,7 +1857,7 @@ final class ImporterModel: ObservableObject {
 
     /// An absent file in a readable folder is a deletion. A missing or inaccessible
     /// managed root can be an offline disk, so it is not evidence to discard history.
-    private static func isConfirmedMissing(_ url: URL, availableRoots: [URL]) -> Bool {
+    private nonisolated static func isConfirmedMissing(_ url: URL, availableRoots: [URL]) -> Bool {
         let file = url.resolvingSymlinksInPath().standardizedFileURL
         guard !FileManager.default.fileExists(atPath: file.path) else { return false }
         let roots = availableRoots.map { $0.resolvingSymlinksInPath().standardizedFileURL }
@@ -1781,11 +1878,16 @@ final class ImporterModel: ObservableObject {
     }
 
     private func reconciledLocalRecord(_ original: CompletedItem, availableRoots: [URL]) -> CompletedItem? {
+        Self.reconciledLocalRecord(original, availableRoots: availableRoots, usable: downloadFilesAvailableForAction)
+    }
+
+    private nonisolated static func reconciledLocalRecord(_ original: CompletedItem, availableRoots: [URL],
+        usable: ([URL]) -> Bool) -> CompletedItem? {
         let urls = [original.imageURL] + (original.movieURL.map { [$0] } ?? [])
         // Download writes must not replace import revisions or degrade a pair while
         // its resources are still being written. Confirmed deletions remain removable.
         let existingURLs = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
-        guard downloadFilesAvailableForAction(existingURLs) else { return original }
+        guard usable(existingURLs) else { return original }
         let imageRevision = MediaFileRevision(original.imageURL)
         guard let movieURL = original.movieURL else {
             if imageRevision != nil {
@@ -1822,6 +1924,10 @@ final class ImporterModel: ObservableObject {
         let roots = availableLocalMediaRoots()
         let records = Self.sortedCompletedItems(completed.compactMap { reconciledLocalRecord($0, availableRoots: roots) })
         let downloadRecords = Self.sortedCompletedItems(downloadCompleted.compactMap { reconciledLocalRecord($0, availableRoots: roots) })
+        applyReconciledHistory(records, downloadRecords: downloadRecords)
+    }
+
+    private func applyReconciledHistory(_ records: [CompletedItem], downloadRecords: [CompletedItem]) {
         if records != completed {
             completedMutationVersion += 1
             ThumbnailCollectionAnimation.perform { completed = records }
@@ -1841,6 +1947,7 @@ final class ImporterModel: ObservableObject {
         guard let folder = authorizedOutputFolderForUserAction() else { return }
         isRefreshingCompleted = true
         let mutationVersion = completedMutationVersion
+        let deletionRevision = thumbnailDeletionRevision
         Task {
             let scannedItems: [CompletedItem]
             do {
@@ -1855,9 +1962,16 @@ final class ImporterModel: ObservableObject {
             }
             self.isRefreshingCompleted = false
             guard !self.isPreparingToQuit else { return }
-            guard self.outputFolder == folder, self.completedMutationVersion == mutationVersion, !self.fileOperationsBusy else {
+            guard self.outputFolder == folder, !self.fileOperationsBusy else {
                 self.needsAnotherCompletedRefresh = true
                 if !self.fileOperationsBusy { self.resumeCompletedRefreshIfNeeded() }
+                return
+            }
+            guard self.completedMutationVersion == mutationVersion else {
+                // A removal cancels older discovery; a later manual refresh is
+                // still allowed to restore all files. Other mutations may retry.
+                if deletionRevision == self.thumbnailDeletionRevision { self.needsAnotherCompletedRefresh = true }
+                self.resumeCompletedRefreshIfNeeded()
                 return
             }
 
@@ -1911,7 +2025,6 @@ final class ImporterModel: ObservableObject {
             self.removeVerifiedDuplicateCompositions(in: folder)
             self.reconcileCompletedHistoryWithLocalFiles()
             self.rebuildVisibleDownloadItems()
-            self.refreshDownloads()
             self.resumeCompletedRefreshIfNeeded()
         }
     }
@@ -1985,7 +2098,11 @@ final class ImporterModel: ObservableObject {
             removedIDs.insert(item.id)
             removedPaths.formUnion(urls.map { $0.standardizedFileURL.path })
         }
-        if !removedIDs.isEmpty { thumbnailDeletionRevision += 1 }
+        if !removedIDs.isEmpty {
+            thumbnailDeletionRevision += 1
+            needsAnotherDownloadRefresh = false
+            needsAnotherCompletedRefresh = false
+        }
         ThumbnailCollectionAnimation.perform {
             completed.removeAll { removedIDs.contains($0.id) }
             if deleteFiles { downloadCompleted.removeAll { removedIDs.contains($0.id) } }
@@ -1998,8 +2115,7 @@ final class ImporterModel: ObservableObject {
             saveDownloadCompletedRecords()
             rebuildVisibleDownloadItems()
             retainVisibleDownloadSelection()
-            refreshDownloads()
-            refreshCompleted()
+            reconcileKnownLocalMedia()
         }
         statusText = Self.clearMessage(count: removedIDs.count, deleteFiles: deleteFiles, errors: errors)
         operationNotices[.completed] = errors.isEmpty ? nil : statusText

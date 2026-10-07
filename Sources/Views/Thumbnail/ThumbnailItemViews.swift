@@ -463,31 +463,45 @@ final class ThumbnailImageView: NSImageView {
     }
 }
 
-final class ThumbnailBadgeLabel: NSTextField {
+final class ThumbnailBadgeLabel: NSView {
+    private let textField = NSTextField(labelWithString: "")
     private var measuredText: String?
     private var measuredSize: NSSize = .zero
 
-    convenience init(labelWithString value: String) {
-        self.init(frame: .zero)
-        isEditable = false
-        isSelectable = false
-        isBordered = false
-        drawsBackground = false
-        alignment = .center
-        lineBreakMode = .byClipping
-        textColor = ThumbnailBadgeStyle.textColor
-        stringValue = value
-        font = ThumbnailBadgeStyle.font(for: value)
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = ThumbnailBadgeStyle.cornerRadius
         layer?.masksToBounds = true
+        textField.alignment = .center
+        textField.lineBreakMode = .byClipping
+        textField.textColor = ThumbnailBadgeStyle.textColor
+        textField.font = ThumbnailBadgeStyle.font
+        textField.wantsLayer = true
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(textField)
+        // A label's native line height is smaller than the badge background.
+        // Keep that intrinsic height and center its alignment rect on both axes.
+        NSLayoutConstraint.activate([
+            textField.centerXAnchor.constraint(equalTo: centerXAnchor),
+            textField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
     }
 
-    override var stringValue: String {
-        didSet {
-            guard oldValue != stringValue else { return }
+    required init?(coder: NSCoder) { nil }
+
+    convenience init(labelWithString value: String) {
+        self.init(frame: .zero)
+        stringValue = value
+    }
+
+    var stringValue: String {
+        get { textField.stringValue }
+        set {
+            guard textField.stringValue != newValue else { return }
+            textField.stringValue = newValue
             measuredText = nil
-            font = ThumbnailBadgeStyle.font(for: stringValue)
+            textField.font = ThumbnailBadgeStyle.font(for: newValue)
         }
     }
 
@@ -507,16 +521,21 @@ final class ThumbnailBadgeLabel: NSTextField {
                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
         rep.size = bounds.size
+        layoutSubtreeIfNeeded()
         cacheDisplay(in: bounds, to: rep)
         return rep.cgImage
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    override func accessibilityChildren() -> [Any]? { textField.accessibilityChildren() }
+    override func accessibilityValue() -> Any? { textField.accessibilityValue() }
+
+    override var wantsUpdateLayer: Bool { true }
+
     override func updateLayer() {
-        // AppKit owns the text raster and reuses it while scrolling. Painting
-        // another text bitmap here duplicates its native label subview.
-        super.updateLayer()
+        // Only the background belongs to this container. AppKit owns and caches
+        // the child label's text raster, including during scrolling and zoom.
         let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         layer?.backgroundColor = NSColor.black.withAlphaComponent(opaque ? 1 : 0.62).cgColor
