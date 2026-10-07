@@ -49,12 +49,13 @@ if mode == "block":
         "pgrep": '''#!/usr/bin/env python3
 import os, pathlib, sys
 state = os.environ.get("HERMES_TEST_RUNNING", "yes")
-if state == "late":
+if state in {"late", "staging"}:
     counter = pathlib.Path(os.environ["HERMES_TEST_ROOT"], "pgrep-count")
     count = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(count))
-    if count >= 2: print("424242")
-    sys.exit(0 if count >= 2 else 1)
+    threshold = 2 if state == "late" else 3
+    if count >= threshold: print("424242")
+    sys.exit(0 if count >= threshold else 1)
 if state == "yes": print("424242")
 sys.exit(0 if state == "yes" else 1)
 ''',
@@ -170,7 +171,10 @@ sys.exit(subprocess.call(["/usr/bin/ditto", *sys.argv[1:]]))
     assert not product.exists(), "A previous build was retained while the installed app was running"
     run(["script/build_and_run.sh", "run"])
     run(["script/build_and_run.sh", "--verify"], expected=1)
+    calls_before = calls()
     run(["script/package_app.sh", "--no-open", "--no-version-bump"], expected=1)
+    run(["script/package_app.sh", "--no-open"], expected=1)
+    assert calls() == calls_before, "Packaging compiled despite a running app"
     calls_before = calls()
     run(["build.sh", "--clean", "--no-run"], expected=1)
     assert calls() == calls_before
@@ -257,7 +261,7 @@ sys.exit(subprocess.call(["/usr/bin/ditto", *sys.argv[1:]]))
     run(["build.sh", "--release", "--no-run"])
     args = calls()[-1]["args"]
     assert args[args.index("-xcconfig") + 1] == str(signing), "Signing path lost spaces"
-    run(["script/package_app.sh", "--no-open"], expected=1)
+    run(["script/package_app.sh", "--no-open"], expected=1, running="no", build_mode="missing")
     args = calls()[-1]["args"]
     assert args[args.index("-xcconfig") + 1] == str(signing)
     signing.unlink()
@@ -268,6 +272,7 @@ sys.exit(subprocess.call(["/usr/bin/ditto", *sys.argv[1:]]))
     run(["script/package_app.sh", "--no-open"], expected=74, running="no", move_failure="backup")
     run(["script/package_app.sh", "--no-open"], expected=74, running="no", move_failure="install")
     run(["script/package_app.sh", "--no-open"], expected=1, running="late")
+    run(["script/package_app.sh", "--no-open"], expected=1, running="staging")
 
     # Inject the same class of real shell expansion fault after the version bump.
     # A compiler returning nonzero cannot reproduce Bash 3.2's EXIT status of 0 here.

@@ -58,6 +58,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# Avoid compiling a release that cannot be installed. Keep the later checks too:
+# the app may start while the build or staging copy is in progress.
+if app_is_running; then
+  echo "HERMES is running; installation skipped before building to protect current downloads. Quit the app and rerun packaging." >&2
+  exit 1
+fi
+
 bump_build_number() {
   local current_build next_build current_version next_version
   if [[ ! -f "$PROJECT_FILE" ]]; then
