@@ -237,6 +237,49 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
                        "Changing the native gallery background must invalidate the resolved color")
     }
 
+    func testBadgeFadeUsesTheVerifiedNativeLinearCurve() {
+        var animation = ThumbnailZoomBadgeAnimation()
+        animation.setSuppressed(true, animated: true, at: 10)
+        for (time, opacity) in [(10.0, 1.0), (10.05, 0.75), (10.1, 0.5), (10.15, 0.25), (10.21, 0.0)] {
+            animation.advance(at: time)
+            XCTAssertEqual(animation.opacity, opacity, accuracy: 0.0001,
+                           "The native decoration curve is linear over 0.2 seconds")
+        }
+        XCTAssertFalse(animation.isAnimating)
+        animation.setSuppressed(false, animated: true, at: 11)
+        for (time, opacity) in [(11.05, 0.25), (11.1, 0.5), (11.15, 0.75), (11.21, 1.0)] {
+            animation.advance(at: time)
+            XCTAssertEqual(animation.opacity, opacity, accuracy: 0.0001)
+        }
+        XCTAssertFalse(animation.isAnimating)
+    }
+
+    func testRapidBadgeReentryKeepsUnfinishedNativeDeltasWithoutOpacityJumps() {
+        var animation = ThumbnailZoomBadgeAnimation()
+        animation.setSuppressed(true, animated: true, at: 10)
+        animation.advance(at: 10.1)
+        XCTAssertEqual(animation.opacity, 0.5, accuracy: 0.0001)
+        animation.setSuppressed(false, animated: true, at: 10.1)
+        XCTAssertEqual(animation.opacity, 0.5, accuracy: 0.0001)
+        animation.advance(at: 10.15)
+        XCTAssertEqual(animation.opacity, 0.5, accuracy: 0.0001,
+                       "Native additive retargeting retains the unfinished fade rather than restarting an easing curve")
+        animation.advance(at: 10.25)
+        XCTAssertEqual(animation.opacity, 0.75, accuracy: 0.0001)
+        animation.setSuppressed(true, animated: true, at: 10.25)
+        XCTAssertEqual(animation.opacity, 0.75, accuracy: 0.0001)
+        animation.advance(at: 10.3)
+        XCTAssertEqual(animation.opacity, 0.75, accuracy: 0.0001)
+        animation.advance(at: 10.35)
+        XCTAssertEqual(animation.opacity, 0.5, accuracy: 0.0001)
+        animation.advance(at: 10.46)
+        XCTAssertEqual(animation.opacity, 0)
+        XCTAssertFalse(animation.isAnimating)
+        animation.setSuppressed(false, animated: false, at: 11)
+        XCTAssertEqual(animation.opacity, 1)
+        XCTAssertFalse(animation.isAnimating, "Reduce Motion clears the common animation once")
+    }
+
     func testSuppressedOverlayBadgesRemainSuppressedAfterNewImagesAndLayersArrive() throws {
         let overlay = ThumbnailZoomOverlay(frame: CGRect(x: 0, y: 0, width: 1000, height: 600))
         let image = try bitmap(width: 60, height: 120)
@@ -244,7 +287,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         let art = ZoomArtwork(image: image, badge: badge, badgeSize: CGSize(width: 28, height: 18))
         overlay.setAssets([40: art, 41: art], count: 80)
         let plan = plan(level: 2)
-        overlay.beginBadgeSuppression(animated: false)
+        overlay.setZoomBadgeOpacity(0)
         for position in [2.0, 2.2, 2.8, 3.0, 2.0] {
             var alpha = ZoomAlphaPresentation(level: 2)
             alpha.update(position: position)
@@ -256,7 +299,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
                                "A new tile must inherit the same parent opacity throughout pinch and handoff")
             }
         }
-        overlay.setZoomBadgeSuppressed(false, animated: false)
+        overlay.setZoomBadgeOpacity(1)
         let tile = try focalTile(in: overlay, index: 40, metrics: plan.metrics)
         XCTAssertEqual(try focalBadge(in: overlay, tile: tile).superlayer?.opacity, 1)
     }
@@ -265,7 +308,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         let item = ThumbnailCollectionItem()
         let view = try XCTUnwrap(item.view as? ThumbnailItemView)
         let badge = try XCTUnwrap(view.badgeLabel)
-        item.setZoomBadgeSuppressed(true, animated: false)
+        item.setZoomBadgeOpacity(0)
         view.setBadge("0:42")
         let image = NSImage(cgImage: try bitmap(width: 60, height: 120), size: CGSize(width: 60, height: 120))
         item.imageView?.image = image
@@ -278,27 +321,23 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         item.imageView?.image = image
         view.updateImageFrame(for: image)
         XCTAssertEqual(badge.alphaValue, 0, "Cell reuse must not briefly reveal metadata during an active gesture")
-        item.setZoomBadgeSuppressed(false, animated: false)
+        item.setZoomBadgeOpacity(1)
         XCTAssertEqual(badge.alphaValue, 1)
         XCTAssertEqual(badge.stringValue, "JPG")
-        item.setZoomBadgeSuppressed(true, animated: false)
+        item.setZoomBadgeOpacity(0)
         XCTAssertEqual(badge.alphaValue, 0, "A second gesture must cancel a pending reveal")
     }
 
-    func testOverlayReentryBeginsAtTheNativePresentationOpacity() throws {
+    func testEveryOverlayGridUsesTheCommonOpacityWithoutIndependentAnimations() throws {
         let overlay = ThumbnailZoomOverlay(frame: CGRect(x: 0, y: 0, width: 1000, height: 600))
         overlay.setAssets([40: ZoomArtwork(image: try bitmap(width: 60, height: 120))], count: 80)
-        overlay.beginBadgeSuppression(animated: false)
-        overlay.beginBadgeSuppression(animated: true, fromOpacity: 0.35)
+        overlay.setZoomBadgeOpacity(0.35)
         for viewport in try XCTUnwrap(overlay.layer?.sublayers) {
             let root = try XCTUnwrap(viewport.sublayers?.first)
             let decorations = try XCTUnwrap(root.sublayers?.last)
-            XCTAssertEqual(decorations.opacity, 0)
-            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let fade = try XCTUnwrap(decorations.animation(forKey: "thumbnailZoomBadgeOpacity") as? CABasicAnimation)
-                XCTAssertEqual(try XCTUnwrap(fade.fromValue as? NSNumber).floatValue, 0.35, accuracy: 0.001)
-                XCTAssertEqual(fade.duration, ThumbnailZoomBadgeAnimation.duration)
-            }
+            XCTAssertEqual(decorations.opacity, 0.35, accuracy: 0.001)
+            XCTAssertTrue(decorations.animationKeys()?.isEmpty ?? true,
+                          "The prepared grids project one value instead of owning competing fade timelines")
         }
     }
 }

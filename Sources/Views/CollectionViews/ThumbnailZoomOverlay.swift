@@ -1,9 +1,41 @@
 import AppKit
 import QuartzCore
 
-enum ThumbnailZoomBadgeAnimation {
-    // The decoration-alpha transition in this macOS Photos build uses 0.2s.
+/// Photos uses one 0.2s linear decoration value, retaining unfinished deltas
+/// when its target changes. The grid's existing AppKit display link samples it.
+struct ThumbnailZoomBadgeAnimation {
     static let duration: TimeInterval = 0.2
+    private(set) var target: CGFloat = 1
+    private(set) var opacity: CGFloat = 1
+    private var changes: [Change] = []
+    var isAnimating: Bool { !changes.isEmpty }
+
+    private struct Change {
+        let delta: CGFloat
+        let start: TimeInterval
+    }
+
+    mutating func setSuppressed(_ suppressed: Bool, animated: Bool, at timestamp: TimeInterval) {
+        let value: CGFloat = suppressed ? 0 : 1
+        if !animated {
+            target = value
+            opacity = value
+            changes.removeAll()
+            return
+        }
+        guard target != value else { return }
+        advance(at: timestamp)
+        changes.append(Change(delta: target - value, start: timestamp))
+        target = value
+    }
+
+    mutating func advance(at timestamp: TimeInterval) {
+        changes.removeAll { timestamp - $0.start >= Self.duration }
+        opacity = min(1, max(0, changes.reduce(target) { value, change in
+            let progress = min(1, max(0, (timestamp - change.start) / Self.duration))
+            return value + change.delta * CGFloat(1 - progress)
+        }))
+    }
 }
 
 struct ZoomLayerState {
@@ -182,7 +214,6 @@ final class ThumbnailZoomOverlay: NSView {
     private var assets: [Int: ZoomArtwork] = [:]
     private var assetCount = 0
     private var resolvedBackground: CGColor?
-    private var badgesSuppressed = false
     /// The gallery fill behind any transparent collection/scroll backgrounds.
     var backgroundColor: NSColor = .windowBackgroundColor {
         didSet {
@@ -245,42 +276,14 @@ final class ThumbnailZoomOverlay: NSView {
         assets[index, default: ZoomArtwork()].image = image
     }
 
-    func beginBadgeSuppression(animated: Bool, fromOpacity: Float? = nil) {
-        if let fromOpacity, fromOpacity.isFinite {
-            let opacity = min(1, max(0, fromOpacity))
-            badgesSuppressed = false
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for grid in grids + [focalGrid] {
-                grid.decorations.removeAnimation(forKey: "thumbnailZoomBadgeOpacity")
-                grid.decorations.opacity = opacity
-            }
-            CATransaction.commit()
-        }
-        setZoomBadgeSuppressed(true, animated: animated)
-    }
-
-    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
-        guard badgesSuppressed != suppressed else { return }
-        badgesSuppressed = suppressed
-        let target: Float = suppressed ? 0 : 1
+    func setZoomBadgeOpacity(_ opacity: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let value = Float(min(1, max(0, opacity)))
         for grid in grids + [focalGrid] {
-            let layer = grid.decorations
-            let current = layer.presentation()?.opacity ?? layer.opacity
-            layer.removeAnimation(forKey: "thumbnailZoomBadgeOpacity")
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.opacity = target
-            CATransaction.commit()
-            if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && current != target {
-                let animation = CABasicAnimation(keyPath: "opacity")
-                animation.fromValue = current
-                animation.toValue = target
-                animation.duration = ThumbnailZoomBadgeAnimation.duration
-                animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                layer.add(animation, forKey: "thumbnailZoomBadgeOpacity")
-            }
+            if grid.decorations.opacity != value { grid.decorations.opacity = value }
         }
+        CATransaction.commit()
     }
 
     func render(position: CGFloat, plan: ZoomPlan, weights: [CGFloat], elasticScale: CGFloat = 1) {

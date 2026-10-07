@@ -123,7 +123,6 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         imageView?.image = nil
         imageView?.alphaValue = 0
         thumbnailView?.setBadge(nil)
-        thumbnailView?.finishZoomBadgeAnimation()
         thumbnailView?.updateImageFrame(for: nil)
     }
 
@@ -186,8 +185,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: selected)
     }
 
-    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
-        thumbnailView?.setZoomBadgeSuppressed(suppressed, animated: animated)
+    func setZoomBadgeOpacity(_ opacity: CGFloat) {
+        thumbnailView?.setZoomBadgeOpacity(opacity)
     }
 
     func retainZoomThumbnail(_ image: CGImage, for url: URL, contentVersion: TimeInterval) {
@@ -538,7 +537,6 @@ final class ThumbnailItemView: NSView {
     private var interactiveFrame: NSRect = .zero
     private var measuredFailureText: String?
     private var failureFittingSize: NSSize = .zero
-    private var zoomBadgeSuppressed = false
     var onEffectiveAppearanceChanged: (() -> Void)?
 
     override func viewDidChangeEffectiveAppearance() {
@@ -596,28 +594,9 @@ final class ThumbnailItemView: NSView {
         updateBadgeFrames()
     }
 
-    func setZoomBadgeSuppressed(_ suppressed: Bool, animated: Bool) {
-        guard zoomBadgeSuppressed != suppressed else { return }
-        zoomBadgeSuppressed = suppressed
-        guard let badgeLabel else { return }
-        let target: CGFloat = suppressed ? 0 : 1
-        let current = CGFloat(badgeLabel.layer?.presentation()?.opacity ?? Float(badgeLabel.alphaValue))
-        badgeLabel.layer?.removeAnimation(forKey: "opacity")
-        badgeLabel.alphaValue = current
-        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && current != target {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = ThumbnailZoomBadgeAnimation.duration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                badgeLabel.animator().alphaValue = target
-            }
-        } else {
-            badgeLabel.alphaValue = target
-        }
-    }
-
-    func finishZoomBadgeAnimation() {
-        badgeLabel?.layer?.removeAnimation(forKey: "opacity")
-        badgeLabel?.alphaValue = zoomBadgeSuppressed ? 0 : 1
+    func setZoomBadgeOpacity(_ opacity: CGFloat) {
+        let value = min(1, max(0, opacity))
+        if badgeLabel?.alphaValue != value { badgeLabel?.alphaValue = value }
     }
 
     private func updateRingFrame() {

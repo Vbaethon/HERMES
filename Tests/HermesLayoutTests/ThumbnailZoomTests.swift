@@ -144,8 +144,32 @@ final class ThumbnailZoomTests: XCTestCase {
         }
     }
 
-    func testBadgesStaySuppressedThroughSettlementAndRevealOnlyAfterNativeHandoff() async throws {
-        let (grid, scroll, window) = fixture(count: 70)
+    func testReleasedStableZoomBeginsBadgeRevealWithoutAnExtraSettlementWait() {
+        let (grid, _, window) = fixture(count: 70)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let frame = zoom.layout.spec.frame(index: 68, width: zoom.layout.viewportSize.width,
+                                          metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
+        zoom.endGesture()
+        XCTAssertFalse(zoom.badgesSuppressed,
+                       "A released, already stable layout must start revealing metadata while the existing handoff completes")
+        XCTAssertNotNil(zoom.plan, "The accepted image handoff remains independent of metadata visibility")
+    }
+
+    func testRequestingTheCurrentPresetDoesNotBlinkBadges() {
+        let (grid, _, window) = fixture(count: 70)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        zoom.zoom(to: zoom.layout.spec.level)
+        XCTAssertFalse(zoom.badgesSuppressed, "An unchanged keyboard preset does not hide decorations")
+        for case let cell as ThumbnailCollectionItem in grid.nsCollectionView.visibleItems() {
+            XCTAssertGreaterThan((cell.view as? ThumbnailItemView)?.badgeLabel?.alphaValue ?? 0, 0.99)
+        }
+    }
+
+    func testBadgesUseOneFadeThroughSettlementHandoffAndReentry() async throws {
+        let (grid, _, window) = fixture(count: 70)
         defer { window.orderOut(nil) }
         let zoom = grid.zoom!
         let index = 68
@@ -153,6 +177,7 @@ final class ThumbnailZoomTests: XCTestCase {
                                           metrics: zoom.layout.metrics)
         zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
         XCTAssertTrue(zoom.badgesSuppressed)
+        zoom.displayFrame(at: CACurrentMediaTime() + 1)
         for case let cell as ThumbnailCollectionItem in grid.nsCollectionView.visibleItems() {
             XCTAssertEqual((cell.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, 0)
         }
@@ -160,7 +185,7 @@ final class ThumbnailZoomTests: XCTestCase {
         zoom.endGesture()
         XCTAssertTrue(zoom.badgesSuppressed, "A released finger does not reveal badges while layout is still settling")
         zoom.displayFrame(at: CACurrentMediaTime() + 10)
-        XCTAssertTrue(zoom.badgesSuppressed, "Keep metadata suppressed until the native cells replace the held overlay")
+        XCTAssertFalse(zoom.badgesSuppressed, "A stable layout starts its common reveal before native handoff")
         await Task.yield()
         try await Task.sleep(for: .milliseconds(20))
         XCTAssertTrue(zoom.overlay.isHidden)
@@ -176,9 +201,46 @@ final class ThumbnailZoomTests: XCTestCase {
         let reused = ThumbnailCollectionItem()
         zoom.prepareBadgeAppearance(for: reused)
         (reused.view as? ThumbnailItemView)?.setBadge("JPG")
-        XCTAssertEqual((reused.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, 0)
+        XCTAssertEqual((reused.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, zoom.badgeOpacity,
+                       "A new cell inherits the current fade phase, rather than jumping directly to its target")
         zoom.finishForInteraction()
-        _ = scroll
+    }
+
+    func testBadgeClockContinuesAfterImageHandoffAndNewCellsInheritTheRevealPhase() async throws {
+        let (grid, _, window) = fixture(count: 70)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let frame = zoom.layout.spec.frame(index: 68, width: zoom.layout.viewportSize.width,
+                                          metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
+        zoom.displayFrame(at: CACurrentMediaTime() + 1)
+        XCTAssertEqual(zoom.badgeOpacity, 0)
+        zoom.finishForInteraction()
+        XCTAssertNil(zoom.plan)
+        XCTAssertFalse(zoom.badgesSuppressed)
+        await Task.yield()
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(zoom.overlay.isHidden)
+        XCTAssertGreaterThan(zoom.badgeOpacity, 0)
+        XCTAssertLessThan(zoom.badgeOpacity, 1)
+        let reused = ThumbnailCollectionItem()
+        zoom.prepareBadgeAppearance(for: reused)
+        (reused.view as? ThumbnailItemView)?.setBadge("JPG")
+        XCTAssertEqual((reused.view as? ThumbnailItemView)?.badgeLabel?.alphaValue, zoom.badgeOpacity)
+        for case let cell as ThumbnailCollectionItem in grid.nsCollectionView.visibleItems() {
+            let badge = try XCTUnwrap((cell.view as? ThumbnailItemView)?.badgeLabel)
+            XCTAssertEqual(badge.alphaValue, zoom.badgeOpacity, accuracy: 0.0001)
+            XCTAssertTrue(badge.layer?.animationKeys()?.isEmpty ?? true)
+        }
+        for viewport in try XCTUnwrap(zoom.overlay.layer?.sublayers) {
+            let decorations = try XCTUnwrap(viewport.sublayers?.first?.sublayers?.last)
+            XCTAssertEqual(CGFloat(decorations.opacity), zoom.badgeOpacity, accuracy: 0.0001)
+        }
+        let frames = zoom.overlay.focalFrames
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(zoom.badgeOpacity, 1)
+        XCTAssertEqual(zoom.overlay.focalFrames, frames, "Badge-only frames must not rerender image geometry")
+        XCTAssertNil(zoom.plan)
     }
 
     func testHandoffRetainsTheDisplayedFocalBitmapBeforeAsyncCellLoading() async throws {

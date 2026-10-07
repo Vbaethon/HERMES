@@ -60,7 +60,9 @@ final class ThumbnailGridZoomController: NSObject {
     private var needsDisplay = false
     private var badgeBitmaps: [String: (image: CGImage?, size: CGSize)] = [:]
     private var badgeBackingScale: CGFloat = 0
-    private(set) var badgesSuppressed = false
+    private var badgeAnimation = ThumbnailZoomBadgeAnimation()
+    var badgesSuppressed: Bool { badgeAnimation.target == 0 }
+    var badgeOpacity: CGFloat { badgeAnimation.opacity }
     private(set) var cellsSuppressed = false
     private var lastMagnification: CGFloat = 0
     private var hasShownNewest = false
@@ -203,17 +205,12 @@ final class ThumbnailGridZoomController: NSObject {
                         height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics)
         alpha = ZoomAlphaPresentation(level: layout.spec.level)
         overlay.setAssets(makeArtwork(), count: layout.count)
-        let badgeOpacity = collection?.visibleItems().compactMap { item -> Float? in
-            guard let label = (item.view as? ThumbnailItemView)?.badgeLabel, !label.isHidden else { return nil }
-            return label.layer?.presentation()?.opacity ?? Float(label.alphaValue)
-        }.first ?? (badgesSuppressed ? 0 : 1)
-        overlay.beginBadgeSuppression(animated: true, fromOpacity: badgeOpacity)
-        setBadgesSuppressed(true, animated: true)
+        overlay.setZoomBadgeOpacity(badgeOpacity)
         prefetchPlanImages()
     }
 
     func prepareBadgeAppearance(for cell: ThumbnailCollectionItem) {
-        cell.setZoomBadgeSuppressed(badgesSuppressed, animated: false)
+        cell.setZoomBadgeOpacity(badgeOpacity)
         cell.setZoomPresentationSuppressed(cellsSuppressed)
     }
 
@@ -225,11 +222,28 @@ final class ThumbnailGridZoomController: NSObject {
         }
     }
 
-    private func setBadgesSuppressed(_ suppressed: Bool, animated: Bool) {
-        badgesSuppressed = suppressed
+    private func updateBadgeVisibility() {
+        let destination = animation?.to ?? position.rounded()
+        let side = ZoomGeometry.side(width: layout.viewportSize.width, position: position, metrics: layout.metrics) * elasticScale
+        let settledSide = ZoomGeometry.side(width: layout.viewportSize.width, position: destination, metrics: layout.metrics)
+        // A released, unscaled layout can reveal metadata before the held
+        // images hand off. An active gesture keeps it hidden even at a preset.
+        let suppressed = plan != nil && (gesture != nil || abs(side / settledSide - 1) >= 0.001)
+        let previousOpacity = badgeOpacity
+        badgeAnimation.setSuppressed(suppressed,
+            animated: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, at: CACurrentMediaTime())
+        if badgeOpacity != previousOpacity { applyBadgeOpacity() }
+        if badgeAnimation.isAnimating { resumeDisplayLink() }
+    }
+
+    private func applyBadgeOpacity() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        overlay.setZoomBadgeOpacity(badgeOpacity)
         for case let cell as ThumbnailCollectionItem in collection?.visibleItems() ?? [] {
-            cell.setZoomBadgeSuppressed(suppressed, animated: animated)
+            cell.setZoomBadgeOpacity(badgeOpacity)
         }
+        CATransaction.commit()
     }
 
     func beginGesture(at point: CGPoint) {
@@ -239,6 +253,7 @@ final class ThumbnailGridZoomController: NSObject {
         guard plan != nil else { return }
         gesture = ZoomGesture(position: position, width: layout.viewportSize.width,
                               elasticScale: elasticScale, metrics: layout.metrics)
+        updateBadgeVisibility()
         applyOverlay()
     }
 
@@ -300,13 +315,19 @@ final class ThumbnailGridZoomController: NSObject {
             duration: 0.30,
             curve: NSAnimation(duration: 1, animationCurve: .easeInOut))
         if elasticScale != 1 { elasticReturn = ZoomElasticReturn(initialScale: elasticScale, start: CACurrentMediaTime()) }
+        updateBadgeVisibility()
         applyOverlay()
         requestFrame()
     }
 
     private func requestFrame() {
-        guard plan != nil, let collection else { return }
+        guard plan != nil else { return }
         needsDisplay = true
+        resumeDisplayLink()
+    }
+
+    private func resumeDisplayLink() {
+        guard let collection else { return }
         if displayLink == nil {
             displayLink = collection.displayLink(target: DisplayTarget(owner: self),
                 selector: #selector(DisplayTarget.displayFrame(_:)))
@@ -319,25 +340,36 @@ final class ThumbnailGridZoomController: NSObject {
     // display link presents their latest state once per screen refresh. The
     // same clock advances settlement, including while menus track events.
     func displayFrame(at timestamp: CFTimeInterval) {
-        guard plan != nil else { stopDisplayLink(); return }
-        guard needsDisplay || animation != nil || elasticReturn != nil else {
+        let presentsZoom = plan != nil && (needsDisplay || animation != nil || elasticReturn != nil)
+        if presentsZoom {
+            if let animation {
+                let fraction = min(1, max(0, (timestamp - animation.start) / animation.duration))
+                animation.curve.currentProgress = Float(fraction)
+                position = ZoomGeometry.mix(animation.from, animation.to, CGFloat(animation.curve.currentValue))
+                if fraction >= 1 { self.animation = nil; position = animation.to }
+            }
+            if let elasticReturn {
+                elasticScale = elasticReturn.scale(at: timestamp)
+                if elasticReturn.isFinished(at: timestamp) { elasticScale = 1; self.elasticReturn = nil }
+            }
+            alpha.update(position: position)
+            updateBadgeVisibility()
+        }
+        if badgeAnimation.isAnimating {
+            let previousOpacity = badgeOpacity
+            badgeAnimation.advance(at: timestamp)
+            if badgeOpacity != previousOpacity { applyBadgeOpacity() }
+        }
+        // Badge-only frames change five decoration parents and native labels;
+        // they never rebuild the prepared image geometry or start new loads.
+        if presentsZoom {
+            applyOverlay()
+            if gesture == nil && animation == nil && elasticReturn == nil { commitPlan() }
+        }
+        if plan == nil && !badgeAnimation.isAnimating { stopDisplayLink() }
+        else if !needsDisplay && animation == nil && elasticReturn == nil && !badgeAnimation.isAnimating {
             displayLink?.isPaused = true
-            return
         }
-        if let animation {
-            let fraction = min(1, max(0, (timestamp - animation.start) / animation.duration))
-            animation.curve.currentProgress = Float(fraction)
-            position = ZoomGeometry.mix(animation.from, animation.to, CGFloat(animation.curve.currentValue))
-            if fraction >= 1 { self.animation = nil; position = animation.to }
-        }
-        if let elasticReturn {
-            elasticScale = elasticReturn.scale(at: timestamp)
-            if elasticReturn.isFinished(at: timestamp) { elasticScale = 1; self.elasticReturn = nil }
-        }
-        alpha.update(position: position)
-        applyOverlay()
-        if gesture == nil && animation == nil && elasticReturn == nil { commitPlan() }
-        else if animation == nil && elasticReturn == nil { displayLink?.isPaused = true }
     }
 
     private func commitPlan() {
@@ -354,9 +386,9 @@ final class ThumbnailGridZoomController: NSObject {
         stopAnimation()
         gesture = nil
         self.plan = nil
-        stopDisplayLink()
         alpha = ZoomAlphaPresentation(level: level)
         elasticScale = 1
+        updateBadgeVisibility()
         applyNative(origin: -state.offset.y, deferHandoff: true)
     }
 
@@ -467,16 +499,16 @@ final class ThumbnailGridZoomController: NSObject {
                 self.setCellsSuppressed(false)
                 self.overlay.isHidden = true
                 self.cancelImageTasks()
-                // Wait for layout and elastic settlement before revealing the
-                // native metadata. No unrelated fixed-delay timer is needed.
-                self.setBadgesSuppressed(false, animated: true)
+                // Reusable cells inherit the same reveal phase as the held
+                // overlay; handoff must not restart a second opacity timeline.
+                self.applyBadgeOpacity()
                 CATransaction.commit()
             }
         } else if plan == nil {
             // Reduce Motion can commit without ever revealing the overlay.
             // It needs the same prefetch/display-clock cleanup as a handoff.
             cancelImageTasks()
-            setBadgesSuppressed(false, animated: false)
+            updateBadgeVisibility()
         }
     }
 

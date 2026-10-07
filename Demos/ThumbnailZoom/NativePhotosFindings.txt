@@ -178,7 +178,7 @@ https://developer.apple.com/documentation/appkit/nscollectionviewlayout
 https://developer.apple.com/documentation/appkit/nsanimation
 https://developer.apple.com/documentation/quartzcore/calayer
 
-2026-10-07 角标时序核对（本机 macOS 27.0.1 / 26A434）：
+2026-10-07 角标时序初步核对（历史实现，3.0.3 的完整核对见文末）：
 
 - GridZero 的 PXZoomablePhotosLayout 保存独立的
   _decorationAlphaAnimator（实例偏移 1240），initWithViewModel: 在
@@ -198,7 +198,7 @@ https://developer.apple.com/documentation/quartzcore/calayer
   延迟”与等待布局/弹性动画结束再恢复的机制一致；不能据此编造
   额外固定毫秒数，也未测量 Photos 当前运行实例的实际帧间隔。
 
-本次公开 API 实现：metadata 在手势、回弹、原生视图交接期间保持统一
+3.0.2 及此前的公开 API 实现：metadata 在手势、回弹、原生视图交接期间保持统一
 抑制；交接完成后才用 0.2 秒淡入。不额外加入任意固定延迟。Overlay
 每个 grid 的角标共用 decorations 父层 opacity，render 不改这个 opacity；
 新进入的层因此不会在缩放中突然显示角标。正式原生 cell 保留 NSTextField
@@ -296,3 +296,56 @@ getBestAnchorColumns:… 也带有照片内的归一化缩放点参数。
 较小尺寸使用，细节缓存不挤掉基础图。窗口/边栏尺寸连续变化时保留当前图，
 等布局尺寸稳定或结束 live resize 后才提升清晰度。此为应用缓存优化，
 不是已读出的 Photos 缓存实现。以上检查仍不能替代真实触控板和显示 FPS 测量。
+
+2026-10-07 3.0.3 角标显示、曲线与代码清理：
+
+核对对象仍为本机 macOS 27.0.1（26A434）的框架二进制和运行时类型
+信息。独立只读辅助进程确认 _decorationAlphaAnimator 的类型为
+PhotosUIFoundation 中的 PXNumberAnimator；不是用于网格混合的
+PXZoomablePhotosAlphaAnimator。没有读取 Photos 图库、注入 Photos
+进程、创建或调用私有布局实例；正式应用不加载或链接这些私有框架。
+
+GridZero._updateZoom（0x24CA6AFC0–0x24CA6B0A4）的装饰分支在
+hideBadgesDuringZoom 启用且仍处于缩放动画状态时，把“交互中或 scale
+与 1 相差至少 0.001”作为隐藏条件。已松手且 scale 回到 1 时，即使其他
+收尾状态尚未退出，也允许恢复角标，不需要另外等待未变化的收尾动画。
+过渡参数仍为 duration=0.2、curve=1，目标未改变时不重启动画。
+_updateDecorationVisibility（0x24CA6B414）把同一 presentationValue
+传给各布局；mini 模式还会调节装饰透明度，本项目不实现该层级。
+
+PhotosUIFoundation.PXValueDefaultAnimation.currentValue
+（0x2848F7800–0x2848F78CC）直接使用 clamp(elapsed/duration, 0, 1)
+处理 curve=1，再返回 delta*(1-progress)。这确认它是线性变化，修正
+此前未确认曲线而采用 easeInEaseOut 的近似。
+PXNumberAnimator.setValue:animateImmediately:（0x284941E18）保留
+尚未完成的动画并添加旧目标到新目标的 delta；
+_updatePresentationValueIfNeeded（0x2849420C4）把这些剩余值加到
+新目标，而不是随机读取一张照片的透明度后取消并重新淡出。
+
+3.0.3 用一个轻量的线性透明度状态保留这些未结束的增量，沿用已有
+公开 NSView.displayLink，并把同一值投射到覆盖层装饰父层和原生
+NSTextField。正在复用的单元格、异步到达的文字、新进入视口的图层
+都继承同一阶段；图片交接不重启动画。手势中隐藏，缩放与回弹不再
+改变图片尺寸时恢复。请求当前键盘档位不会闪烁角标。Reduce Motion
+直接设置共同目标。角标恢复结束后释放显示时钟；角标单独刷新的帧
+不渲染照片几何或请求缩略图，也不会改变图片、边距或系统控件样式。
+
+清理范围经调用点和状态用途核对：删除覆盖层的独立抑制布尔状态、
+五条 CABasicAnimation 淡出路径、逐单元格的独立 NSAnimationContext
+透明度动画及复用时强制完成动画的方法、任选可见角标读取呈现值的
+交接路径。用共同状态替代这些重复控制，没有删除仍使用的焦点规划、
+四档权重、端点阻力、位图缓存、任务取消、交接代次与裁切代码。
+ThumbnailZoomGeometry.swift、ThumbnailGridController.swift、
+SystemThumbnailProvider.swift 的缩放与缓存逻辑不变。
+
+失败复现先确认原代码的非线性曲线、稳定松手后的多余等待和当前档位
+的角标闪烁。修正后 27 项角标/缩放专项、全部 104 项 Swift 测试和
+13 组真实主窗口 UI/UX 回归通过。检查包括六方向焦点与原生位图交接、
+连续重入透明度、同一淡入阶段的复用单元格、图像交接后的时钟推进、
+角标帧不改变照片几何、两种外观与侧栏适应。参数与状态分支的核对不
+等于已测量 Photos 当前实例的帧时间，真实触控板手感仍以用户实测为准。
+
+3.0.3（674）已替换 /Applications/HERMES.app，严格签名校验通过。
+安装前后记录 74/41 条、230 个媒体文件的清单与全部设置校验一致。
+打开实际安装版后，原生窗口显示下载器 73、已完成 74，格式与时长
+角标附着在对应图片上；没有把静止截图作为真实触控板动画的验收。
