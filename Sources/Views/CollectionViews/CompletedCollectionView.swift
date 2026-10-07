@@ -43,6 +43,7 @@ enum CompletedCollectionView {
         weak var collectionView: NSCollectionView?
         var gridController: ThumbnailGridController?
         private var items: [CompletedItem] = []
+        private var appliedDeletionRevision = 0
 
         override init() {}
 
@@ -57,7 +58,11 @@ enum CompletedCollectionView {
 
         func applyItems(_ newItems: [CompletedItem], animatingDifferences: Bool = true) {
             items = newItems
-            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences)
+            let revision = model?.thumbnailDeletionRevision ?? 0
+            let explicitlyRemoved = revision != appliedDeletionRevision
+            appliedDeletionRevision = revision
+            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences,
+                                        defersCompletionRemoval: !explicitlyRemoved)
         }
 
         func applySelection() {

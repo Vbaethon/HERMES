@@ -85,6 +85,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
     private var makeContextMenu: (() -> NSMenu?)?
     private var sharingServicePicker: NSSharingServicePicker?
     private var exportSession: NSDraggingSession?
+    private var snapshotGeneration = 0
     private(set) var zoom: ThumbnailGridZoomController!
 
     var nsCollectionView: NSCollectionView { collectionView }
@@ -145,7 +146,13 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
         }
         guard presentedItems != items else { return }
         let previousIDs = items.map(\.id)
-        if previousIDs != presentedItems.map(\.id) { zoom.itemsWillChange(count: presentedItems.count) }
+        let presentedIDs = presentedItems.map(\.id)
+        if previousIDs != presentedIDs {
+            let remainingIDs = Set(presentedIDs)
+            let isRemoval = presentedIDs.count < previousIDs.count
+                && previousIDs.filter { remainingIDs.contains($0) } == presentedIDs
+            zoom.itemsWillChange(count: presentedItems.count, preservesRowStart: isRemoval)
+        }
         itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
         items = presentedItems
 
@@ -165,11 +172,14 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
         // animating an insertion from an empty document briefly reveals its top.
         let shouldAnimate = animatingDifferences && !previousIDs.isEmpty
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        snapshotGeneration += 1
+        let generation = snapshotGeneration
         NSAnimationContext.runAnimationGroup { context in
             context.duration = ThumbnailCollectionAnimation.duration(animated: shouldAnimate)
             dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
-                self?.zoom.itemsDidChange()
-                self?.updateVisibleItems()
+                guard let self, self.snapshotGeneration == generation else { return }
+                self.zoom.itemsDidChange()
+                self.updateVisibleItems()
             }
         }
         applySelection(selectedIDs)

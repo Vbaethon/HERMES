@@ -7,6 +7,7 @@ final class ThumbnailGridLayout: NSCollectionViewLayout {
     var count = 0
     var spec = ZoomGridSpec(level: 2)
     var sectionInset = ThumbnailCollectionStyle.sectionInset
+    private var previousGeometry: (spec: ZoomGridSpec, count: Int, width: CGFloat, metrics: ZoomMetrics)?
     var metrics: ZoomMetrics {
         ZoomMetrics(top: sectionInset.top, left: sectionInset.left, bottom: sectionInset.bottom,
                     right: sectionInset.right, gap: ThumbnailCollectionStyle.itemSpacing)
@@ -32,10 +33,35 @@ final class ThumbnailGridLayout: NSCollectionViewLayout {
     override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
         newBounds.size != viewportSize
     }
+
+    func beginItemChange() {
+        previousGeometry = (spec, count, viewportSize.width, metrics)
+    }
+
+    override func initialLayoutAttributesForAppearingItem(at path: IndexPath) -> NSCollectionViewLayoutAttributes? {
+        guard let attributes = layoutAttributesForItem(at: path) else { return nil }
+        attributes.alpha = 0
+        return attributes
+    }
+
+    override func finalLayoutAttributesForDisappearingItem(at path: IndexPath) -> NSCollectionViewLayoutAttributes? {
+        guard let previousGeometry, path.section == 0, (0..<previousGeometry.count).contains(path.item) else { return nil }
+        let attributes = NSCollectionViewLayoutAttributes(forItemWith: path)
+        // Fade in place while AppKit moves surviving items into their new slots.
+        attributes.frame = previousGeometry.spec.frame(index: path.item, width: previousGeometry.width,
+                                                       metrics: previousGeometry.metrics)
+        attributes.alpha = 0
+        return attributes
+    }
+
+    override func finalizeCollectionViewUpdates() {
+        super.finalizeCollectionViewUpdates()
+        previousGeometry = nil
+    }
 }
 
 /// AppKit owns gesture delivery, scrolling, reusable cells and the animation
-/// clock. The accepted prototype's prepared layouts/opaque focal row own zoom.
+/// clock. Prepared grids share one transform and crossfade rule for every item.
 @MainActor
 final class ThumbnailGridZoomController: NSObject {
     let layout = ThumbnailGridLayout()
@@ -132,8 +158,12 @@ final class ThumbnailGridZoomController: NSObject {
         itemsDidChange()
     }
 
-    func itemsWillChange(count: Int) {
+    func itemsWillChange(count: Int, preservesRowStart: Bool = false) {
         finishForInteraction()
+        if cellsSuppressed {
+            retainHandoffImages()
+            applyNative(origin: scroll?.contentView.documentVisibleRect.minY ?? 0)
+        }
         cancelImageTasks()
         let origin = scroll?.contentView.documentVisibleRect.minY ?? 0
         let anchor = nativeAnchor(at: CGPoint(x: layout.viewportSize.width / 2, y: origin + 1))
@@ -141,8 +171,11 @@ final class ThumbnailGridZoomController: NSObject {
         let anchorID = anchor.flatMap { previousItems.indices.contains($0.index) ? previousItems[$0.index].id : nil }
         pendingItems = ItemChange(followsNewest: !hasShownNewest || isAtNewest,
                                  anchor: anchor, anchorID: anchorID, origin: origin)
+        layout.beginItemChange()
         layout.count = count
-        layout.spec = .endingAtNewest(level: Int(position.rounded()), count: count)
+        if !preservesRowStart {
+            layout.spec = .endingAtNewest(level: Int(position.rounded()), count: count)
+        }
         layout.invalidateLayout()
     }
 
@@ -360,7 +393,7 @@ final class ThumbnailGridZoomController: NSObject {
             badgeAnimation.advance(at: timestamp)
             if badgeOpacity != previousOpacity { applyBadgeOpacity() }
         }
-        // Badge-only frames change five decoration parents and native labels;
+        // Badge-only frames change four decoration parents and native labels;
         // they never rebuild the prepared image geometry or start new loads.
         if presentsZoom {
             applyOverlay()
@@ -439,8 +472,8 @@ final class ThumbnailGridZoomController: NSObject {
         defer { applying = false }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        overlay.frame = scroll.contentView.bounds
-        overlay.bounds.origin = .zero
+        if overlay.frame != scroll.contentView.bounds { overlay.frame = scroll.contentView.bounds }
+        if overlay.bounds.origin != .zero { overlay.bounds.origin = .zero }
         if scroll.contentView.subviews.last !== overlay {
             scroll.contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
         }
@@ -479,7 +512,9 @@ final class ThumbnailGridZoomController: NSObject {
                 scroll.contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
                 retainHandoffImages()
             }
-            for item in collection.visibleItems() { item.view.layoutSubtreeIfNeeded() }
+            // AppKit batches subtree layout for the collection. Flushing each
+            // cell separately repeatedly runs the window's layout machinery.
+            collection.layoutSubtreeIfNeeded()
             if !holdingOverlay {
                 setCellsSuppressed(false)
                 overlay.isHidden = true
@@ -495,7 +530,7 @@ final class ThumbnailGridZoomController: NSObject {
                 CATransaction.setDisableActions(true)
                 collection.layoutSubtreeIfNeeded()
                 self.retainHandoffImages()
-                for item in collection.visibleItems() { item.view.layoutSubtreeIfNeeded() }
+                collection.layoutSubtreeIfNeeded()
                 self.setCellsSuppressed(false)
                 self.overlay.isHidden = true
                 self.cancelImageTasks()
@@ -549,20 +584,13 @@ final class ThumbnailGridZoomController: NSObject {
         let scale = collection?.window?.backingScaleFactor ?? 2
         if badgeBackingScale != scale { badgeBitmaps.removeAll(); badgeBackingScale = scale }
         let entries = items()
-        let sizes = ZoomGeometry.columns.map {
-            max(ThumbnailCollectionStyle.cellSide, ceil(ZoomGeometry.side(width: layout.viewportSize.width,
-                columns: $0, metrics: layout.metrics)))
-        }
         var artwork: [Int: ZoomArtwork] = [:]
         for index in planImageCandidates() where entries.indices.contains(index) {
             let item = entries[index]
             let cell = collection?.item(at: IndexPath(item: index, section: 0)) as? ThumbnailCollectionItem
             let view = cell?.view as? ThumbnailItemView
-            let image = cell?.imageView?.image ?? sizes.reversed().lazy.compactMap {
-                SystemThumbnailProvider.shared.cachedThumbnail(for: item.url, pointSize: $0,
-                    scale: scale, contentVersion: item.contentVersion)
-            }.first ?? SystemThumbnailProvider.shared.cachedThumbnail(for: item.url,
-                pointSize: ThumbnailCollectionStyle.cellSide, scale: scale, contentVersion: item.contentVersion)
+            let image = cell?.imageView?.image ?? SystemThumbnailProvider.shared.bestCachedThumbnail(
+                for: item.url, scale: scale, contentVersion: item.contentVersion)
             var value = ZoomArtwork(image: image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
             let loadedLabel = view?.badgeLabel
             let text = loadedLabel.flatMap { $0.stringValue.isEmpty ? nil : $0.stringValue }

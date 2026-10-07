@@ -3,8 +3,8 @@ import AVFoundation
 import CoreMedia
 
 enum ThumbnailCollectionAnimation {
-    // A calmer product cadence, using AppKit's inherited timing curve.
-    // This is intentionally longer than NSAnimationContext's default 0.25s.
+    // Matches the installed Photos grid's default layout-transition duration.
+    // AppKit owns collection item fading and movement within this transaction.
     static let transitionDuration: TimeInterval = 0.4
 
     @MainActor

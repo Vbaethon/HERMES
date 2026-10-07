@@ -99,6 +99,9 @@ final class ImporterModel: ObservableObject {
     @Published var files: [URL] = []
     @Published var pairs: [PairItem] = []
     @Published var selectedPairIDs = Set<PairItem.ID>()
+    // Distinguish an explicit removal from completion/filter presentation.
+    // File operations still finish successfully before the grid is updated.
+    private(set) var thumbnailDeletionRevision = 0
     @Published var completed: [CompletedItem] = [] { didSet { refreshLocalFileMonitoring() } }
     @Published var selectedCompletedIDs = Set<CompletedItem.ID>()
     @Published var completedFilter: CompletedFilter = .all {
@@ -642,6 +645,7 @@ final class ImporterModel: ObservableObject {
                 removedURLs.insert(url.standardizedFileURL)
             }
         }
+        if !removedURLs.isEmpty { thumbnailDeletionRevision += 1 }
         ThumbnailCollectionAnimation.perform {
             files.removeAll { removedURLs.contains($0.standardizedFileURL) }
             pairs.removeAll { removedIDs.contains($0.id) }
@@ -1427,6 +1431,7 @@ final class ImporterModel: ObservableObject {
                 record.sourceImagePath == pair.imageURL.path && record.sourceVideoPath == pair.videoURL.path
             }
         }.map(\.id))
+        if !removedIDs.isEmpty { thumbnailDeletionRevision += 1 }
         ThumbnailCollectionAnimation.perform {
             downloadPairs.removeAll { removedPairIDs.contains($0.id) }
             downloadPhotos.removeAll { removedIDs.contains("photo:\($0.standardizedFileURL.path)") }
@@ -1980,6 +1985,7 @@ final class ImporterModel: ObservableObject {
             removedIDs.insert(item.id)
             removedPaths.formUnion(urls.map { $0.standardizedFileURL.path })
         }
+        if !removedIDs.isEmpty { thumbnailDeletionRevision += 1 }
         ThumbnailCollectionAnimation.perform {
             completed.removeAll { removedIDs.contains($0.id) }
             if deleteFiles { downloadCompleted.removeAll { removedIDs.contains($0.id) } }

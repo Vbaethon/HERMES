@@ -54,7 +54,8 @@ let package = Package(
                 "Views/Thumbnail/ThumbnailService.swift",
                 "Views/Thumbnail/ThumbnailItemViews.swift",
                 "Views/Thumbnail/ThumbnailCompositionEffect.swift",
-                "Views/Thumbnail/SystemThumbnailProvider.swift"
+                "Views/Thumbnail/SystemThumbnailProvider.swift",
+                "Views/Other/MediaLocationCard.swift"
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

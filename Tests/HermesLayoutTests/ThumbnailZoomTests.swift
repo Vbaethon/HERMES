@@ -30,7 +30,7 @@ final class ThumbnailZoomTests: XCTestCase {
         zoom.displayFrame(at: CACurrentMediaTime())
     }
 
-    func testAllAdjacentDirectionsKeepSourceFocalRowOpaqueAndHandoffAligned() async throws {
+    func testAllAdjacentDirectionsBlendDepartingNeighboursAndKeepAlignedPhotosContinuous() async throws {
         let (grid, scroll, window) = fixture()
         defer { window.orderOut(nil) }
         let zoom = grid.zoom!
@@ -61,9 +61,19 @@ final class ThumbnailZoomTests: XCTestCase {
                 XCTAssertTrue(grid.nsCollectionView.visibleItems().allSatisfy { $0.view.alphaValue == 0 },
                               "The old native grid must never draw underneath the prepared zoom grids")
                 for index in start..<(start + columns) {
-                    XCTAssertEqual(zoom.overlay.focalOpacity(at: index), 1,
-                                   "All six directions retain the same source row, including 9/7 and 7/5")
+                    let source = zoom.overlay.states[from].cellFrame(index: index, width: width, metrics: metrics)
+                    let destination = zoom.overlay.states[to].cellFrame(index: index, width: width, metrics: metrics)
+                    let aligned = abs(source.midX - destination.midX) + abs(source.midY - destination.midY) < 0.01
+                    if aligned {
+                        XCTAssertEqual(zoom.overlay.focalOpacity(at: index), 1,
+                                       "Only photos with matching frames in both grids remain continuous")
+                    } else {
+                        XCTAssertNil(zoom.overlay.focalOpacity(at: index),
+                                     "Departing neighbours must blend with their grid, including the pointer row")
+                    }
                 }
+                XCTAssertEqual(zoom.overlay.layer?.sublayers?.count, 4,
+                               "No additional opaque focal row may override the common blend")
                 XCTAssertLessThan(zoom.overlay.retainedTileCount, 300, "Presentation work must depend on the viewport, not library size")
             }
             pinch(zoom, to: CGFloat(to))

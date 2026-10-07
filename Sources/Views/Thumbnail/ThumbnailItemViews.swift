@@ -14,6 +14,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var requestedThumbnailSide: CGFloat = 0
     private var lastAppliedSize: CGSize = .zero
     private var zoomPresentationSuppressed = false
+    private var layoutOpacity: CGFloat = 1
     private struct Appearance: Equatable {
         let url: URL?
         let status: PairItem.Status
@@ -109,6 +110,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         requestedThumbnailSide = 0
         lastAppliedSize = .zero
         zoomPresentationSuppressed = false
+        layoutOpacity = 1
         applyZoomPresentationVisibility()
         unavailableMessage = nil
         previewMessage = nil
@@ -134,10 +136,11 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     override func apply(_ layoutAttributes: NSCollectionViewLayoutAttributes) {
         super.apply(layoutAttributes)
+        layoutOpacity = layoutAttributes.alpha
         applyZoomPresentationVisibility()
-        view.needsLayout = true
         let sizeChanged = lastAppliedSize != view.bounds.size
         lastAppliedSize = view.bounds.size
+        if sizeChanged { view.needsLayout = true }
         // Keep the displayed bitmap while requesting enough pixels for a larger
         // settled preset. Resizing/status changes must not restart its fade.
         if let url = representedURL,
@@ -153,11 +156,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     }
 
     private func applyZoomPresentationVisibility() {
-        let alpha: CGFloat = zoomPresentationSuppressed ? 0 : 1
+        let alpha: CGFloat = zoomPresentationSuppressed ? 0 : layoutOpacity
         guard view.alphaValue != alpha else { return }
         // Reusable native cells keep their identity and decoded image, but
         // only the prepared presentation draws during a pinch and handoff.
-        view.layer?.removeAnimation(forKey: "opacity")
         view.alphaValue = alpha
     }
 
@@ -191,6 +193,11 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     func retainZoomThumbnail(_ image: CGImage, for url: URL, contentVersion: TimeInterval) {
         guard representedURL == url, representedContentVersion == contentVersion else { return }
+        // A held frame can be checked twice while AppKit completes its layout.
+        // Retain the existing NSImage and its native drawing state when the
+        // bitmap is already installed; don't start another layout/redraw pass.
+        if imageView?.alphaValue == 1,
+           imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) === image { return }
         let scale = view.window?.backingScaleFactor ?? 2
         showLoadedThumbnail(NSImage(cgImage: image,
             size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)), animated: false)

@@ -472,6 +472,51 @@ import Foundation
         expect(!model.hasActiveWork, "idle state must allow exit")
         pass("missing sources visible on both pages; busy guards protect operations")
 
+        let lookupModel = ImporterModel(refreshOnInit: false)
+        let lookupPairs = try (0..<73).map { index -> PairItem in
+            let image = root.appendingPathComponent("lookup-\(index).png")
+            let video = root.appendingPathComponent("lookup-\(index).mov")
+            try Data([0]).write(to: image)
+            try Data([0]).write(to: video)
+            return PairItem(imageURL: image, videoURL: video)
+        }
+        func lookupItems(_ pairs: [PairItem]) -> [DownloadGridItem] {
+            pairs.map { pair in
+                DownloadGridItem(id: "pair:\(pair.id)", imageURL: pair.imageURL, modifiedTime: 0,
+                    status: pair.status, kind: .pair(pair.id), isCompleted: false, mediaKind: .livePhoto)
+            }
+        }
+        lookupModel.downloadPairs = Array(lookupPairs.reversed())
+        let lookupRows = lookupItems(lookupPairs)
+        let lookupStart = ProcessInfo.processInfo.systemUptime
+        let (_, lookupCoordinator) = DownloadCollectionView.make(items: lookupRows, filter: .all,
+            model: lookupModel, bottomContentInset: 0)
+        let initialLookupMS = (ProcessInfo.processInfo.systemUptime - lookupStart) * 1000
+        let lookupGrid = lookupCoordinator.gridController!
+        for index in [0, 36, 72] {
+            let pair = lookupPairs[index]
+            expect(lookupGrid.resourceURLs(forIDs: ["pair:\(pair.id)"]) == [pair.imageURL, pair.videoURL],
+                   "native Live Photo export must resolve exact pair identity despite a reversed model order")
+        }
+        let unchangedLookupStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<30 { lookupCoordinator.applyItems(lookupRows) }
+        let unchangedLookupMS = (ProcessInfo.processInfo.systemUptime - unchangedLookupStart) * 1000
+        let replacementVideo = root.appendingPathComponent("lookup-replacement.mov")
+        try Data([0]).write(to: replacementVideo)
+        let replacementPair = PairItem(imageURL: lookupPairs[36].imageURL, videoURL: replacementVideo)
+        var replacedPairs = lookupPairs
+        replacedPairs[36] = replacementPair
+        lookupModel.downloadPairs = Array(replacedPairs.reversed())
+        lookupCoordinator.applyItems(lookupItems(replacedPairs), animatingDifferences: false,
+                                     defersCompletionRemoval: false)
+        expect(lookupGrid.resourceURLs(forIDs: ["pair:\(replacementPair.id)"]) == [replacementPair.imageURL, replacementVideo],
+               "a changed pair must export its new video together with the original still")
+        expect(lookupGrid.resourceURLs(forIDs: ["pair:\(lookupPairs[36].id)"]).isEmpty,
+               "a replaced pair identity must not export stale resources")
+        print(String(format: "METRIC: 73 native pair rows, initial %.3f ms; 30 unchanged reloads %.3f ms",
+                     initialLookupMS, unchangedLookupMS))
+        pass("native pair resources follow exact identity, survive unchanged reloads and update after video replacement")
+
         let menuModel = ImporterModel(refreshOnInit: false)
         let menuPhoto = root.appendingPathComponent("menu-photo.png")
         let menuCover = root.appendingPathComponent("menu-cover.png")
@@ -709,6 +754,64 @@ import Foundation
         pass("real main-window gallery opens at newest, stays pinned through native resize and keeps equal input margins through growth/shrink")
         let spacingGrid = spacingCollection.delegate as! ThumbnailGridController
         let spacingZoom = spacingGrid.zoom!
+        actor ProgressOverlayFixture {
+            var progress: DownloaderInfra.ProgressHandler?
+            var completion: CheckedContinuation<ToolRunResult, Never>?
+            func run(_ handler: DownloaderInfra.ProgressHandler?) async -> ToolRunResult {
+                progress = handler
+                return await withCheckedContinuation { completion = $0 }
+            }
+            func report(_ value: Double) async { await progress?(value) }
+            func finish() { completion?.resume(returning: .success("fixture completed")); completion = nil }
+        }
+        let progressFixture = ProgressOverlayFixture()
+        let spacingPhotos = spacingModel.downloadPhotos
+        spacingModel.downloadScanner = { _, _ in DownloadScanResult(pairs: [], photos: spacingPhotos, videos: []) }
+        spacingModel.shareDownloader = { _, _, progress in await progressFixture.run(progress) }
+        let spacingProgress = descendants(spacingRoot).compactMap { $0 as? DownloadProgressStackView }.first!
+        let galleryOrigin = spacingScroll.contentView.documentVisibleRect.origin
+        let gallerySize = spacingLayout.collectionViewContentSize
+        let gallerySpec = spacingLayout.spec
+        let galleryBottomInset = spacingLayout.sectionInset.bottom
+        let nativeCell = spacingCollection.item(at: IndexPath(item: 70, section: 0))!
+        let nativeCellFrame = nativeCell.view.frame
+        spacingModel.downloadShareText = "https://v.douyin.com/progress-overlay-fixture/"
+        await spacingModel.downloadShare()
+        try await waitUntil { !spacingModel.downloadProgressItems.isEmpty && !spacingProgress.isHidden }
+        expect(spacingCollection.item(at: IndexPath(item: 70, section: 0)) === nativeCell,
+               "showing progress must retain native cell identity")
+        func checkProgressGeometry() {
+            spacingRoot.layoutSubtreeIfNeeded()
+            expect(spacingScroll.contentView.documentVisibleRect.origin == galleryOrigin,
+                   "progress visibility and callbacks must not push thumbnails or change scrolling")
+            expect(spacingLayout.collectionViewContentSize == gallerySize && spacingLayout.spec.level == gallerySpec.level
+                   && spacingLayout.spec.leadingSlots == gallerySpec.leadingSlots
+                   && spacingLayout.sectionInset.bottom == galleryBottomInset,
+                   "progress must remain outside the collection's layout and inset calculation")
+            expect(nativeCell.view.frame == nativeCellFrame, "the last thumbnail must retain its actual native frame")
+            expect(abs(spacingProgress.frame.minY - spacingBar.frame.maxY - 12) <= 1,
+                   "Auto Layout must position progress above the input without reserving gallery space")
+        }
+        checkProgressGeometry()
+        for value in [0.05, 0.45, 0.9] {
+            await progressFixture.report(value)
+            try await Task.sleep(for: .milliseconds(30))
+            checkProgressGeometry()
+        }
+        let progressAnchor = spacingLayout.spec.frame(index: 60, width: spacingLayout.viewportSize.width,
+                                                     metrics: spacingLayout.metrics)
+        spacingZoom.beginGesture(at: CGPoint(x: progressAnchor.midX, y: progressAnchor.midY))
+        await progressFixture.report(0.95)
+        try await Task.sleep(for: .milliseconds(30))
+        expect(spacingZoom.plan != nil && spacingZoom.gesture != nil,
+               "a progress callback must not commit or interrupt an in-flight pinch")
+        spacingZoom.finishForInteraction()
+        await progressFixture.finish()
+        try await waitUntil { !spacingModel.isDownloading && spacingModel.downloadProgressItems.isEmpty }
+        try await Task.sleep(for: .milliseconds(400))
+        expect(spacingProgress.isHidden, "completed progress must remove its overlay")
+        checkProgressGeometry()
+        pass("progress appears, updates and disappears above the input without moving native cells or interrupting pinch")
         let nativeSplit = spacingWindow.contentViewController as! NSSplitViewController
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             spacingWindow.appearance = NSAppearance(named: appearance)
@@ -771,6 +874,36 @@ import Foundation
         expect((thumbnail.view.accessibilityValue() as? String)?.contains("正在合成") == true, "composition status must remain available to VoiceOver")
         expect(!descendants(thumbnail.view).compactMap { $0 as? NSTextField }.contains { !$0.isHidden && $0.stringValue.contains("正在合成") }, "composition must not cover artwork with a text label")
         pass("filter recovery action and visible composition state")
+        let deletionModel = ImporterModel(refreshOnInit: false)
+        deletionModel.downloadPhotos = [missing]
+        deletionModel.downloadFilter = .notComposed
+        deletionModel.downloadFilter = .all
+        let (deletionScroll, deletionCoordinator) = DownloadCollectionView.make(
+            items: deletionModel.visibleDownloadItems, filter: .all, model: deletionModel, bottomContentInset: 0)
+        let deletionWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+        deletionWindow.contentView = deletionScroll
+        deletionWindow.orderFront(nil)
+        defer { deletionWindow.orderOut(nil) }
+        deletionScroll.layoutSubtreeIfNeeded()
+        let deletionCell = deletionCoordinator.collectionView!.item(at: IndexPath(item: 0, section: 0)) as! ThumbnailCollectionItem
+        let deletionArtwork = NSImage(size: NSSize(width: 64, height: 64), flipped: false) { bounds in
+            NSColor.systemBlue.setFill()
+            NSBezierPath(rect: bounds).fill()
+            return true
+        }
+        let deletionView = deletionCell.view as! ThumbnailItemView
+        deletionView.compositionEffect.update(image: deletionArtwork, running: true)
+        expect(deletionCell.isPresentingComposition, "the regression must start with a retained completion presentation")
+        deletionModel.clearVisibleDownloads(deleteFiles: false)
+        DownloadCollectionView.update(scrollView: deletionScroll, coordinator: deletionCoordinator,
+            items: deletionModel.visibleDownloadItems, filter: .all, model: deletionModel, bottomContentInset: 0)
+        expect(!deletionCoordinator.gridController!.hasPresentedItems,
+               "user removal must start native deletion immediately even while the completion effect is still visible")
+        try await Task.sleep(for: .milliseconds(450))
+        expect(deletionCoordinator.collectionView!.numberOfItems(inSection: 0) == 0,
+               "explicit removal must not leave a composition ghost for its minimum playback duration")
+        pass("explicit deletion bypasses the retained completion effect and leaves an empty native collection")
         print("PASS: \(checks) UI/UX regression groups; no network, media deletion or Photos writes")
     }
 }

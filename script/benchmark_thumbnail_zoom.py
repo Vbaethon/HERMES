@@ -105,7 +105,7 @@ def snapshot_sources(destination, revision):
                 "plan_prepare": r"private func preparePlan\([^\n]*\)\s*\{",
                 "gesture_begin": r"func beginGesture\([^\n]*\)\s*\{",
                 "gesture_change": r"func changeGesture\([^\n]*\)\s*\{",
-                "release_clock_tick": r"func advanceAnimation\([^\n]*\)\s*\{",
+                "display_clock_tick": r"func displayFrame\(at timestamp: CFTimeInterval\)\s*\{",
                 "native_commit": r"private func commitPlan\(\)\s*\{",
                 "overlay_submit": r"private func applyOverlay\(\)\s*\{",
                 "native_layout_handoff": r"private func applyNative\([^\n]*\)\s*\{",

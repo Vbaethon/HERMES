@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		111111111111111111111163 /* Views/Other/MediaLocationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111162 /* Views/Other/MediaLocationCard.swift */; };
 		111111111111111111111149 /* DouyinSourceResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111148 /* DouyinSourceResolver.swift */; };
 		111111111111111111111102 /* dwdl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111002 /* dwdl.swift */; };
 		111111111111111111111103 /* rndl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111003 /* rndl.swift */; };
@@ -83,6 +84,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		111111111111111111111162 /* Views/Other/MediaLocationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MediaLocationCard.swift; sourceTree = "<group>"; };
 		111111111111111111111148 /* DouyinSourceResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/DouyinSourceResolver.swift; sourceTree = "<group>"; };
 		111111111111111111111002 /* dwdl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = dwdl.swift; sourceTree = "<group>"; };
 		111111111111111111111003 /* rndl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = rndl.swift; sourceTree = "<group>"; };
@@ -159,6 +161,7 @@
 			children = (
 				11111111111111111111115A /* Utilities/MediaInspection.swift */,
 				111111111111111111111158 /* Views/Other/MediaInspectorController.swift */,
+				111111111111111111111162 /* Views/Other/MediaLocationCard.swift */,
 				111111111111111111111156 /* Utilities/NativeMediaResources.swift */,
 				111111111111111111111029 /* HermesApp.swift */,
 				111111111111111111111146 /* SubprocessRunner.swift */,
@@ -392,6 +395,7 @@
 				111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */,
 				11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */,
 				111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */,
+				111111111111111111111163 /* Views/Other/MediaLocationCard.swift in Sources */,
 				111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */,
 				111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */,
 				111111111111111111111140 /* Views/Other/NativePanelPresenter.swift in Sources */,
@@ -570,7 +574,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 674;
+				CURRENT_PROJECT_VERSION = 677;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -582,7 +586,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.3;
+				MARKETING_VERSION = 3.0.6;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -604,7 +608,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 674;
+				CURRENT_PROJECT_VERSION = 677;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -616,7 +620,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.3;
+				MARKETING_VERSION = 3.0.6;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

@@ -174,6 +174,12 @@ import Foundation
         deletion.trashFiles = { _ in "测试拒绝删除" }
         deletion.clearVisibleCompleted(deleteFiles: true)
         expect(deletion.completed.count == 1 && deletion.operationNotices[.completed]?.contains("测试拒绝删除") == true, "failed deletion must retain record and visible error")
+        expect(deletion.thumbnailDeletionRevision == 0, "a failed trash operation must not request thumbnail removal")
+        deletion.clearVisibleCompleted(deleteFiles: false)
+        expect(deletion.completed.isEmpty && deletion.thumbnailDeletionRevision == 1,
+               "successful explicit removal must bypass completion presentation without deleting retained files")
+        expect(fm.fileExists(atPath: rollbackPair.imageURL.path) && fm.fileExists(atPath: rollbackPair.videoURL.path),
+               "record-only removal must preserve both native resources")
         pass("deletion failure retains record and details")
 
         let recomposition = try model("recomposition")

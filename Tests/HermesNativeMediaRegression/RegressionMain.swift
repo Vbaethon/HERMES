@@ -877,7 +877,9 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         let locatedID = "photo:\(locatedImage.standardizedFileURL.path)"
         let relocatedID = "photo:\(relocatedImage.standardizedFileURL.path)"
         mapModel.selectedDownloadItemIDs = [locatedID]
-        let mapInspector = MediaInspectorController(model: mapModel)
+        let mapInspector = MediaInspectorController(model: mapModel, locationResolver: { coordinate in
+            .init(title: "测试拍摄地点", address: "坐标对应的完整地址 \(coordinate.latitude)")
+        })
         let mapWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 880),
             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         mapWindow.title = "HERMES · 位置检查器验证"
@@ -888,6 +890,7 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         try await waitUntil("the native map must load for a located photo; selection=\(mapModel.selectedDownloadItemIDs), items=\(mapModel.visibleDownloadItems.map(\.id)), status=\(mapInspector.statusText)") {
             !mapInspector.isLoading && mapInspector.location == photoLocation
         }
+        func currentCard() -> MediaLocationCard? { descendants(mapInspector.view).compactMap { $0 as? MediaLocationCard }.first }
         func currentMap() -> MKMapView? { descendants(mapInspector.view).compactMap { $0 as? MKMapView }.first }
         try expect(mapInspector.rows.contains { $0.key == "光圈" && $0.value == "f/1.78" }
             && mapInspector.sectionGrids[.capture] != nil,
@@ -900,7 +903,7 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
             let map = currentMap()!
             try expect(map.annotations.count == 1 && map.annotations[0].coordinate.latitude == photoLocation.latitude
                 && map.annotations[0].coordinate.longitude == photoLocation.longitude
-                && !map.showsUserLocation && map.layer?.cornerRadius == 10 && map.layer?.masksToBounds == true,
+                && !map.showsUserLocation && currentCard()?.layer?.cornerRadius == 10 && currentCard()?.layer?.masksToBounds == true,
                 "the native rounded map must mark only the selected file's location without current-location tracking")
             try expect(abs(map.frame.width - (mapInspector.scrollView.contentSize.width - 32)) < 0.5
                 && abs(map.frame.height - 180) < 0.5,
@@ -917,11 +920,15 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
                 && locationHeading.convert(locationHeading.bounds, to: document).minY > mapRect.maxY
                 && postHeading.convert(postHeading.bounds, to: document).maxY < mapRect.minY,
                 "the map must follow useful media properties and precede post and technical details")
-            let marker = mapInspector.mapView(map, viewFor: map.annotations[0]) as? MKMarkerAnnotationView
+            let marker = currentCard()?.mapView(map, viewFor: map.annotations[0]) as? MKMarkerAnnotationView
             try expect(marker?.displayPriority == .required && marker?.canShowCallout == false,
                 "the file location must use the system marker with no raw-coordinate callout")
             try expectCleanInspectorForm(mapInspector, context: "located photo at width \(width)")
         }
+        try await waitUntil("the selected coordinate must resolve its own caption") { currentCard()?.resolutionSucceeded == true }
+        try expect(currentCard()?.displayedTitle == "测试拍摄地点"
+            && currentCard()?.displayedAddress == "坐标对应的完整地址 \(photoLocation.latitude)",
+            "the inspector must bind the caption and original map coordinate in the same card")
         let retainedMap = currentMap()!
         mapInspector.isInspectionEnabled = false
         mapInspector.isInspectionEnabled = true

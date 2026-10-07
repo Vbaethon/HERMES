@@ -80,11 +80,10 @@ private enum DownloadInputMetrics {
         contentHeight(for: rawLineCount) + verticalPadding * 2
     }
 
-    static func downloadCollectionBottomInset(for rawLineCount: Int, showsProgress: Bool) -> CGFloat {
-        // Equal spacing above the visible overlay and below the input. Hidden
-        // progress views must not leave a permanent empty band in the document.
+    static func downloadCollectionBottomInset(for rawLineCount: Int) -> CGFloat {
+        // Only the input reserves reading space. Progress is an Auto Layout
+        // overlay above it and never changes the collection's geometry.
         barHeight(for: rawLineCount) + bottomPadding * 2
-            + (showsProgress ? progressBottomSpacing + progressStackHeight : 0)
     }
 }
 
@@ -740,7 +739,7 @@ final class DownloadTaskProgressBarView: NSView {
     private var isAnimating = false
     private var queuedText: String?
     private var primaryTextVisible = false
-    private var primaryTextDeferred = false
+    private(set) var primaryTextDeferred = false
     var stackIndex = 0
     var isRemovingFromStack = false
 
@@ -999,6 +998,8 @@ final class DownloadTaskProgressBarView: NSView {
 final class DownloadProgressStackView: NSView {
     private var barViewsByID: [UUID: DownloadTaskProgressBarView] = [:]
     private var isAnimatingStackLayout = false
+    private var visibleOrder: [UUID]?
+    private var layoutGeneration = 0
     private let maximumVisibleBars = 3
     private let barHeight: CGFloat = 40
     private let slotYOffset: CGFloat = 12
@@ -1009,6 +1010,18 @@ final class DownloadProgressStackView: NSView {
     func update(with items: [DownloadProgressItem], animated: Bool = true) {
         let animated = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let visibleItems = Array(items.prefix(maximumVisibleBars))
+        let order = visibleItems.map(\.id)
+        // Byte-progress callbacks only update existing native controls. Queue
+        // insertion/removal owns stacking, ordering and its AppKit animation.
+        if visibleOrder == order {
+            for (index, item) in visibleItems.enumerated() {
+                barViewsByID[item.id]?.update(with: item, stackIndex: index)
+            }
+            return
+        }
+        visibleOrder = order
+        layoutGeneration += 1
+        let generation = layoutGeneration
         let visibleIDs = Set(visibleItems.map(\.id))
         var insertedIDs = Set<UUID>()
 
@@ -1033,7 +1046,8 @@ final class DownloadProgressStackView: NSView {
         var deferredTextIDs: [UUID] = []
         for (index, item) in visibleItems.enumerated() {
             guard let barView = barViewsByID[item.id] else { continue }
-            let shouldDeferPrimaryText = animated && index == 0 && (insertedIDs.contains(item.id) || barView.stackIndex != 0)
+            let shouldDeferPrimaryText = animated && index == 0
+                && (insertedIDs.contains(item.id) || barView.stackIndex != 0 || barView.primaryTextDeferred)
             if insertedIDs.contains(item.id) {
                 barView.frame = initialFrameForBar(at: index)
             }
@@ -1072,7 +1086,7 @@ final class DownloadProgressStackView: NSView {
                 applyLayout(true)
             } completionHandler: { [weak self, idsToReveal] in
                 Task { @MainActor [weak self, idsToReveal] in
-                    guard let self else { return }
+                    guard let self, generation == self.layoutGeneration else { return }
                     self.isAnimatingStackLayout = false
                     for id in idsToReveal {
                         self.barViewsByID[id]?.revealPrimaryText(animated: true)
@@ -1081,6 +1095,7 @@ final class DownloadProgressStackView: NSView {
                 }
             }
         } else {
+            isAnimatingStackLayout = false
             applyLayout(false)
             for id in idsToReveal {
                 barViewsByID[id]?.revealPrimaryText(animated: false)
@@ -1188,8 +1203,7 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         progressStack.translatesAutoresizingMaskIntoConstraints = false
 
         let bottomInset = DownloadInputMetrics.downloadCollectionBottomInset(
-            for: DownloadInputMetrics.rawLineCount(for: model.downloadShareText),
-            showsProgress: !model.downloadProgressItems.isEmpty
+            for: DownloadInputMetrics.rawLineCount(for: model.downloadShareText)
         )
         let pair = DownloadCollectionView.make(
             items: model.visibleDownloadItems,
@@ -1297,8 +1311,7 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
     }
 
     func reload() {
-        queueButton.isHidden = model.downloadQueueCount == 0
-        queueButton.title = "查看全部任务（\(model.downloadQueueCount)）"
+        reloadQueueButton()
         downloadBar.reload()
         let hasItems = !model.downloadPairs.isEmpty || !model.downloadPhotos.isEmpty || !model.downloadVideos.isEmpty
         emptyView.showAllAction = hasItems ? { [weak self] in self?.model.downloadFilter = .all } : nil
@@ -1306,7 +1319,7 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
         emptyView.message = hasItems ? "请在工具栏选择“全部项目”。" : model.downloadStatusText
         let rawLineCount = downloadBar.laidOutLineCount
         let bottomInset = DownloadInputMetrics.downloadCollectionBottomInset(
-            for: rawLineCount, showsProgress: !model.downloadProgressItems.isEmpty
+            for: rawLineCount
         )
 
         guard let scrollView, let coordinator else { return }
@@ -1329,6 +1342,11 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
 
     private func reloadProgress() {
         progressStack.update(with: model.downloadProgressItems, animated: true)
-        reload()
+        reloadQueueButton()
+    }
+
+    private func reloadQueueButton() {
+        queueButton.isHidden = model.downloadQueueCount == 0
+        queueButton.title = "查看全部任务（\(model.downloadQueueCount)）"
     }
 }

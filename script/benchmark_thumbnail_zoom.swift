@@ -205,7 +205,7 @@ final class ThumbnailZoomBenchmark: NSObject, NSApplicationDelegate {
         let zoom = grid.zoom!
         if preparePreset {
             zoom.zoom(to: from)
-            zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+            zoom.displayFrame(at: CACurrentMediaTime() + 10)
             await Task.yield()
         } else if zoom.position != CGFloat(from) || zoom.plan != nil {
             throw ZoomProbeError(description: "Cold fixture was already zoomed before measurement")
@@ -249,9 +249,8 @@ final class ThumbnailZoomBenchmark: NSObject, NSApplicationDelegate {
             let desired = CGFloat(from) + CGFloat(to - from) * progress
             let currentSide = ZoomGeometry.side(width: layout.viewportSize.width, position: zoom.position, metrics: layout.metrics)
             let desiredSide = ZoomGeometry.side(width: layout.viewportSize.width, position: desired, metrics: layout.metrics)
-            let ratio = desiredSide / currentSide
             let start = ProcessInfo.processInfo.systemUptime
-            zoom.changeGesture(magnification: ratio * ratio - 1)
+            zoom.changeGesture(magnification: 2 * (desiredSide - currentSide) / zoom.gesture!.startSide)
             inputSubmissions.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
             displaySubmissions.append(submitDisplay())
             maxTiles = max(maxTiles, zoom.overlay.retainedTileCount)
@@ -301,7 +300,7 @@ final class ThumbnailZoomBenchmark: NSObject, NSApplicationDelegate {
             "event": "phase", "label": fixture.label, "phase": name, "items": count,
             "zoom_cache_state": cacheState,
             "from_columns": ZoomGeometry.columns[from], "to_columns": ZoomGeometry.columns[to],
-            "source_anchor": plan.anchor.index, "pins_to_newest": plan.pinsToNewest,
+            "source_anchor": plan.anchor.index,
             "valid": externalEvents == 0 && geometryUnchanged && finished,
             "invalid_reasons": invalidReasons,
             "external_input_events": externalEvents, "native_handoff_finished": finished,

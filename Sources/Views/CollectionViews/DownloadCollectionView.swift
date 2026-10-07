@@ -52,6 +52,8 @@ enum DownloadCollectionView {
         weak var collectionView: NSCollectionView?
         var gridController: ThumbnailGridController?
         private var items: [DownloadGridItem] = []
+        private var hasAppliedItems = false
+        private var appliedDeletionRevision = 0
 
         override init() {}
 
@@ -65,18 +67,34 @@ enum DownloadCollectionView {
         }
 
         func applyItems(_ newItems: [DownloadGridItem], animatingDifferences: Bool = true, defersCompletionRemoval: Bool = true) {
+            let revision = model?.thumbnailDeletionRevision ?? 0
+            let explicitlyRemoved = revision != appliedDeletionRevision
+            // Input sizing and unrelated model updates can reload the page.
+            // Preserve its native cells and in-flight zoom when content is the
+            // same; explicit filter changes still finish deferred removals.
+            if hasAppliedItems, items == newItems, defersCompletionRemoval, !explicitlyRemoved { return }
+            hasAppliedItems = true
             items = newItems
-            gridController?.updateItems(newItems.map { gridItem(for: $0) }, animatingDifferences: animatingDifferences, defersCompletionRemoval: defersCompletionRemoval)
+            appliedDeletionRevision = revision
+            // PairItem.id standardizes both file URLs. Resolve each pair once
+            // instead of repeating a filesystem-backed linear search per cell.
+            var resourcesByPairID: [String: [URL]] = [:]
+            for pair in model?.downloadPairs ?? [] {
+                let id = pair.id
+                if resourcesByPairID[id] == nil { resourcesByPairID[id] = [pair.imageURL, pair.videoURL] }
+            }
+            gridController?.updateItems(newItems.map { gridItem(for: $0, resourcesByPairID: resourcesByPairID) },
+                animatingDifferences: animatingDifferences, defersCompletionRemoval: defersCompletionRemoval && !explicitlyRemoved)
         }
 
         func applySelection() {
             gridController?.applySelection(model?.selectedDownloadItemIDs ?? [])
         }
 
-        private func gridItem(for item: DownloadGridItem) -> ThumbnailGridItem {
+        private func gridItem(for item: DownloadGridItem, resourcesByPairID: [String: [URL]]) -> ThumbnailGridItem {
             let resources: [URL]
-            if case .pair(let id) = item.kind, let pair = model?.downloadPairs.first(where: { $0.id == id }) {
-                resources = [pair.imageURL, pair.videoURL]
+            if case .pair(let id) = item.kind, let pairResources = resourcesByPairID[id] {
+                resources = pairResources
             } else {
                 resources = [item.imageURL]
             }

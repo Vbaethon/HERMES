@@ -38,6 +38,7 @@ enum PairCollectionView {
         weak var collectionView: NSCollectionView?
         var gridController: ThumbnailGridController?
         private var items: [PairItem] = []
+        private var appliedDeletionRevision = 0
 
         override init() {}
 
@@ -52,7 +53,11 @@ enum PairCollectionView {
 
         func applyItems(_ newItems: [PairItem], animatingDifferences: Bool = true) {
             items = newItems
-            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences)
+            let revision = model?.thumbnailDeletionRevision ?? 0
+            let explicitlyRemoved = revision != appliedDeletionRevision
+            appliedDeletionRevision = revision
+            gridController?.updateItems(newItems.map(Self.gridItem), animatingDifferences: animatingDifferences,
+                                        defersCompletionRemoval: !explicitlyRemoved)
         }
 
         func applySelection() {

@@ -64,11 +64,12 @@ struct ZoomLayerState {
                       y: frame.midY * scale + offset.y - side / 2, width: side, height: side)
     }
 
-    func visibleIndices(count: Int, width: CGFloat, height: CGFloat, metrics: ZoomMetrics) -> Range<Int> {
+    func visibleIndices(count: Int, width: CGFloat, height: CGFloat, metrics: ZoomMetrics,
+                        paddingRows: Int = 2) -> Range<Int> {
         let pitch = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[spec.level], metrics: metrics) + metrics.gap
         let columns = ZoomGeometry.columns[spec.level]
-        let firstRow = max(0, Int(floor((-offset.y / scale - metrics.top) / pitch)) - 2)
-        let lastRow = max(firstRow, Int(ceil(((height - offset.y) / scale - metrics.top) / pitch)) + 2)
+        let firstRow = max(0, Int(floor((-offset.y / scale - metrics.top) / pitch)) - paddingRows)
+        let lastRow = max(firstRow, Int(ceil(((height - offset.y) / scale - metrics.top) / pitch)) + paddingRows)
         let first = min(count, max(0, firstRow * columns - spec.leadingSlots))
         let last = min(count, max(first, (lastRow + 1) * columns - spec.leadingSlots))
         return first..<last
@@ -135,7 +136,7 @@ final class ThumbnailZoomOverlay: NSView {
             }
             // An offscreen asset can have badge text before its thumbnail is
             // available. It must not leave a floating badge on an empty tile.
-            badge.isHidden = isHidden || value.image == nil || value.badge == nil
+            badge.isHidden = value.image == nil || value.badge == nil
             if badgeContents !== value.badge {
                 badgeContents = value.badge
                 badge.contents = value.badge
@@ -163,11 +164,6 @@ final class ThumbnailZoomOverlay: NSView {
                                    width: min(value.failureSize.width / scale, max(0, photo.width - 8 / scale)),
                                    height: value.failureSize.height / scale)
             }
-        }
-
-        func setPresentationHidden(_ hidden: Bool) {
-            isHidden = hidden
-            badge.isHidden = hidden || imageContents == nil || badgeContents == nil
         }
     }
 
@@ -210,7 +206,6 @@ final class ThumbnailZoomOverlay: NSView {
     }
 
     private let grids = (0..<4).map { _ in Grid() }
-    private let focalGrid = Grid()
     private var assets: [Int: ZoomArtwork] = [:]
     private var assetCount = 0
     private var resolvedBackground: CGColor?
@@ -223,7 +218,26 @@ final class ThumbnailZoomOverlay: NSView {
         }
     }
     private(set) var states: [ZoomLayerState] = []
-    private(set) var focalFrames: [Int: CGRect] = [:]
+    private var focusIndex = 0
+    private var metrics = ZoomMetrics.demo
+    /// Inspection of genuinely aligned photos, without a separate opaque row.
+    /// The same image at the same frame in both grids stays visually continuous
+    /// through their normal source-over blend; departing neighbours fade out.
+    var focalFrames: [Int: CGRect] {
+        let active = states.filter { $0.weight > 0 }
+        guard let reference = active.first else { return [:] }
+        let columns = ZoomGeometry.columns[reference.spec.level]
+        let start = ((focusIndex + reference.spec.leadingSlots) / columns) * columns - reference.spec.leadingSlots
+        var frames: [Int: CGRect] = [:]
+        for index in max(0, start)..<min(assetCount, start + columns) {
+            let frame = reference.cellFrame(index: index, width: bounds.width, metrics: metrics)
+            if active.dropFirst().allSatisfy({ state in
+                let other = state.cellFrame(index: index, width: bounds.width, metrics: metrics)
+                return abs(frame.midX - other.midX) + abs(frame.midY - other.midY) < 0.01
+            }) { frames[index] = frame }
+        }
+        return frames
+    }
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -232,7 +246,6 @@ final class ThumbnailZoomOverlay: NSView {
         wantsLayer = true
         layer?.masksToBounds = true
         for grid in grids { layer?.addSublayer(grid.viewport) }
-        layer?.addSublayer(focalGrid.viewport)
         isHidden = true
         setAccessibilityElement(false)
     }
@@ -280,7 +293,7 @@ final class ThumbnailZoomOverlay: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let value = Float(min(1, max(0, opacity)))
-        for grid in grids + [focalGrid] {
+        for grid in grids {
             if grid.decorations.opacity != value { grid.decorations.opacity = value }
         }
         CATransaction.commit()
@@ -290,32 +303,29 @@ final class ThumbnailZoomOverlay: NSView {
         guard assetCount > 0, bounds.width > 0 else { return }
         updateBackgroundIfNeeded()
         let width = bounds.width, height = bounds.height, metrics = plan.metrics
+        self.metrics = metrics
+        focusIndex = plan.anchor.index
         let center = plan.focusCenter(width: width, height: height, count: assetCount,
                                       position: position, elasticScale: elasticScale)
         states = plan.specs.map {
             ZoomLayerState(spec: $0, position: position, width: width, focusCenter: center,
                            weights: weights, elasticScale: elasticScale, metrics: metrics)
         }
-        focalFrames.removeAll(keepingCapacity: true)
-        let master = states[plan.sourceSpec.level]
-        let columns = ZoomGeometry.columns[master.spec.level]
-        let rowStart = ((plan.anchor.index + master.spec.leadingSlots) / columns) * columns - master.spec.leadingSlots
-        let focalRange = max(0, rowStart)..<min(assetCount, rowStart + columns)
-        for index in focalRange {
-            focalFrames[index] = master.cellFrame(index: index, width: width, metrics: metrics)
-        }
-
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (level, grid) in grids.enumerated() {
             let state = states[level]
-            grid.viewport.frame = bounds
-            grid.viewport.isHidden = state.weight == 0
-            grid.viewport.opacity = state.opacity
+            if grid.viewport.frame != bounds { grid.viewport.frame = bounds }
+            let hidden = state.weight == 0
+            if grid.viewport.isHidden != hidden { grid.viewport.isHidden = hidden }
+            if grid.viewport.opacity != state.opacity { grid.viewport.opacity = state.opacity }
             guard state.weight > 0 else { continue }
             grid.root.setAffineTransform(CGAffineTransform(a: state.scale, b: 0, c: 0, d: state.scale,
                                                           tx: state.offset.x, ty: state.offset.y))
-            let visible = state.visibleIndices(count: assetCount, width: width, height: height, metrics: metrics)
+            // Prefetch can look ahead two rows, but only the actual viewport
+            // needs Core Animation tiles and per-frame geometry updates.
+            let visible = state.visibleIndices(count: assetCount, width: width, height: height,
+                                               metrics: metrics, paddingRows: 0)
             grid.retain(visible)
             for index in visible {
                 let tile = grid.tile(at: index)
@@ -323,25 +333,13 @@ final class ThumbnailZoomOverlay: NSView {
                 let side = state.side / state.scale
                 tile.update(assets[index] ?? ZoomArtwork(), cell: CGRect(x: canonical.midX - side / 2, y: canonical.midY - side / 2,
                                                        width: side, height: side), scale: state.scale)
-                let displayed = state.cellFrame(index: index, width: width, metrics: metrics)
-                tile.setPresentationHidden(focalFrames[index].map {
-                    abs($0.midX - displayed.midX) + abs($0.midY - displayed.midY) < 0.01
-                } ?? false)
             }
-        }
-        // Every zoom grid clips at the same actual viewport edge. A fixed
-        // layout inset here cuts a moving focal photo with a white rectangle.
-        focalGrid.viewport.frame = bounds
-        focalGrid.retain(focalRange)
-        for (index, cell) in focalFrames {
-            let tile = focalGrid.tile(at: index)
-            tile.setPresentationHidden(false)
-            tile.opacity = 1
-            tile.update(assets[index] ?? ZoomArtwork(), cell: cell, scale: 1)
         }
         CATransaction.commit()
     }
 
-    func focalOpacity(at index: Int) -> Float? { focalGrid.tiles[index]?.opacity }
-    var retainedTileCount: Int { grids.reduce(focalGrid.tiles.count) { $0 + $1.tiles.count } }
+    func focalOpacity(at index: Int) -> Float? {
+        focalFrames[index] == nil ? nil : Float(states.reduce(0) { $0 + $1.weight })
+    }
+    var retainedTileCount: Int { grids.reduce(0) { $0 + $1.tiles.count } }
 }

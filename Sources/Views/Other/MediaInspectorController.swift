@@ -1,9 +1,8 @@
 import AppKit
-import MapKit
 
 /// A continuous native AppKit inspector form with one scrolling document.
 @MainActor
-final class MediaInspectorController: NSViewController, MKMapViewDelegate {
+final class MediaInspectorController: NSViewController {
     let scrollView = NSScrollView()
     private let documentView = NSView()
     private let documentStack = NSStackView()
@@ -21,8 +20,8 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
     private var isScrolledToTop = true
     private var paneTransitionCount = 0
     private var sectionContainers: [MediaInspection.Section: NSStackView] = [:]
-    private var locationMapView: MKMapView?
-    private var mapLocation: MediaInspection.Location?
+    private var locationCard: MediaLocationCard?
+    private let locationResolver: MediaLocationCard.Resolver?
     private let inspectionCache: NSCache<InspectionCacheKey, InspectionCacheSnapshot> = {
         let cache = NSCache<InspectionCacheKey, InspectionCacheSnapshot>()
         cache.countLimit = 64
@@ -38,13 +37,19 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
     var isInspectionEnabled = false {
         didSet {
             guard oldValue != isInspectionEnabled else { return }
-            if isInspectionEnabled { reload() }
-            else { cancelPendingLoad() }
+            if isInspectionEnabled {
+                reload()
+                locationCard?.resumeResolution()
+            } else {
+                cancelPendingLoad()
+                locationCard?.cancelResolution()
+            }
         }
     }
 
-    init(model: ImporterModel) {
+    init(model: ImporterModel, locationResolver: MediaLocationCard.Resolver? = nil) {
         self.model = model
+        self.locationResolver = locationResolver
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -124,9 +129,8 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
         }
         sectionGrids.removeAll()
         sectionContainers.removeAll()
-        locationMapView?.delegate = nil
-        locationMapView = nil
-        mapLocation = nil
+        locationCard?.show(nil)
+        locationCard = nil
         formNeedsLayout = true
     }
 
@@ -211,9 +215,8 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
         }
         sectionGrids.removeValue(forKey: kind)
         if kind == .location {
-            locationMapView?.delegate = nil
-            locationMapView = nil
-            mapLocation = nil
+            locationCard?.show(nil)
+            locationCard = nil
         }
     }
 
@@ -236,66 +239,26 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
     private func updateLocationSection() {
         guard let location else { return }
         let container = sectionContainers[.location] ?? makeSectionContainer(.location)
-        let map: MKMapView
-        if let existing = locationMapView {
-            map = existing
+        let card: MediaLocationCard
+        if let existing = locationCard {
+            card = existing
         } else {
-            map = MKMapView(frame: NSRect(x: 0, y: 0, width: 300, height: 180))
-            map.translatesAutoresizingMaskIntoConstraints = false
-            map.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .flat)
-            // Keep this compact preview fixed so wheel gestures scroll
-            // the inspector rather than changing the recorded location.
-            map.isScrollEnabled = false
-            map.isZoomEnabled = false
-            map.isRotateEnabled = false
-            map.isPitchEnabled = false
-            map.showsZoomControls = false
-            map.showsCompass = false
-            map.showsPitchControl = false
-            map.showsUserTrackingButton = false
-            map.showsUserLocation = false
-            map.wantsLayer = true
-            map.layer?.cornerRadius = 10
-            map.layer?.masksToBounds = true
-            map.setAccessibilityLabel("素材位置地图")
-            map.register(MKMarkerAnnotationView.self,
-                forAnnotationViewWithReuseIdentifier: "MediaLocation")
-            map.delegate = self
-            map.heightAnchor.constraint(equalToConstant: 180).isActive = true
-            locationMapView = map
+            card = MediaLocationCard(resolver: locationResolver)
+            card.onContentChange = { [weak self, weak card] in
+                guard let self, self.locationCard === card else { return }
+                self.formNeedsLayout = true
+                self.updateFormLayout()
+            }
+            locationCard = card
         }
-        if mapLocation != location {
-            map.removeAnnotations(map.annotations)
-            let coordinate = CLLocationCoordinate2D(latitude: location.latitude, longitude: location.longitude)
-            let annotation = MKPointAnnotation()
-            annotation.coordinate = coordinate
-            annotation.title = "拍摄位置"
-            map.addAnnotation(annotation)
-            map.setRegion(MKCoordinateRegion(center: coordinate,
-                latitudinalMeters: 1_200, longitudinalMeters: 1_200), animated: false)
-            mapLocation = location
-        }
-        let content: NSView = map
-        guard container.arrangedSubviews.last !== content else { return }
+        card.show(.init(latitude: location.latitude, longitude: location.longitude))
+        guard container.arrangedSubviews.last !== card else { return }
         for old in container.arrangedSubviews.dropFirst() {
             container.removeArrangedSubview(old)
             old.removeFromSuperview()
         }
-        container.addArrangedSubview(content)
-        content.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
-    }
-
-    func mapView(_ mapView: MKMapView, viewFor annotation: any MKAnnotation) -> MKAnnotationView? {
-        guard annotation is MKPointAnnotation else { return nil }
-        let marker = mapView.dequeueReusableAnnotationView(withIdentifier: "MediaLocation", for: annotation)
-            as! MKMarkerAnnotationView
-        marker.displayPriority = .required
-        marker.titleVisibility = .hidden
-        marker.subtitleVisibility = .hidden
-        marker.canShowCallout = false
-        marker.animatesWhenAdded = false
-        marker.setAccessibilityLabel("拍摄位置")
-        return marker
+        container.addArrangedSubview(card)
+        card.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
     }
 
     private func display(_ result: MediaInspection.Snapshot, isComplete: Bool) {
@@ -416,12 +379,14 @@ final class MediaInspectorController: NSViewController, MKMapViewDelegate {
     func beginPaneTransition() {
         paneTransitionCount += 1
         cancelPendingLoad()
+        locationCard?.cancelResolution()
     }
 
     func endPaneTransition() {
         paneTransitionCount = max(0, paneTransitionCount - 1)
         guard !isPaneTransitioning else { return }
         reload()
+        locationCard?.resumeResolution()
         updateFormLayout()
     }
 

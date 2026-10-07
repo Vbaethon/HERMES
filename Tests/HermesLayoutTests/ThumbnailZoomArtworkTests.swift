@@ -27,10 +27,14 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
 
     private func focalTile(in overlay: ThumbnailZoomOverlay, index: Int,
                            metrics: ZoomMetrics) throws -> CALayer {
-        let viewport = try XCTUnwrap(overlay.layer?.sublayers?.last)
+        let level = try XCTUnwrap(overlay.states.first { $0.weight > 0 }).spec.level
+        let viewport = try XCTUnwrap(overlay.layer?.sublayers?[level])
         let root = try XCTUnwrap(viewport.sublayers?.first)
         let frame = try XCTUnwrap(overlay.focalFrames[index])
-        return try XCTUnwrap(root.sublayers?.first { $0.frame == frame })
+        return try XCTUnwrap(root.sublayers?.dropLast().first {
+            let displayed = $0.frame.applying(root.affineTransform())
+            return abs(displayed.midX - frame.midX) + abs(displayed.midY - frame.midY) < 0.01
+        })
     }
 
     func testMovingFocalArtworkClipsAtTheActualViewportRatherThanLayoutPadding() throws {
@@ -39,11 +43,45 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         let plan = plan(level: 1, index: 42)
         overlay.render(position: 2.8, plan: plan, weights: [0, 0, 0.1, 0.9])
         let viewports = try XCTUnwrap(overlay.layer?.sublayers)
-        XCTAssertEqual(viewports.count, 5)
+        XCTAssertEqual(viewports.count, 4)
         XCTAssertTrue(viewports.allSatisfy { $0.frame == overlay.bounds },
                       "A moving focal image must not be cut off by a different inset clipping rectangle")
         let tile = try focalTile(in: overlay, index: plan.anchor.index, metrics: plan.metrics)
-        XCTAssertEqual(tile.frame, overlay.focalFrames[plan.anchor.index])
+        let displayed = tile.frame.applying(try XCTUnwrap(tile.superlayer).affineTransform())
+        let expected = try XCTUnwrap(overlay.focalFrames[plan.anchor.index])
+        XCTAssertEqual(displayed.midX, expected.midX, accuracy: 0.01)
+        XCTAssertEqual(displayed.midY, expected.midY, accuracy: 0.01)
+    }
+
+    func testFiveToThreeFadesTheOuterPointerRowPhotoWhileTheAlignedPhotoKeepsItsColor() throws {
+        let overlay = ThumbnailZoomOverlay(frame: CGRect(x: 0, y: 0, width: 1000, height: 600))
+        overlay.backgroundColor = .white
+        let image = try bitmap(width: 120, height: 120)
+        overlay.setAssets([40: ZoomArtwork(image: image), 42: ZoomArtwork(image: image)], count: 80)
+        let plan = plan(level: 2, index: 42)
+        overlay.isHidden = false
+        func red(at x: Int) throws -> Double {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 1000, height: 600,
+                bitsPerComponent: 8, bytesPerRow: 4000, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            try XCTUnwrap(overlay.layer).render(in: context)
+            let pixels = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+            return Double(pixels[(300 * 1000 + x) * 4]) / 255
+        }
+        overlay.render(position: 2, plan: plan, weights: [0, 0, 1, 0])
+        let originalRed = try red(at: 500)
+        XCTAssertLessThan(originalRed, 0.5, "The control must contain real image pixels")
+        overlay.render(position: 2.5, plan: plan, weights: [0, 0, 0.5, 0.5])
+        // The source row's outer photo is clipped at the left viewport edge.
+        // Its corresponding three-column photo has moved into the prior row.
+        let departingRed = try red(at: 50)
+        let alignedRed = try red(at: 500)
+        XCTAssertEqual(departingRed, (originalRed + 1) / 2, accuracy: 0.02,
+                       "The red-box neighbour must render at half weight, not remain opaque")
+        XCTAssertEqual(alignedRed, originalRed, accuracy: 0.02,
+                       "The identical aligned photo must not wash out during the common crossfade")
+        XCTAssertNil(overlay.focalFrames[40])
+        XCTAssertNotNil(overlay.focalFrames[42])
     }
 
     private func focalBadge(in overlay: ThumbnailZoomOverlay, tile: CALayer) throws -> CALayer {
@@ -54,7 +92,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
 
     private func assertBackgroundBadgesFollowTheirTiles(_ overlay: ThumbnailZoomOverlay,
                                                        file: StaticString = #filePath, line: UInt = #line) throws {
-        for viewport in try XCTUnwrap(overlay.layer?.sublayers?.dropLast()) {
+        for viewport in try XCTUnwrap(overlay.layer?.sublayers) {
             let root = try XCTUnwrap(viewport.sublayers?.first)
             let decorations = try XCTUnwrap(root.sublayers?.last)
             for tile in try XCTUnwrap(root.sublayers?.dropLast()) {
@@ -109,11 +147,12 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
                 let badgeLayer = try focalBadge(in: overlay, tile: tile)
                 let photo = layers[0].frame
                 let badgeFrame = badgeLayer.frame.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY)
+                let scale = try XCTUnwrap(tile.superlayer).affineTransform().a
                 XCTAssertFalse(badgeLayer.isHidden)
-                XCTAssertEqual(badgeFrame.width, 28, accuracy: 0.001)
-                XCTAssertEqual(badgeFrame.height, 18, accuracy: 0.001)
-                XCTAssertEqual(photo.maxX - badgeFrame.maxX, ThumbnailBadgeStyle.inset, accuracy: 0.001)
-                XCTAssertEqual(photo.maxY - badgeFrame.maxY, ThumbnailBadgeStyle.inset, accuracy: 0.001)
+                XCTAssertEqual(badgeFrame.width * scale, 28, accuracy: 0.001)
+                XCTAssertEqual(badgeFrame.height * scale, 18, accuracy: 0.001)
+                XCTAssertEqual((photo.maxX - badgeFrame.maxX) * scale, ThumbnailBadgeStyle.inset, accuracy: 0.001)
+                XCTAssertEqual((photo.maxY - badgeFrame.maxY) * scale, ThumbnailBadgeStyle.inset, accuracy: 0.001)
                 XCTAssertTrue(photo.contains(badgeFrame))
                 XCTAssertEqual(badgeLayer.contentsScale, 2)
                 XCTAssertEqual(tile.opacity, 1)
@@ -142,7 +181,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         XCTAssertEqual(actualColor.greenComponent, expectedColor.greenComponent, accuracy: 0.001)
         XCTAssertEqual(actualColor.blueComponent, expectedColor.blueComponent, accuracy: 0.001)
         XCTAssertEqual(actualColor.alphaComponent, 1, accuracy: 0.001)
-        for viewport in try XCTUnwrap(overlay.layer?.sublayers?.dropLast()) {
+        for viewport in try XCTUnwrap(overlay.layer?.sublayers) {
             XCTAssertEqual(viewport.backgroundColor, actual)
         }
     }
@@ -225,7 +264,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         XCTAssertEqual(color.redComponent, 1, accuracy: 0.001)
         XCTAssertEqual(color.greenComponent, 1, accuracy: 0.001)
         XCTAssertEqual(color.blueComponent, 1, accuracy: 0.001)
-        for viewport in try XCTUnwrap(overlay.layer?.sublayers?.dropLast()) {
+        for viewport in try XCTUnwrap(overlay.layer?.sublayers) {
             XCTAssertEqual(viewport.backgroundColor, actual)
         }
         overlay.backgroundColor = .controlBackgroundColor
