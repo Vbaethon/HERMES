@@ -81,7 +81,7 @@ final class ThumbnailZoomOverlay: NSView {
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
         @MainActor func update(_ value: ZoomArtwork, cell: CGRect, scale: CGFloat) {
-            frame = cell
+            if frame != cell { frame = cell }
             // Core Animation retains the bitmap until it changes. Reassigning
             // every tile's contents on each gesture event needlessly rebuilds
             // the same render state, including the AppKit badge snapshots.
@@ -95,10 +95,12 @@ final class ThumbnailZoomOverlay: NSView {
             artwork.frame = photo
             artwork.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius / scale
             ring.isHidden = value.image == nil || value.ringColor == nil
-            ring.frame = photo.insetBy(dx: -4 / scale, dy: -4 / scale)
-            ring.borderColor = value.ringColor
-            ring.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth / scale
-            ring.cornerRadius = (ThumbnailCollectionStyle.imageCornerRadius + 4) / scale
+            if !ring.isHidden {
+                ring.frame = photo.insetBy(dx: -4 / scale, dy: -4 / scale)
+                ring.borderColor = value.ringColor
+                ring.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth / scale
+                ring.cornerRadius = (ThumbnailCollectionStyle.imageCornerRadius + 4) / scale
+            }
             // An offscreen asset can have badge text before its thumbnail is
             // available. It must not leave a floating badge on an empty tile.
             badge.isHidden = isHidden || value.image == nil || value.badge == nil
@@ -109,11 +111,13 @@ final class ThumbnailZoomOverlay: NSView {
                     badge.contentsScale = CGFloat(image.width) / value.badgeSize.width
                 }
             }
-            let badgeSize = CGSize(width: value.badgeSize.width / scale, height: value.badgeSize.height / scale)
-            badge.frame = CGRect(x: photo.maxX - badgeSize.width - ThumbnailBadgeStyle.inset / scale,
+            if value.badge != nil {
+                let badgeSize = CGSize(width: value.badgeSize.width / scale, height: value.badgeSize.height / scale)
+                badge.frame = CGRect(x: photo.maxX - badgeSize.width - ThumbnailBadgeStyle.inset / scale,
                                  y: photo.maxY - badgeSize.height - ThumbnailBadgeStyle.inset / scale,
                                  width: badgeSize.width, height: badgeSize.height)
                 .offsetBy(dx: cell.minX, dy: cell.minY)
+            }
             failure.isHidden = value.failure == nil
             if failureContents !== value.failure {
                 failureContents = value.failure
@@ -122,9 +126,11 @@ final class ThumbnailZoomOverlay: NSView {
                     failure.contentsScale = CGFloat(image.width) / value.failureSize.width
                 }
             }
-            failure.frame = CGRect(x: photo.minX + 4 / scale, y: photo.minY + 4 / scale,
+            if !failure.isHidden {
+                failure.frame = CGRect(x: photo.minX + 4 / scale, y: photo.minY + 4 / scale,
                                    width: min(value.failureSize.width / scale, max(0, photo.width - 8 / scale)),
                                    height: value.failureSize.height / scale)
+            }
         }
 
         func setPresentationHidden(_ hidden: Bool) {

@@ -173,7 +173,7 @@ final class ZoomController: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private var boundsObserver: NSObjectProtocol?
     private var demoGeneration = 0
     private var handoffGeneration = 0
-    private var lastPinchFactor: CGFloat = 1
+    private var lastMagnification: CGFloat = 0
     var onChange: ((Int, Int, Bool) -> Void)?
 
     private struct Animation {
@@ -268,13 +268,13 @@ final class ZoomController: NSObject, NSCollectionViewDataSource, NSCollectionVi
 
     @objc private func handlePinch(_ recognizer: NSMagnificationGestureRecognizer) {
         if recognizer.state == .began {
-            lastPinchFactor = 1
-            beginGesture(at: recognizer.location(in: collection))
+            lastMagnification = 0
+            beginGesture(at: pointerInDocument())
         }
         if recognizer.state == .began || recognizer.state == .changed || recognizer.state == .ended {
-            let factor = max(0.01, 1 + recognizer.magnification)
-            changeGesture(magnification: factor / lastPinchFactor - 1)
-            lastPinchFactor = factor
+            let magnification = recognizer.magnification
+            changeGesture(magnification: magnification - lastMagnification)
+            lastMagnification = magnification
         }
         if recognizer.state == .ended { endGesture() }
         if recognizer.state == .cancelled || recognizer.state == .failed { endGesture(cancelled: true) }

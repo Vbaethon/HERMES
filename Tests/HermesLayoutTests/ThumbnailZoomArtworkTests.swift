@@ -22,7 +22,7 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
             documentPoint: CGPoint(x: frame.midX, y: frame.midY),
             viewportPoint: CGPoint(x: frame.midX, y: 300))
         return ZoomPlan(anchor: anchor, base: spec, width: width, height: height,
-                        count: count, endsAtNewest: true)
+                        count: count)
     }
 
     private func focalTile(in overlay: ThumbnailZoomOverlay, index: Int,

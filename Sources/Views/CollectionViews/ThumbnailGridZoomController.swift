@@ -34,20 +34,6 @@ final class ThumbnailGridLayout: NSCollectionViewLayout {
     }
 }
 
-@MainActor
-private final class ThumbnailZoomAnimation: NSAnimation, @unchecked Sendable {
-    nonisolated(unsafe) var frameHandler: (@MainActor @Sendable () -> Void)?
-    override var currentProgress: NSAnimation.Progress {
-        get { super.currentProgress }
-        set {
-            super.currentProgress = newValue
-            let handler = frameHandler
-            MainActor.assumeIsolated { handler?() }
-        }
-    }
-    override var runLoopModesForAnimating: [RunLoop.Mode]? { [.common] }
-}
-
 /// AppKit owns gesture delivery, scrolling, reusable cells and the animation
 /// clock. The accepted prototype's prepared layouts/opaque focal row own zoom.
 @MainActor
@@ -64,20 +50,19 @@ final class ThumbnailGridZoomController: NSObject {
     private(set) var plan: ZoomPlan?
     private var alpha = ZoomAlphaPresentation(level: 2)
     private(set) var elasticScale: CGFloat = 1
-    private var clock: ThumbnailZoomAnimation?
+    private var displayLink: CADisplayLink?
     private var animation: Animation?
     private var elasticReturn: ZoomElasticReturn?
     private var applying = false
     private var handoffGeneration = 0
     private var imageTasks: [Int: Task<Void, Never>] = [:]
     private var imageGeneration = 0
-    private var imageDisplayLink: CADisplayLink?
-    private var imagesNeedDisplay = false
+    private var needsDisplay = false
     private var badgeBitmaps: [String: (image: CGImage?, size: CGSize)] = [:]
     private var badgeBackingScale: CGFloat = 0
     private(set) var badgesSuppressed = false
     private(set) var cellsSuppressed = false
-    private var lastPinchFactor: CGFloat = 1
+    private var lastMagnification: CGFloat = 0
     private var hasShownNewest = false
     private var pendingItems: ItemChange?
     private var lastViewportBounds: CGRect?
@@ -98,13 +83,19 @@ final class ThumbnailGridZoomController: NSObject {
         let curve: NSAnimation
     }
 
-    @MainActor private final class ImageDisplayTarget: NSObject {
+    @MainActor private final class DisplayTarget: NSObject {
         weak var owner: ThumbnailGridZoomController?
         init(owner: ThumbnailGridZoomController) { self.owner = owner }
-        @objc func displayPendingImages(_ displayLink: CADisplayLink) {
+        @objc func displayFrame(_ displayLink: CADisplayLink) {
             guard let owner else { displayLink.invalidate(); return }
-            if owner.imagesNeedDisplay { owner.applyOverlay() }
+            owner.displayFrame(at: displayLink.targetTimestamp)
         }
+    }
+
+    isolated deinit {
+        displayLink?.invalidate()
+        if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
+        imageTasks.values.forEach { $0.cancel() }
     }
 
     init(collection: NSCollectionView, items: @escaping () -> [ThumbnailGridItem], sectionInset: NSEdgeInsets) {
@@ -209,8 +200,7 @@ final class ThumbnailGridZoomController: NSObject {
         guard plan == nil, let anchor = nativeAnchor(at: point) else { return }
         cancelImageTasks()
         plan = ZoomPlan(anchor: anchor, base: layout.spec, width: layout.viewportSize.width,
-                        height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics,
-                        endsAtNewest: true, pinsToNewest: isAtNewest)
+                        height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics)
         alpha = ZoomAlphaPresentation(level: layout.spec.level)
         overlay.setAssets(makeArtwork(), count: layout.count)
         let badgeOpacity = collection?.visibleItems().compactMap { item -> Float? in
@@ -255,15 +245,15 @@ final class ThumbnailGridZoomController: NSObject {
     @objc private func handlePinch(_ recognizer: NSMagnificationGestureRecognizer) {
         guard collection != nil else { return }
         if recognizer.state == .began {
-            lastPinchFactor = 1
+            lastMagnification = 0
             // A trackpad gesture's location is recognizer-specific. Photos-like
             // zoom uses the visible mouse pointer, just like keyboard zoom.
             beginGesture(at: pointerInDocument())
         }
         if recognizer.state == .began || recognizer.state == .changed || recognizer.state == .ended {
-            let factor = max(0.01, 1 + recognizer.magnification)
-            changeGesture(magnification: factor / lastPinchFactor - 1)
-            lastPinchFactor = factor
+            let magnification = recognizer.magnification
+            changeGesture(magnification: magnification - lastMagnification)
+            lastMagnification = magnification
         }
         if recognizer.state == .ended { endGesture() }
         if recognizer.state == .cancelled || recognizer.state == .failed { endGesture(cancelled: true) }
@@ -276,7 +266,7 @@ final class ThumbnailGridZoomController: NSObject {
         position = gesture.position
         elasticScale = gesture.elasticScale
         alpha.update(position: position)
-        applyOverlay()
+        requestFrame()
     }
 
     func endGesture(cancelled: Bool = false) {
@@ -307,25 +297,33 @@ final class ThumbnailGridZoomController: NSObject {
             return
         }
         animation = Animation(from: position, to: target, start: CACurrentMediaTime(),
-            duration: 0.30 + min(0.1, Double(abs(target - position)) * 0.025),
+            duration: 0.30,
             curve: NSAnimation(duration: 1, animationCurve: .easeInOut))
         if elasticScale != 1 { elasticReturn = ZoomElasticReturn(initialScale: elasticScale, start: CACurrentMediaTime()) }
-        let start = CACurrentMediaTime()
-        let duration = max(animation?.duration ?? 0, elasticReturn?.duration ?? 0) + 1.0 / 60
-        let clock = ThumbnailZoomAnimation(duration: duration, animationCurve: .linear)
-        clock.animationBlockingMode = .nonblocking
-        clock.frameRate = 120
-        clock.frameHandler = { [weak self, weak clock] in
-            guard let self, let clock else { return }
-            self.advanceAnimation(at: start + Double(clock.currentProgress) * duration)
-        }
-        self.clock = clock
-        clock.start()
         applyOverlay()
+        requestFrame()
     }
 
-    func advanceAnimation(at timestamp: CFTimeInterval) {
-        guard plan != nil else { stopAnimation(); return }
+    private func requestFrame() {
+        guard plan != nil, let collection else { return }
+        needsDisplay = true
+        if displayLink == nil {
+            displayLink = collection.displayLink(target: DisplayTarget(owner: self),
+                selector: #selector(DisplayTarget.displayFrame(_:)))
+            displayLink?.add(to: .main, forMode: .common)
+        }
+        displayLink?.isPaused = false
+    }
+
+    // Gesture events and bitmap completions update state immediately; AppKit's
+    // display link presents their latest state once per screen refresh. The
+    // same clock advances settlement, including while menus track events.
+    func displayFrame(at timestamp: CFTimeInterval) {
+        guard plan != nil else { stopDisplayLink(); return }
+        guard needsDisplay || animation != nil || elasticReturn != nil else {
+            displayLink?.isPaused = true
+            return
+        }
         if let animation {
             let fraction = min(1, max(0, (timestamp - animation.start) / animation.duration))
             animation.curve.currentProgress = Float(fraction)
@@ -339,6 +337,7 @@ final class ThumbnailGridZoomController: NSObject {
         alpha.update(position: position)
         applyOverlay()
         if gesture == nil && animation == nil && elasticReturn == nil { commitPlan() }
+        else if animation == nil && elasticReturn == nil { displayLink?.isPaused = true }
     }
 
     private func commitPlan() {
@@ -355,17 +354,21 @@ final class ThumbnailGridZoomController: NSObject {
         stopAnimation()
         gesture = nil
         self.plan = nil
+        stopDisplayLink()
         alpha = ZoomAlphaPresentation(level: level)
         elasticScale = 1
         applyNative(origin: -state.offset.y, deferHandoff: true)
     }
 
     private func stopAnimation() {
-        clock?.frameHandler = nil
-        clock?.stop()
-        clock = nil
         animation = nil
         elasticReturn = nil
+    }
+
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+        needsDisplay = false
     }
 
     func finishForInteraction() { if plan != nil { commitPlan() } }
@@ -394,28 +397,11 @@ final class ThumbnailGridZoomController: NSObject {
         lastViewportBounds = scroll.contentView.documentVisibleRect
         lastViewportInsets = scroll.contentInsets
         itemsDidChange()
-        normalizeLibraryEndsIfNeeded()
-    }
-
-    private func normalizeLibraryEndsIfNeeded() {
-        guard plan == nil, pendingItems == nil, layout.count > 0, let scroll else { return }
-        let canonical = ZoomGridSpec.endingAtNewest(level: layout.spec.level, count: layout.count)
-        guard layout.spec.leadingSlots != canonical.leadingSlots else { return }
-        let firstRowBottom = layout.metrics.top + ZoomGeometry.side(width: layout.viewportSize.width,
-            columns: ZoomGeometry.columns[layout.spec.level], metrics: layout.metrics)
-        let origin = scroll.contentView.documentVisibleRect.minY
-        let last = layout.spec.frame(index: layout.count - 1, width: layout.viewportSize.width, metrics: layout.metrics)
-        guard origin < firstRowBottom || last.minY < origin + layout.viewportSize.height else { return }
-        let followsNewest = isAtNewest
-        layout.spec = canonical
-        let newLast = canonical.frame(index: layout.count - 1, width: layout.viewportSize.width, metrics: layout.metrics)
-        let newOrigin = origin < firstRowBottom ? origin : origin + newLast.maxY - last.maxY
-        applyNative(origin: followsNewest ? maximumOrigin : newOrigin)
     }
 
     private func applyOverlay() {
         guard let plan, !applying, let scroll, collection != nil else { return }
-        imagesNeedDisplay = false
+        needsDisplay = false
         handoffGeneration += 1
         applying = true
         defer { applying = false }
@@ -518,10 +504,11 @@ final class ThumbnailGridZoomController: NSObject {
         }
         // The strongly resisted nine-column overshoot still reveals a few more
         // rows in tall windows. Include its full asymptotic range up front.
+        let minimumScale = ZoomGesture.minimumElasticScale
         let reducedCenter = plan.focusCenter(width: width, height: height, count: layout.count,
-                                            position: 0, elasticScale: 0.8)
+                                            position: 0, elasticScale: minimumScale)
         let reduced = ZoomLayerState(spec: plan.specs[0], position: 0, width: width,
-            focusCenter: reducedCenter, weights: [0, 0, 0, 0], elasticScale: 0.8, metrics: layout.metrics)
+            focusCenter: reducedCenter, weights: [0, 0, 0, 0], elasticScale: minimumScale, metrics: layout.metrics)
         candidates.formUnion(reduced.visibleIndices(count: layout.count, width: width, height: height, metrics: layout.metrics))
         return candidates
     }
@@ -579,15 +566,13 @@ final class ThumbnailGridZoomController: NSObject {
         guard let plan else { return }
         let candidates = planImageCandidates()
         let entries = items(), generation = imageGeneration
-        let pointSize = max(ThumbnailCollectionStyle.cellSide, ceil(ZoomGeometry.side(
-            width: layout.viewportSize.width, columns: 3, metrics: layout.metrics)))
+        // Reuse the displayed bitmap throughout the gesture. Preparing all
+        // four layouts does not require regenerating every candidate at the
+        // largest size; settled native cells request detail when necessary.
+        let pointSize = ThumbnailCollectionStyle.cellSide
         let scale = collection?.window?.backingScaleFactor ?? 2
-        if imageDisplayLink == nil, let collection {
-            imageDisplayLink = collection.displayLink(target: ImageDisplayTarget(owner: self),
-                selector: #selector(ImageDisplayTarget.displayPendingImages(_:)))
-            imageDisplayLink?.add(to: .main, forMode: .common)
-        }
-        for index in candidates.sorted(by: { abs($0 - plan.anchor.index) < abs($1 - plan.anchor.index) }) where entries.indices.contains(index) {
+        for index in candidates.sorted(by: { abs($0 - plan.anchor.index) < abs($1 - plan.anchor.index) })
+            where entries.indices.contains(index) && overlay.image(at: index) == nil {
             let item = entries[index]
             imageTasks[index] = Task { [weak self] in
                 let result = await SystemThumbnailProvider.shared.thumbnail(for: item.url, pointSize: pointSize,
@@ -596,9 +581,7 @@ final class ThumbnailGridZoomController: NSObject {
                       let image = result.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
                 self.overlay.replaceImage(image, at: index)
                 self.imageTasks[index] = nil
-                // Image completions can arrive in a burst. The native display
-                // clock coalesces them; finger input still renders immediately.
-                self.imagesNeedDisplay = true
+                self.requestFrame()
             }
         }
     }
@@ -607,8 +590,5 @@ final class ThumbnailGridZoomController: NSObject {
         imageGeneration += 1
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
-        imageDisplayLink?.invalidate()
-        imageDisplayLink = nil
-        imagesNeedDisplay = false
     }
 }

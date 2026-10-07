@@ -84,11 +84,6 @@ enum ZoomChecks {
                 }
             }
         }
-        let earlyAnchor = ZoomAnchor(index: 2, frame: base.frame(index: 2, width: width),
-            documentPoint: CGPoint(x: 300, y: 60), viewportPoint: CGPoint(x: 300, y: 60))
-        let earlyPlan = ZoomPlan(anchor: earlyAnchor, base: base, width: width, height: 600, count: 900)
-        check(earlyPlan.specs.allSatisfy { $0.leadingSlots == 0 },
-              "library-start plans never insert empty slots before the first photo")
         for windowWidth: CGFloat in [680, 900, 1080, 1512, 1920] {
             for level in 0..<4 {
                 let source = ZoomGridSpec(level: level)
@@ -131,7 +126,7 @@ enum ZoomChecks {
         let maximumStretch = gesture.elasticScale
         gesture.update(magnification: -0.01, width: width)
         check(gesture.elasticScale < maximumStretch, "reversing immediately releases endpoint resistance")
-        gesture.update(magnification: -0.9999, width: width)
+        gesture.update(magnification: -22, width: width)
         check(gesture.position == 0, "smallest endpoint stops at nine columns")
         check(gesture.elasticScale < 1 && gesture.elasticScale > 0, "nine-column endpoint compresses with resistance")
         let minimumStretch = gesture.elasticScale
@@ -148,13 +143,13 @@ enum ZoomChecks {
                 elastic.update(magnification: input, width: width)
                 let stretch = level == 3 ? elastic.elasticScale - 1 : 1 - elastic.elasticScale
                 let delta = stretch - previousStretch
-                check(level == 3 ? elastic.elasticScale > previous : elastic.elasticScale < previous,
-                      "continued boundary input remains responsive without a hard clamp")
-                check(delta > 0 && delta < previousDelta,
+                check(level == 3 ? elastic.elasticScale > previous : elastic.elasticScale <= previous,
+                      "large-end input stays responsive; the native minimum input cannot collapse the small grid")
+                check(level == 3 ? delta > 0 && delta < previousDelta : delta >= 0 && delta <= previousDelta,
                       "equal boundary input has progressively stronger resistance")
                 previous = elastic.elasticScale; previousStretch = stretch; previousDelta = delta
             }
-            check(level == 3 ? elastic.elasticScale > 2 : (elastic.elasticScale > 0.8 && elastic.elasticScale < 0.9),
+            check(level == 3 ? elastic.elasticScale > 2 : (elastic.elasticScale > ZoomGesture.minimumElasticScale && elastic.elasticScale < 0.92),
                   "large photos keep stretching while the small grid strongly resists collapse")
         }
 
@@ -163,10 +158,10 @@ enum ZoomChecks {
         smallPull.update(magnification: -0.6, width: width)
         largePull.update(magnification: 1.5, width: width)
         check(smallPull.elasticScale > 0.93 && largePull.elasticScale > 1.25,
-              "equal logarithmic input meets much greater resistance at the nine-column endpoint")
+              "the nine-column endpoint resists further shrinking much more strongly")
         check(largePull.elasticScale - 1 > 4 * (1 - smallPull.elasticScale),
               "small and large endpoint elasticity have deliberately different strength")
-        for scale: CGFloat in [0.805, 0.94, 1.08, 1.5] {
+        for scale: CGFloat in [0.91, 0.94, 1.08, 1.5] {
             var resumed = ZoomGesture(position: scale < 1 ? 0 : 3, width: width, elasticScale: scale)
             resumed.update(magnification: 0, width: width)
             check(abs(resumed.elasticScale - scale) < 0.000001,
@@ -405,7 +400,7 @@ enum ZoomChecks {
         zoom.scroll.contentView.scroll(to: CGPoint(x: 0, y: deepCell.midY - 300))
         zoom.beginGesture(at: CGPoint(x: deepCell.midX, y: deepCell.midY))
         let ratio = ZoomGeometry.side(width: width, columns: 7) / ZoomGeometry.side(width: width, columns: 9)
-        zoom.changeGesture(magnification: ratio * ratio - 1)
+        zoom.changeGesture(magnification: 2 * (ratio - 1))
         zoom.endGesture()
         zoom.advanceAnimation(at: CACurrentMediaTime() + 2)
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))

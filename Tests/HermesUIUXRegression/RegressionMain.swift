@@ -714,7 +714,7 @@ import Foundation
             spacingWindow.appearance = NSAppearance(named: appearance)
             for (from, to) in [(0, 1), (1, 2), (2, 3), (3, 2), (2, 1), (1, 0)] {
                 spacingZoom.zoom(to: from)
-                spacingZoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                spacingZoom.displayFrame(at: CACurrentMediaTime() + 10)
                 try await Task.sleep(for: .milliseconds(20))
                 let focal = 60
                 let frame = spacingLayout.spec.frame(index: focal, width: spacingLayout.viewportSize.width,
@@ -726,7 +726,8 @@ import Foundation
                 spacingZoom.beginGesture(at: point)
                 let ratio = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
                     position: (CGFloat(from) + CGFloat(to)) / 2, metrics: spacingLayout.metrics) / frame.width
-                spacingZoom.changeGesture(magnification: ratio * ratio - 1)
+                spacingZoom.changeGesture(magnification: 2 * (ratio - 1))
+                spacingZoom.displayFrame(at: CACurrentMediaTime())
                 expect(spacingZoom.overlay.superview === spacingScroll.contentView,
                        "main-window reusable cells must not cover the zoom presentation")
                 expect(spacingCollection.visibleItems().allSatisfy { $0.view.alphaValue == 0 },
@@ -735,14 +736,15 @@ import Foundation
                        "document scroll origin must not become a presentation-space crop")
                 expect(spacingZoom.overlay.layer!.sublayers!.allSatisfy { $0.frame == spacingZoom.overlay.bounds },
                        "all focal and dissolving rows must share the same crop in the real split window")
-                let endRatio = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
+                let endSide = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
                     columns: ZoomGeometry.columns[to], metrics: spacingLayout.metrics)
-                    / ZoomGeometry.side(width: spacingLayout.viewportSize.width, position: spacingZoom.position,
-                                        metrics: spacingLayout.metrics)
-                spacingZoom.changeGesture(magnification: endRatio * endRatio - 1)
+                let currentSide = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
+                    position: spacingZoom.position, metrics: spacingLayout.metrics)
+                spacingZoom.changeGesture(magnification: 2 * (endSide - currentSide) / frame.width)
+                spacingZoom.displayFrame(at: CACurrentMediaTime())
                 let held = spacingRoot.convert(spacingZoom.overlay.focalFrames[focal]!, from: spacingZoom.overlay)
                 spacingZoom.endGesture()
-                spacingZoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                spacingZoom.displayFrame(at: CACurrentMediaTime() + 10)
                 try await Task.sleep(for: .milliseconds(30))
                 let cell = spacingCollection.item(at: IndexPath(item: focal, section: 0))!
                 let actual = spacingRoot.convert(cell.view.bounds, from: cell.view)

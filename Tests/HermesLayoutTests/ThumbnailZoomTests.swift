@@ -22,13 +22,21 @@ final class ThumbnailZoomTests: XCTestCase {
         return (grid, scroll, window)
     }
 
+    private func pinch(_ zoom: ThumbnailGridZoomController, to position: CGFloat) {
+        let width = zoom.layout.viewportSize.width, metrics = zoom.layout.metrics
+        let before = ZoomGeometry.side(width: width, position: zoom.position, metrics: metrics)
+        let after = ZoomGeometry.side(width: width, position: position, metrics: metrics)
+        zoom.changeGesture(magnification: 2 * (after - before) / zoom.gesture!.startSide)
+        zoom.displayFrame(at: CACurrentMediaTime())
+    }
+
     func testAllAdjacentDirectionsKeepSourceFocalRowOpaqueAndHandoffAligned() async throws {
         let (grid, scroll, window) = fixture()
         defer { window.orderOut(nil) }
         let zoom = grid.zoom!
         for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)] {
             zoom.zoom(to: from)
-            zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+            zoom.displayFrame(at: CACurrentMediaTime() + 10)
             await Task.yield()
             let layout = zoom.layout, width = layout.viewportSize.width, metrics = layout.metrics
             let focal = 203
@@ -42,9 +50,7 @@ final class ThumbnailZoomTests: XCTestCase {
             let start = ((focal + plan.sourceSpec.leadingSlots) / columns) * columns - plan.sourceSpec.leadingSlots
             for fraction in [0.01, 0.2, 0.5, 0.8, 0.99] {
                 let target = CGFloat(from) + CGFloat(to - from) * fraction
-                let ratio = ZoomGeometry.side(width: width, position: target, metrics: metrics) /
-                    ZoomGeometry.side(width: width, position: zoom.position, metrics: metrics)
-                zoom.changeGesture(magnification: ratio * ratio - 1)
+                pinch(zoom, to: target)
                 XCTAssertEqual(zoom.position, target, accuracy: 0.0001)
                 XCTAssertTrue(zoom.overlay.superview === scroll.contentView,
                               "Reusable collection cells must not own the presentation's stacking order")
@@ -60,11 +66,9 @@ final class ThumbnailZoomTests: XCTestCase {
                 }
                 XCTAssertLessThan(zoom.overlay.retainedTileCount, 300, "Presentation work must depend on the viewport, not library size")
             }
-            let ratio = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[to], metrics: metrics) /
-                ZoomGeometry.side(width: width, position: zoom.position, metrics: metrics)
-            zoom.changeGesture(magnification: ratio * ratio - 1)
+            pinch(zoom, to: CGFloat(to))
             zoom.endGesture()
-            zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+            zoom.displayFrame(at: CACurrentMediaTime() + 10)
             let expected = layout.spec.frame(index: focal, width: width, metrics: metrics)
                 .offsetBy(dx: 0, dy: -scroll.contentView.bounds.minY)
             let displayed = try XCTUnwrap(zoom.overlay.focalFrames[focal])
@@ -89,7 +93,7 @@ final class ThumbnailZoomTests: XCTestCase {
             zoom.viewportChanged()
             for (from, to) in [(0, 1), (1, 2), (2, 3), (3, 2), (2, 1), (1, 0)] {
                 zoom.zoom(to: from)
-                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                zoom.displayFrame(at: CACurrentMediaTime() + 10)
                 try await Task.sleep(for: .milliseconds(15))
                 let index = 42
                 let source = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
@@ -100,14 +104,12 @@ final class ThumbnailZoomTests: XCTestCase {
                 zoom.beginGesture(at: point)
                 let plan = try XCTUnwrap(zoom.plan)
                 XCTAssertEqual(plan.anchor.index, index)
-                let ratio = ZoomGeometry.side(width: zoom.layout.viewportSize.width,
-                    columns: ZoomGeometry.columns[to], metrics: zoom.layout.metrics) / source.width
-                zoom.changeGesture(magnification: ratio * ratio - 1)
+                pinch(zoom, to: CGFloat(to))
                 let displayed = try XCTUnwrap(zoom.overlay.focalFrames[index])
                 let content = try XCTUnwrap(window.contentView)
                 let before = content.convert(displayed, from: zoom.overlay)
                 zoom.endGesture()
-                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                zoom.displayFrame(at: CACurrentMediaTime() + 10)
                 try await Task.sleep(for: .milliseconds(30))
                 let cell = try XCTUnwrap(grid.nsCollectionView.item(at: IndexPath(item: index, section: 0)))
                 let actual = content.convert(cell.view.bounds, from: cell.view)
@@ -120,22 +122,23 @@ final class ThumbnailZoomTests: XCTestCase {
         }
     }
 
-    func testColumnPresetSurvivesWindowResizeAndNewestRowRemainsFull() async {
+    func testWindowResizeAndBottomScrollingPreserveTheFocusedRowStart() async {
         let (grid, scroll, window) = fixture()
         defer { window.orderOut(nil) }
         let zoom = grid.zoom!
         for level in 0..<4 {
             zoom.zoom(to: level)
-            zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+            zoom.displayFrame(at: CACurrentMediaTime() + 10)
             await Task.yield()
+            let prepared = zoom.layout.spec
             scroll.contentView.scroll(to: CGPoint(x: 0, y: zoom.maximumOrigin))
             scroll.reflectScrolledClipView(scroll.contentView)
+            XCTAssertEqual(zoom.layout.spec, prepared, "Scrolling to the tail must not reorder the focused grid")
             for width in [700.0, 1100.0, 850.0] {
                 window.setContentSize(NSSize(width: width, height: 600))
                 scroll.layoutSubtreeIfNeeded()
                 zoom.viewportChanged()
-                XCTAssertEqual(zoom.layout.spec.level, level)
-                assertNewestRowIsFull(zoom)
+                XCTAssertEqual(zoom.layout.spec, prepared, "Native window and sidebar sizing must preserve the row start")
                 XCTAssertEqual(scroll.contentView.bounds.minY, zoom.maximumOrigin, accuracy: 0.5)
             }
         }
@@ -156,7 +159,7 @@ final class ThumbnailZoomTests: XCTestCase {
         zoom.changeGesture(magnification: 0.2)
         zoom.endGesture()
         XCTAssertTrue(zoom.badgesSuppressed, "A released finger does not reveal badges while layout is still settling")
-        zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
         XCTAssertTrue(zoom.badgesSuppressed, "Keep metadata suppressed until the native cells replace the held overlay")
         await Task.yield()
         try await Task.sleep(for: .milliseconds(20))
@@ -196,11 +199,9 @@ final class ThumbnailZoomTests: XCTestCase {
         let frame = zoom.layout.layoutAttributesForItem(at: path)!.frame
         zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
         let retained = try XCTUnwrap(zoom.overlay.image(at: focal))
-        let ratio = ZoomGeometry.side(width: scroll.contentSize.width, columns: 9, metrics: zoom.layout.metrics) /
-            ZoomGeometry.side(width: scroll.contentSize.width, columns: 5, metrics: zoom.layout.metrics)
-        zoom.changeGesture(magnification: ratio * ratio - 1)
+        pinch(zoom, to: 0)
         zoom.endGesture()
-        zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
         let cell = try XCTUnwrap(grid.nsCollectionView.item(at: path) as? ThumbnailCollectionItem)
         let native = try XCTUnwrap(cell.imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
         XCTAssertTrue(native === retained, "The native cell must receive the same bitmap before the overlay disappears")
@@ -223,7 +224,7 @@ final class ThumbnailZoomTests: XCTestCase {
         XCTAssertEqual(row.count, min(layout.count, columns), file: file, line: line)
     }
 
-    func testStartupAndEveryAdjacentZoomKeepNewestAtBottomAcrossRemainders() async throws {
+    func testStartupOpensAtNewestButAllSixZoomDirectionsPreserveTheFocusedPlan() async throws {
         for count in [2, 68, 70, 71] {
             let (grid, scroll, window) = fixture(count: count, animatingDifferences: true)
             let zoom = grid.zoom!
@@ -232,27 +233,24 @@ final class ThumbnailZoomTests: XCTestCase {
             assertNewestRowIsFull(zoom)
             for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)] {
                 zoom.zoom(to: from)
-                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                zoom.displayFrame(at: CACurrentMediaTime() + 10)
                 await Task.yield()
                 // Each direction starts at the native bottom. A previous zoom
                 // may legitimately keep an older cursor focus above the tail.
                 scroll.contentView.scroll(to: CGPoint(x: 0, y: zoom.maximumOrigin))
                 scroll.reflectScrolledClipView(scroll.contentView)
                 zoom.viewportChanged()
-                assertNewestRowIsFull(zoom)
                 XCTAssertEqual(scroll.contentView.bounds.minY, zoom.maximumOrigin, accuracy: 0.5)
                 let layout = zoom.layout, metrics = layout.metrics, width = layout.viewportSize.width
                 let focal = count - 1
                 let frame = layout.spec.frame(index: focal, width: width, metrics: metrics)
                 zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
                 let plan = try XCTUnwrap(zoom.plan)
-                XCTAssertTrue(plan.pinsToNewest)
-                let ratio = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[to], metrics: metrics) / frame.width
-                zoom.changeGesture(magnification: ratio * ratio - 1)
+                pinch(zoom, to: CGFloat(to))
                 XCTAssertEqual(zoom.overlay.focalOpacity(at: focal), 1)
                 zoom.endGesture()
-                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
-                assertNewestRowIsFull(zoom)
+                zoom.displayFrame(at: CACurrentMediaTime() + 10)
+                XCTAssertEqual(layout.spec, plan.specs[to], "The nearest focal slot survives native handoff at the tail")
                 let nativeFrame = layout.spec.frame(index: focal, width: width, metrics: metrics)
                 let desiredOrigin = nativeFrame.minY + nativeFrame.height * plan.anchor.unitPoint.y - plan.anchor.viewportPoint.y
                 XCTAssertEqual(scroll.contentView.bounds.minY, min(zoom.maximumOrigin, max(0, desiredOrigin)), accuracy: 0.5,
@@ -262,6 +260,8 @@ final class ThumbnailZoomTests: XCTestCase {
                 XCTAssertEqual(displayed.midX, expected.midX, accuracy: 0.01)
                 XCTAssertEqual(displayed.midY, expected.midY, accuracy: 0.01)
                 await Task.yield()
+                zoom.viewportChanged()
+                XCTAssertEqual(layout.spec, plan.specs[to], "A later bounds notification must not force a full final row")
             }
             window.orderOut(nil)
         }
@@ -340,8 +340,8 @@ final class ThumbnailZoomTests: XCTestCase {
     func testEndpointResistanceAndImmediateReversalRemainInteractive() {
         var small = ZoomGesture(position: 0, width: 1000)
         for _ in 0..<1000 { small.update(magnification: -0.2, width: 1000) }
-        XCTAssertGreaterThan(small.elasticScale, 0.8)
-        XCTAssertLessThan(small.elasticScale, 0.81)
+        XCTAssertGreaterThan(small.elasticScale, ZoomGesture.minimumElasticScale)
+        XCTAssertLessThan(small.elasticScale, 0.95)
         let compressed = small.elasticScale
         small.update(magnification: 0.2, width: 1000)
         XCTAssertGreaterThan(small.elasticScale, compressed)
@@ -352,5 +352,45 @@ final class ThumbnailZoomTests: XCTestCase {
         XCTAssertGreaterThan(large.elasticScale, extended)
         large.update(magnification: -0.3, width: 1000)
         XCTAssertLessThan(large.elasticScale, extended)
+    }
+
+    func testNativeMagnificationDeltasProduceLinearSizeAndIgnoreEventPartitioning() {
+        let width: CGFloat = 1000
+        var single = ZoomGesture(position: 0, width: width)
+        var split = ZoomGesture(position: 0, width: width)
+        single.update(magnification: 1, width: width)
+        for _ in 0..<20 { split.update(magnification: 0.05, width: width) }
+        let expected = single.startSide * 1.5
+        XCTAssertEqual(ZoomGeometry.side(width: width, position: single.position), expected, accuracy: 0.0001)
+        XCTAssertEqual(ZoomGeometry.side(width: width, position: split.position), expected, accuracy: 0.0001)
+        split.update(magnification: -0.4, width: width)
+        XCTAssertEqual(ZoomGeometry.side(width: width, position: split.position), split.startSide * 1.3, accuracy: 0.0001)
+        split.update(magnification: -0.6, width: width)
+        XCTAssertEqual(split.position, 0, accuracy: 0.0001)
+        XCTAssertEqual(split.elasticScale, 1, accuracy: 0.0001)
+    }
+
+    func testNativeDisplayLinkCoalescesBurstInputAndCompletesTheHandoff() async throws {
+        let (grid, _, window) = fixture(count: 71)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let focal = 63
+        let initial = zoom.layout.spec.frame(index: focal, width: zoom.layout.viewportSize.width,
+                                             metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: initial.midX, y: initial.midY))
+        let first = try XCTUnwrap(zoom.overlay.focalFrames[focal])
+        for _ in 0..<10 { zoom.changeGesture(magnification: 0.04) }
+        XCTAssertEqual(zoom.overlay.focalFrames[focal], first,
+                       "A burst of input must update state without rebuilding ten layer trees in one frame")
+        try await Task.sleep(for: .milliseconds(80))
+        let shown = try XCTUnwrap(zoom.overlay.focalFrames[focal])
+        XCTAssertEqual(shown.width, initial.width * 1.2, accuracy: 0.001,
+                       "The native refresh clock must present the most recent input without a synthetic tick")
+        zoom.endGesture()
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertNil(zoom.plan)
+        XCTAssertTrue(zoom.overlay.isHidden)
+        XCTAssertFalse(zoom.cellsSuppressed)
+        XCTAssertFalse(zoom.badgesSuppressed)
     }
 }

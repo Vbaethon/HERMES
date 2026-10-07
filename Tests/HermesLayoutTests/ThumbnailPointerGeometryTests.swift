@@ -3,7 +3,26 @@ import XCTest
 @testable import HermesThumbnailUI
 
 final class ThumbnailPointerGeometryTests: XCTestCase {
-    func testEveryInteriorPresetChoosesTheClosestPhotoLocalPointerSlot() {
+    func testNineToSevenAtTheVisibleTailKeepsTheClosestPointerColumn() {
+        let width: CGFloat = 1000, height: CGFloat = 600, count = 71, index = 63
+        let metrics = ZoomMetrics(top: 22, left: 44, bottom: 208, right: 44, gap: 20)
+        let source = ZoomGridSpec.endingAtNewest(level: 0, count: count)
+        let frame = source.frame(index: index, width: width, metrics: metrics)
+        let point = CGPoint(x: frame.minX + frame.width * 0.32, y: frame.minY + frame.height * 0.61)
+        let origin = source.height(count: count, width: width, metrics: metrics) - height
+        let anchor = ZoomAnchor(index: index, frame: frame, documentPoint: point,
+                                viewportPoint: CGPoint(x: point.x, y: point.y - origin))
+        let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: height,
+                            count: count, metrics: metrics)
+        let target = plan.specs[1].frame(index: index, width: width, metrics: metrics)
+        let displacement = abs(target.minX + target.width * anchor.unitPoint.x - point.x)
+        XCTAssertLessThanOrEqual(displacement, (target.width + metrics.gap) / 2,
+                                 "A visible library tail must not send the left-hand focal photo across the gallery")
+        XCTAssertNotEqual((count + plan.specs[1].leadingSlots) % 7, 0,
+                          "A partial final row is allowed when it preserves the focal column")
+    }
+
+    func testAllInteriorPresetsUseOneFamilyWithoutHorizontalReversals() {
         let count = 5000, width: CGFloat = 1000, height: CGFloat = 600
         let metrics = ZoomMetrics(top: 22, left: 44, bottom: 208, right: 44, gap: 20)
         for level in 0..<4 {
@@ -17,19 +36,29 @@ final class ThumbnailPointerGeometryTests: XCTestCase {
                     let anchor = ZoomAnchor(index: index, frame: frame, documentPoint: point,
                         viewportPoint: CGPoint(x: point.x, y: 300))
                     let plan = ZoomPlan(anchor: anchor, base: base, width: width, height: height,
-                                        count: count, metrics: metrics, endsAtNewest: true)
-                    for target in 0..<4 {
-                        let cell = plan.specs[target].frame(index: index, width: width, metrics: metrics)
-                        let displacement = abs(cell.minX + cell.width * unitX - point.x)
-                        let side = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[target], metrics: metrics)
-                        let best = (0..<ZoomGeometry.columns[target]).map {
-                            abs(metrics.left + CGFloat($0) * (side + metrics.gap) + side * unitX - point.x)
-                        }.min()!
-                        XCTAssertEqual(displacement, best, accuracy: 0.001,
-                            "A pointer on column \(column) of preset \(level) must not jump across the gallery in preset \(target)")
-                    }
+                                        count: count, metrics: metrics)
+                    let centers = (0..<4).map { plan.focusCenterX(width: width, position: CGFloat($0)) }
+                    let changes = zip(centers, centers.dropFirst()).map { $1 - $0 }
+                    XCTAssertTrue(changes.allSatisfy { $0 >= -0.001 } || changes.allSatisfy { $0 <= 0.001 },
+                                  "A long pinch must not alternate left/right when it crosses another preset")
+                    XCTAssertEqual(plan.specs[level], ZoomGridSpec(level: level, visualAnchorIndex: index),
+                                   "The initial source slot must remain unchanged")
                 }
             }
+        }
+    }
+
+    func testJointPlanningKeepsFocusCloserThanTheOldThreeCoarsePivots() {
+        let width: CGFloat = 1000
+        for column in [2, 6] {
+            let index = 1494 + column, source = ZoomGridSpec(level: 0)
+            let frame = source.frame(index: index, width: width)
+            let anchor = ZoomAnchor(index: index, frame: frame,
+                documentPoint: CGPoint(x: frame.midX, y: frame.midY), viewportPoint: CGPoint(x: frame.midX, y: 300))
+            let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: 600, count: 5000)
+            let target = plan.specs[3].frame(index: index, width: width)
+            XCTAssertEqual(target.midX, width / 2, accuracy: 0.001,
+                           "The stable family can retain the focal photo centrally instead of sending it to the far edge")
         }
     }
     private func exhaustiveNearest(_ point: CGPoint, count: Int, width: CGFloat,
@@ -139,7 +168,7 @@ final class ThumbnailPointerGeometryTests: XCTestCase {
                     let pointer = CGPoint(x: documentPoint.x, y: documentPoint.y - origin)
                     let anchor = ZoomAnchor(index: index, frame: cell, documentPoint: documentPoint, viewportPoint: pointer)
                     let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count,
-                                        metrics: metrics, endsAtNewest: true, pinsToNewest: index == count - 1)
+                                        metrics: metrics)
                     let initial = cursorPoint(plan: plan, width: width, height: height, count: count, position: CGFloat(from))
                     XCTAssertEqual(initial.x, pointer.x, accuracy: 0.0001)
                     XCTAssertEqual(initial.y, pointer.y, accuracy: 0.0001)
@@ -180,18 +209,14 @@ final class ThumbnailPointerGeometryTests: XCTestCase {
         let point = CGPoint(x: cell.minX + cell.width * 0.32, y: cell.minY + cell.height * 0.61)
         let pointer = CGPoint(x: point.x, y: point.y - origin)
         let anchor = ZoomAnchor(index: 46, frame: cell, documentPoint: point, viewportPoint: pointer)
-        let pinned = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count,
-                              metrics: metrics, endsAtNewest: true, pinsToNewest: true)
-        let unpinned = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count,
-                                metrics: metrics, endsAtNewest: true, pinsToNewest: false)
-        XCTAssertEqual(pinned.specs, unpinned.specs, "Being at the source tail does not force all target layouts to stay there")
-        XCTAssertNotEqual(pinned.specs[2].leadingSlots, ZoomGridSpec.endingAtNewest(level: 2, count: count).leadingSlots,
+        let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count, metrics: metrics)
+        XCTAssertNotEqual(plan.specs[2].leadingSlots, ZoomGridSpec.endingAtNewest(level: 2, count: count).leadingSlots,
                           "An offscreen target tail must allow the compatible focal column")
-        let focused = cursorPoint(plan: pinned, width: width, height: height, count: count, position: 2)
+        let focused = cursorPoint(plan: plan, width: width, height: height, count: count, position: 2)
         XCTAssertEqual(focused.y, pointer.y, accuracy: 0.0001)
-        let center = pinned.focusCenter(width: width, height: height, count: count, position: 2)
-        let target = pinned.specs[2].frame(index: anchor.index, width: width, metrics: metrics)
-        let last = pinned.specs[2].frame(index: count - 1, width: width, metrics: metrics)
+        let center = plan.focusCenter(width: width, height: height, count: count, position: 2)
+        let target = plan.specs[2].frame(index: anchor.index, width: width, metrics: metrics)
+        let last = plan.specs[2].frame(index: count - 1, width: width, metrics: metrics)
         XCTAssertGreaterThan(last.minY - (target.midY - center.y), height,
                              "The target tail is outside the focused viewport")
     }
@@ -205,7 +230,7 @@ final class ThumbnailPointerGeometryTests: XCTestCase {
                 let point = CGPoint(x: cell.minX + cell.width * unit.x, y: cell.minY + cell.height * unit.y)
                 let pointer = CGPoint(x: point.x, y: 240)
                 let anchor = ZoomAnchor(index: count / 2, frame: cell, documentPoint: point, viewportPoint: pointer)
-                let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count, endsAtNewest: true)
+                let plan = ZoomPlan(anchor: anchor, base: source, width: width, height: height, count: count)
                 for scale: CGFloat in level == 0 ? [0.805, 0.94, 1] : [1, 1.08, 1.5, 2.4] {
                     let displayed = cursorPoint(plan: plan, width: width, height: height, count: count,
                                                 position: CGFloat(level), elasticScale: scale)

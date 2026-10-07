@@ -97,6 +97,49 @@ enum ZoomGeometry {
     }
 
     static func mix(_ a: CGFloat, _ b: CGFloat, _ fraction: CGFloat) -> CGFloat { a + (b - a) * fraction }
+
+    static func anchorColumns(anchor: ZoomAnchor, base: ZoomGridSpec, width: CGFloat,
+                              metrics: ZoomMetrics) -> [Int] {
+        let sourceColumn = (anchor.index + base.leadingSlots) % columns[base.level]
+        let sides = columns.map { side(width: width, columns: $0, metrics: metrics) }
+        let centers = columns.enumerated().map { level, count in
+            (0..<count).map { metrics.left + CGFloat($0) * (sides[level] + metrics.gap) + sides[level] / 2 }
+        }
+        // Solve the four presets as a family, as in the accepted prototype.
+        // Independent nearest slots can make a long pinch alternate direction.
+        // Keep the source slot and choose the least-displaced monotonic family;
+        // the coarse left/center/right pivots needlessly excluded closer families.
+        struct Candidate { let cost: CGFloat; let path: [Int] }
+        func cost(level: Int, column: Int) -> CGFloat {
+            abs(centers[level][column] + (anchor.unitPoint.x - 0.5) * sides[level] - anchor.viewportPoint.x)
+        }
+        var best: Candidate?
+        for direction: CGFloat in [1, -1] {
+            var previous: [Candidate?] = (0..<columns[0]).map { column in
+                base.level == 0 && column != sourceColumn ? nil :
+                    Candidate(cost: cost(level: 0, column: column), path: [column])
+            }
+            for level in 1..<columns.count {
+                var next = [Candidate?](repeating: nil, count: columns[level])
+                for column in 0..<columns[level] where level != base.level || column == sourceColumn {
+                    for prior in previous.indices {
+                        guard let candidate = previous[prior],
+                              direction * (centers[level][column] - centers[level - 1][prior]) >= -0.0001 else { continue }
+                        let total = candidate.cost + cost(level: level, column: column)
+                        if next[column] == nil || total < next[column]!.cost {
+                            next[column] = Candidate(cost: total, path: candidate.path + [column])
+                        }
+                    }
+                }
+                previous = next
+            }
+            if let candidate = previous.compactMap({ $0 }).min(by: { $0.cost < $1.cost }),
+               best == nil || candidate.cost < best!.cost { best = candidate }
+        }
+        // Odd column counts always admit a monotonic family through every
+        // source slot. Keep that invariant explicit instead of a second rule.
+        return best!.path
+    }
 }
 
 struct ZoomAnchor {
@@ -143,18 +186,13 @@ struct ZoomPlan {
     let sourceSpec: ZoomGridSpec
     let specs: [ZoomGridSpec]
     let metrics: ZoomMetrics
-    let pinsToNewest: Bool
 
     init(anchor: ZoomAnchor, base: ZoomGridSpec, width: CGFloat, height: CGFloat, count: Int,
-         metrics: ZoomMetrics = .demo, endsAtNewest: Bool = false, pinsToNewest: Bool = false) {
+         metrics: ZoomMetrics = .demo) {
         self.anchor = anchor
         self.metrics = metrics
-        self.pinsToNewest = pinsToNewest
         sourceSpec = base
-        // Prepare every preset against the same photo-local pointer point.
-        // The old left/center/right pivot family could send a photo near the
-        // right side of a nine-column grid to the leftmost three-column slot.
-        // Choose the actual nearest feasible slot, rather than a coarse pivot.
+        let anchorColumns = ZoomGeometry.anchorColumns(anchor: anchor, base: base, width: width, metrics: metrics)
         specs = (0..<4).map { level in
             if level == base.level {
                 var spec = base
@@ -163,24 +201,13 @@ struct ZoomPlan {
             }
             let columns = ZoomGeometry.columns[level]
             let side = ZoomGeometry.side(width: width, columns: columns, metrics: metrics)
-            let desiredColumn = min(columns - 1, max(0, Int(((anchor.viewportPoint.x - metrics.left
-                - anchor.unitPoint.x * side) / (side + metrics.gap)).rounded())))
+            let desiredColumn = anchorColumns[level]
             let offset = (desiredColumn - anchor.index % columns + columns) % columns
             let shifted = ZoomGridSpec(level: level, leadingSlots: offset, visualAnchorIndex: anchor.index)
             let desiredY = anchor.viewportPoint.y + (0.5 - anchor.unitPoint.y) * side
             let centerY = shifted.frame(index: anchor.index, width: width, metrics: metrics).midY
             let maxOrigin = max(0, shifted.height(count: count, width: width, metrics: metrics) - height)
             let origin = min(maxOrigin, max(0, centerY - desiredY))
-            if endsAtNewest {
-                var canonical = ZoomGridSpec.endingAtNewest(level: level, count: count)
-                canonical.visualAnchorIndex = anchor.index
-                let firstRowBottom = shifted.frame(index: 0, width: width, metrics: metrics).maxY + metrics.gap
-                let lastRowTop = shifted.frame(index: max(0, count - 1), width: width, metrics: metrics).minY
-                // Plan both library boundaries before the incoming grid becomes
-                // visible. Interior focal alignment uses the same pivot family;
-                // newest-visible layouts use the same chronological end slots.
-                return origin < firstRowBottom || lastRowTop < origin + height ? canonical : shifted
-            }
             if offset == 0 || origin >= shifted.frame(index: 0, width: width, metrics: metrics).maxY + metrics.gap {
                 return shifted
             }
@@ -249,10 +276,11 @@ struct ZoomAlphaPresentation {
 struct ZoomGesture {
     private static let enlargedResistance: CGFloat = 0.32
     private static let reducedResistance: CGFloat = 5
+    static let minimumElasticScale: CGFloat = 1 - 0.5 / reducedResistance
     let metrics: ZoomMetrics
     let startPosition: CGFloat
     let startSide: CGFloat
-    private var inputLogScale: CGFloat = 0
+    private var inputScale: CGFloat = 1
     var position: CGFloat
     private(set) var elasticScale: CGFloat = 1
 
@@ -265,23 +293,27 @@ struct ZoomGesture {
         if elasticScale != 1 {
             if elasticScale > 1 {
                 let resistance = Self.enlargedResistance
-                inputLogScale = resistance * expm1((elasticScale - 1) / resistance)
+                inputScale = 1 + resistance * expm1((elasticScale - 1) / resistance)
             } else {
                 let compression = min(1 - 0.000001, (1 - elasticScale) * Self.reducedResistance)
-                inputLogScale = -compression / (1 - compression)
+                inputScale = max(0.001, 1 - compression / (1 - compression))
             }
         }
     }
 
     mutating func update(magnification: CGFloat, width: CGFloat) {
         guard magnification.isFinite else { return }
-        inputLogScale += log(max(0.0001, 1 + magnification)) * 0.5
-        let maximum = log(ZoomGeometry.side(width: width, columns: 3, metrics: metrics) / startSide)
-        let minimum = log(ZoomGeometry.side(width: width, columns: 9, metrics: metrics) / startSide)
-        let bounded = min(maximum, max(minimum, inputLogScale))
-        position = inputLogScale >= maximum ? 3 : (inputLogScale <= minimum ? 0 :
-            ZoomGeometry.position(forSide: startSide * exp(bounded), width: width, metrics: metrics))
-        let excess = inputLogScale - bounded
+        // NSMagnificationGestureRecognizer reports a cumulative magnification.
+        // Its raw deltas add to the gesture's scale, with Photos' default 0.5
+        // damping. Multiplying ratios and taking their square root changes the
+        // response as the fingers move farther from their starting distance.
+        inputScale = max(0.001, inputScale + magnification * 0.5)
+        let maximum = ZoomGeometry.side(width: width, columns: 3, metrics: metrics) / startSide
+        let minimum = ZoomGeometry.side(width: width, columns: 9, metrics: metrics) / startSide
+        let bounded = min(maximum, max(minimum, inputScale))
+        position = inputScale >= maximum ? 3 : (inputScale <= minimum ? 0 :
+            ZoomGeometry.position(forSide: startSide * bounded, width: width, metrics: metrics))
+        let excess = inputScale / bounded - 1
         if excess >= 0 {
             let resistance = Self.enlargedResistance
             elasticScale = 1 + resistance * log1p(excess / resistance)
