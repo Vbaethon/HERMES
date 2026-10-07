@@ -48,6 +48,36 @@ final class ThumbnailPerformanceTests: XCTestCase {
         XCTAssertEqual(stats.requests.count, 1)
     }
 
+    func testWindowAndSidebarSizingReuseDecodedDetailAcrossNearbyAndSmallerSizes() async throws {
+        let metrics = ThumbnailLoadMetrics()
+        let provider = provider(metrics: metrics)
+        let url = URL(fileURLWithPath: "/tmp/resize-detail.png")
+        let large = await provider.thumbnail(for: url, pointSize: 360, scale: 2, contentVersion: 1)
+        let bitmap = try XCTUnwrap(large.image)
+        for side in [355.0, 370, 300, 200, 148] {
+            let smaller = await provider.thumbnail(for: url, pointSize: side, scale: 2, contentVersion: 1)
+            XCTAssertTrue(smaller.image === bitmap)
+            XCTAssertTrue(provider.cachedThumbnail(for: url, pointSize: side, scale: 2, contentVersion: 1) === bitmap)
+        }
+        let requests = await metrics.snapshot().requests
+        XCTAssertEqual(requests.count, 1, "Geometry changes alone must not regenerate an already sufficient image")
+        XCTAssertTrue(provider.bestCachedThumbnail(for: url, scale: 2, contentVersion: 1) === bitmap)
+        XCTAssertNil(provider.bestCachedThumbnail(for: url, scale: 2, contentVersion: 2))
+    }
+
+    func testSmallerSizingSharesAnAlreadyRunningDetailRequest() async throws {
+        let metrics = ThumbnailLoadMetrics()
+        let provider = provider(delay: .milliseconds(150), metrics: metrics)
+        let url = URL(fileURLWithPath: "/tmp/resize-in-flight.png")
+        let large = Task { await provider.thumbnail(for: url, pointSize: 360, scale: 2, contentVersion: 1) }
+        try await waitForRequests(1, metrics: metrics)
+        let smaller = await provider.thumbnail(for: url, pointSize: 170, scale: 2, contentVersion: 1)
+        let result = await large.value
+        XCTAssertTrue(smaller.image === result.image)
+        let requests = await metrics.snapshot().requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
     func testRevisionAndDisplayScaleCannotReuseStalePixels() async throws {
         let metrics = ThumbnailLoadMetrics()
         let provider = provider(metrics: metrics)

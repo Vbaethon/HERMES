@@ -151,20 +151,10 @@ struct ZoomPlan {
         self.metrics = metrics
         self.pinsToNewest = pinsToNewest
         sourceSpec = base
-        let baseColumns = ZoomGeometry.columns[base.level]
-        let baseColumn = (anchor.index + base.leadingSlots) % baseColumns
-        let candidates: [CGFloat] = [0, 0.5, 1]
-        // Solve the complete family together. Choosing each next column in
-        // isolation can make a long pinch alternate its horizontal direction.
-        let pivot = candidates.filter { pivot in
-            ZoomGeometry.columns.allSatisfy { columns in
-                let column = baseColumn + Int((CGFloat(columns - baseColumns) * pivot).rounded())
-                return (0..<columns).contains(column)
-            }
-        }.min { a, b in
-            abs(metrics.left + (width - metrics.left - metrics.right) * a - anchor.viewportPoint.x) <
-                abs(metrics.left + (width - metrics.left - metrics.right) * b - anchor.viewportPoint.x)
-        } ?? 0.5
+        // Prepare every preset against the same photo-local pointer point.
+        // The old left/center/right pivot family could send a photo near the
+        // right side of a nine-column grid to the leftmost three-column slot.
+        // Choose the actual nearest feasible slot, rather than a coarse pivot.
         specs = (0..<4).map { level in
             if level == base.level {
                 var spec = base
@@ -172,10 +162,11 @@ struct ZoomPlan {
                 return spec
             }
             let columns = ZoomGeometry.columns[level]
-            let desiredColumn = baseColumn + Int((CGFloat(columns - baseColumns) * pivot).rounded())
+            let side = ZoomGeometry.side(width: width, columns: columns, metrics: metrics)
+            let desiredColumn = min(columns - 1, max(0, Int(((anchor.viewportPoint.x - metrics.left
+                - anchor.unitPoint.x * side) / (side + metrics.gap)).rounded())))
             let offset = (desiredColumn - anchor.index % columns + columns) % columns
             let shifted = ZoomGridSpec(level: level, leadingSlots: offset, visualAnchorIndex: anchor.index)
-            let side = ZoomGeometry.side(width: width, columns: columns, metrics: metrics)
             let desiredY = anchor.viewportPoint.y + (0.5 - anchor.unitPoint.y) * side
             let centerY = shifted.frame(index: anchor.index, width: width, metrics: metrics).midY
             let maxOrigin = max(0, shifted.height(count: count, width: width, metrics: metrics) - height)

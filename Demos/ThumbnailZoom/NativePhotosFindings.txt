@@ -209,3 +209,32 @@ opacity 取消旧动画，新复用 cell 与异步文字服从相同状态，无
 公开动画 API 依据：
 https://developer.apple.com/documentation/appkit/nsanimationcontext/duration
 https://developer.apple.com/documentation/quartzcore/cabasicanimation
+
+2026-10-07 焦点与原生视图交接复核（3.0.0 / 671）：
+
+_ensureZoomingAnchor（0x24CA70CE8）在已有 anchor.canBeReused 时通过
+rootLayout.createAnchorWithAnchor: 继续锚定；否则把照片引用转成
+dynamicSpriteReferenceForObjectReference:，将 normalizedScaleCenterInAnchorSprite
+和 scaleCenterTargetInViewport 传入
+createAnchorForScrollingSpriteForSpriteReference:normalizedAnchorPoint:toVisibleLocation:。
+以上选择器由独立只读辅助进程解码；没有创建 Photos 的私有布局实例。
+_updateZoomTransforms 使用 visibleRect、safeAreaInsets、照片锚点和目标视口位置
+计算各布局变换；_performAnchorAlignmentVisualShiftWithBaseLayout: 调用的
+getBestAnchorColumns:… 也带有照片内的归一化缩放点参数。
+这支持“照片身份、照片内焦点与最终原生可见位置共同交接”的机制，不支持
+只保留照片索引，或加入一段与缩放无关的滚动动画。
+
+正式版旧的左/中/右三种 pivot 候选会让部分靠右的九列焦点在三列落到左边。
+现在四套网格均根据同一照片内焦点选择最近可用列；首尾仍提前处理最新末行
+及实际滚动边界。该公开 API 算法仍是复刻实现，不能称为恢复的苹果源码。
+
+呈现移到 NSClipView 内、原生文档上方，原生 cell 在这段时间暂停绘制但保留
+实例和图片，完成布局后在同一个交接恢复。NSCollectionView 本身、原生滚动、
+工具栏和下载条不替换。焦点行与周围网格共用实际视口裁切，删除焦点行单独
+固定内边距导致的白色切口。原生实际 cell 和 held frame 的坐标分别在包含
+工具栏、下载条、分栏的 MainWindow 中比较，不以计划坐标等价代替此检查。
+
+缩略图缓存按文件 revision、显示 scale 和有限尺寸档位复用；较大解码图可供
+较小尺寸使用，细节缓存不挤掉基础图。窗口/边栏尺寸连续变化时保留当前图，
+等布局尺寸稳定或结束 live resize 后才提升清晰度。此为应用缓存优化，
+不是已读出的 Photos 缓存实现。以上检查仍不能替代真实触控板和显示 FPS 测量。

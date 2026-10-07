@@ -707,6 +707,57 @@ import Foundation
         checkSpacing()
         expect(abs(spacingScroll.contentView.documentVisibleRect.minY - spacingBefore) <= 1, "shrinking input restores the same bottom geometry")
         pass("real main-window gallery opens at newest, stays pinned through native resize and keeps equal input margins through growth/shrink")
+        let spacingGrid = spacingCollection.delegate as! ThumbnailGridController
+        let spacingZoom = spacingGrid.zoom!
+        let nativeSplit = spacingWindow.contentViewController as! NSSplitViewController
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            spacingWindow.appearance = NSAppearance(named: appearance)
+            for (from, to) in [(0, 1), (1, 2), (2, 3), (3, 2), (2, 1), (1, 0)] {
+                spacingZoom.zoom(to: from)
+                spacingZoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                try await Task.sleep(for: .milliseconds(20))
+                let focal = 60
+                let frame = spacingLayout.spec.frame(index: focal, width: spacingLayout.viewportSize.width,
+                                                     metrics: spacingLayout.metrics)
+                let point = CGPoint(x: frame.midX, y: frame.midY)
+                spacingScroll.contentView.scroll(to: CGPoint(x: 0, y: point.y - 260))
+                spacingScroll.reflectScrolledClipView(spacingScroll.contentView)
+                spacingCollection.layoutSubtreeIfNeeded()
+                spacingZoom.beginGesture(at: point)
+                let ratio = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
+                    position: (CGFloat(from) + CGFloat(to)) / 2, metrics: spacingLayout.metrics) / frame.width
+                spacingZoom.changeGesture(magnification: ratio * ratio - 1)
+                expect(spacingZoom.overlay.superview === spacingScroll.contentView,
+                       "main-window reusable cells must not cover the zoom presentation")
+                expect(spacingCollection.visibleItems().allSatisfy { $0.view.alphaValue == 0 },
+                       "the real gallery must not draw two native/presentation grids together")
+                expect(spacingZoom.overlay.bounds.origin == .zero,
+                       "document scroll origin must not become a presentation-space crop")
+                expect(spacingZoom.overlay.layer!.sublayers!.allSatisfy { $0.frame == spacingZoom.overlay.bounds },
+                       "all focal and dissolving rows must share the same crop in the real split window")
+                let endRatio = ZoomGeometry.side(width: spacingLayout.viewportSize.width,
+                    columns: ZoomGeometry.columns[to], metrics: spacingLayout.metrics)
+                    / ZoomGeometry.side(width: spacingLayout.viewportSize.width, position: spacingZoom.position,
+                                        metrics: spacingLayout.metrics)
+                spacingZoom.changeGesture(magnification: endRatio * endRatio - 1)
+                let held = spacingRoot.convert(spacingZoom.overlay.focalFrames[focal]!, from: spacingZoom.overlay)
+                spacingZoom.endGesture()
+                spacingZoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                try await Task.sleep(for: .milliseconds(30))
+                let cell = spacingCollection.item(at: IndexPath(item: focal, section: 0))!
+                let actual = spacingRoot.convert(cell.view.bounds, from: cell.view)
+                expect(abs(actual.midX - held.midX) <= 1 && abs(actual.midY - held.midY) <= 1,
+                       "the actual split-window cell must land at its held focal region without another location correction")
+                expect(spacingZoom.overlay.isHidden && !spacingZoom.cellsSuppressed,
+                       "main-window native cells must resume only after the prepared layout has settled")
+            }
+            nativeSplit.toggleSidebar(nil)
+            try await Task.sleep(for: .milliseconds(350))
+            spacingRoot.layoutSubtreeIfNeeded()
+            expect(spacingZoom.overlay.isHidden && !spacingZoom.cellsSuppressed,
+                   "native sidebar animation must leave no presentation layer or hidden cells")
+        }
+        pass("real split-window zoom has one visible presentation, shared clipping, aligned native focus and clean sidebar resize in both appearances")
         let empty = EmptyStateView(title: "当前筛选下没有项目", symbolName: "photo", message: "")
         model.completedFilter = .added
         empty.showAllAction = { model.completedFilter = .all }

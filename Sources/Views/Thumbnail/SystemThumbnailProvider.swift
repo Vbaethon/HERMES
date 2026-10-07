@@ -32,6 +32,8 @@ final class SystemThumbnailProvider {
     }
 
     private let cache = NSCache<NSString, NSImage>()
+    private let detailCache = NSCache<NSString, NSImage>()
+    private static let sizes: [CGFloat] = [148, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
     private let maxConcurrentRequests: Int
     private let loader: Loader
     private var loads: [Key: Load] = [:]
@@ -42,14 +44,39 @@ final class SystemThumbnailProvider {
         self.maxConcurrentRequests = max(1, maxConcurrentRequests)
         self.loader = loader ?? Self.generate
         cache.countLimit = 600
-        cache.totalCostLimit = 64 * 1024 * 1024
+        // Detail requested during a zoom must not evict all the small decoded
+        // images needed when the same library returns to nine columns.
+        cache.totalCostLimit = 32 * 1024 * 1024
+        detailCache.countLimit = 120
+        detailCache.totalCostLimit = 64 * 1024 * 1024
+    }
+
+    static func requestSize(for pointSize: CGFloat) -> CGFloat {
+        let side = max(ThumbnailCollectionStyle.cellSide, pointSize.isFinite ? ceil(pointSize) : 148)
+        return sizes.first { $0 >= side } ?? ceil(side / 512) * 512
+    }
+
+    private func image(for key: Key) -> NSImage? {
+        (key.pointSize == Self.sizes[0] ? cache : detailCache).object(forKey: key.cacheKey)
+    }
+
+    private func cachedKeys(url: URL, version: TimeInterval, scale: CGFloat) -> [Key] {
+        Self.sizes.map { Key(url: url.standardizedFileURL, version: version, pointSize: $0, scale: scale) }
     }
 
     /// A reused cell can restore decoded artwork immediately, without a task or fade.
     func cachedThumbnail(for url: URL, pointSize: CGFloat, scale: CGFloat,
                          contentVersion: TimeInterval) -> NSImage? {
-        cache.object(forKey: Key(url: url.standardizedFileURL, version: contentVersion,
-            pointSize: pointSize, scale: scale).cacheKey)
+        let side = Self.requestSize(for: pointSize)
+        return cachedKeys(url: url, version: contentVersion, scale: scale)
+            .lazy.filter { $0.pointSize >= side }.compactMap { self.image(for: $0) }.first
+    }
+
+    /// A new cell can immediately show any decoded size of this exact revision
+    /// while a sharper bitmap is prepared. Never substitute another file.
+    func bestCachedThumbnail(for url: URL, scale: CGFloat, contentVersion: TimeInterval) -> NSImage? {
+        cachedKeys(url: url, version: contentVersion, scale: scale).reversed()
+            .lazy.compactMap { self.image(for: $0) }.first
     }
 
     func thumbnail(for url: URL, pointSize: CGFloat, scale: CGFloat,
@@ -66,12 +93,25 @@ final class SystemThumbnailProvider {
                     .contentModificationDate?.timeIntervalSince1970 ?? 0
             }.value
         }
-        let key = Key(url: url.standardizedFileURL, version: version, pointSize: pointSize, scale: scale)
+        let requestedKey = Key(url: url.standardizedFileURL, version: version,
+                               pointSize: Self.requestSize(for: pointSize), scale: scale)
         // A refreshed missing-resource report must not be hidden by old pixels.
         // Revalidate the file in the worker; an incomplete pair may still have a
         // perfectly readable still image, which should remain previewable.
-        if !allowsCachedThumbnail { cache.removeObject(forKey: key.cacheKey) }
-        else if let image = cache.object(forKey: key.cacheKey) { return MediaThumbnailResult(image: image) }
+        if !allowsCachedThumbnail {
+            for key in cachedKeys(url: url, version: version, scale: scale) {
+                cache.removeObject(forKey: key.cacheKey)
+                detailCache.removeObject(forKey: key.cacheKey)
+            }
+        } else if let image = cachedThumbnail(for: url, pointSize: pointSize, scale: scale, contentVersion: version) {
+            return MediaThumbnailResult(image: image)
+        }
+        // A larger in-flight request already provides the pixels a smaller
+        // settled size needs; both subscribers can wait for that same work.
+        let key = allowsCachedThumbnail ? (loads.keys.filter {
+            $0.url == requestedKey.url && $0.version == version && $0.scale == scale
+                && $0.pointSize >= requestedKey.pointSize
+        }.min { $0.pointSize < $1.pointSize } ?? requestedKey) : requestedKey
         let waiter = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -117,7 +157,8 @@ final class SystemThumbnailProvider {
             let cost = image.representations.reduce(0) {
                 $0 + max(0, $1.pixelsWide) * max(0, $1.pixelsHigh) * 4
             }
-            cache.setObject(image, forKey: load.key.cacheKey, cost: cost)
+            (load.key.pointSize == Self.sizes[0] ? cache : detailCache)
+                .setObject(image, forKey: load.key.cacheKey, cost: cost)
         }
         for waiter in load.waiters.values { waiter.resume(returning: result) }
         load.waiters.removeAll()

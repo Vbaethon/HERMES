@@ -46,12 +46,14 @@ final class ThumbnailZoomTests: XCTestCase {
                     ZoomGeometry.side(width: width, position: zoom.position, metrics: metrics)
                 zoom.changeGesture(magnification: ratio * ratio - 1)
                 XCTAssertEqual(zoom.position, target, accuracy: 0.0001)
-                XCTAssertTrue(zoom.overlay.superview === grid.nsCollectionView,
-                              "Zoom content must stay inside the native scroll document for toolbar blending")
+                XCTAssertTrue(zoom.overlay.superview === scroll.contentView,
+                              "Reusable collection cells must not own the presentation's stacking order")
                 XCTAssertTrue(scroll.documentView === grid.nsCollectionView)
                 XCTAssertEqual(grid.nsCollectionView.alphaValue, 1,
                                "Never remove the document from the native background effect during zoom")
-                XCTAssertEqual(zoom.overlay.frame, scroll.contentView.documentVisibleRect)
+                XCTAssertEqual(zoom.overlay.frame, scroll.contentView.bounds)
+                XCTAssertTrue(grid.nsCollectionView.visibleItems().allSatisfy { $0.view.alphaValue == 0 },
+                              "The old native grid must never draw underneath the prepared zoom grids")
                 for index in start..<(start + columns) {
                     XCTAssertEqual(zoom.overlay.focalOpacity(at: index), 1,
                                    "All six directions retain the same source row, including 9/7 and 7/5")
@@ -69,9 +71,52 @@ final class ThumbnailZoomTests: XCTestCase {
             XCTAssertEqual(displayed.midX, expected.midX, accuracy: 0.01)
             XCTAssertEqual(displayed.midY, expected.midY, accuracy: 0.01)
             XCTAssertEqual(displayed.size.width, expected.size.width, accuracy: 0.01)
-            XCTAssertEqual(zoom.overlay.frame, scroll.contentView.documentVisibleRect,
+            XCTAssertEqual(zoom.overlay.frame, scroll.contentView.bounds,
                            "The held presentation must stay in the viewport after native scrolling")
             await Task.yield()
+        }
+    }
+
+    func testRealNativeFramesPreserveFocalRegionThroughHandoffWithToolbarInsets() async throws {
+        let (grid, scroll, window) = fixture(count: 70)
+        defer { window.orderOut(nil) }
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbar = NSToolbar(identifier: "ZoomFocusRegressionToolbar")
+        let zoom = grid.zoom!
+        for width in [720.0, 1000.0] {
+            window.setContentSize(NSSize(width: width, height: 600))
+            scroll.layoutSubtreeIfNeeded()
+            zoom.viewportChanged()
+            for (from, to) in [(0, 1), (1, 2), (2, 3), (3, 2), (2, 1), (1, 0)] {
+                zoom.zoom(to: from)
+                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                try await Task.sleep(for: .milliseconds(15))
+                let index = 42
+                let source = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
+                                                    metrics: zoom.layout.metrics)
+                let point = CGPoint(x: source.minX + source.width * 0.32, y: source.minY + source.height * 0.61)
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: point.y - 240))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                zoom.beginGesture(at: point)
+                let plan = try XCTUnwrap(zoom.plan)
+                XCTAssertEqual(plan.anchor.index, index)
+                let ratio = ZoomGeometry.side(width: zoom.layout.viewportSize.width,
+                    columns: ZoomGeometry.columns[to], metrics: zoom.layout.metrics) / source.width
+                zoom.changeGesture(magnification: ratio * ratio - 1)
+                let displayed = try XCTUnwrap(zoom.overlay.focalFrames[index])
+                let content = try XCTUnwrap(window.contentView)
+                let before = content.convert(displayed, from: zoom.overlay)
+                zoom.endGesture()
+                zoom.advanceAnimation(at: CACurrentMediaTime() + 10)
+                try await Task.sleep(for: .milliseconds(30))
+                let cell = try XCTUnwrap(grid.nsCollectionView.item(at: IndexPath(item: index, section: 0)))
+                let actual = content.convert(cell.view.bounds, from: cell.view)
+                XCTAssertEqual(actual.minY, before.minY, accuracy: 0.6)
+                XCTAssertEqual(actual.midX, before.midX, accuracy: 0.6)
+                XCTAssertTrue(zoom.overlay.isHidden)
+                XCTAssertFalse(zoom.cellsSuppressed)
+                XCTAssertTrue(grid.nsCollectionView.visibleItems().allSatisfy { $0.view.alphaValue == 1 })
+            }
         }
     }
 

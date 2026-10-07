@@ -3,6 +3,35 @@ import XCTest
 @testable import HermesThumbnailUI
 
 final class ThumbnailPointerGeometryTests: XCTestCase {
+    func testEveryInteriorPresetChoosesTheClosestPhotoLocalPointerSlot() {
+        let count = 5000, width: CGFloat = 1000, height: CGFloat = 600
+        let metrics = ZoomMetrics(top: 22, left: 44, bottom: 208, right: 44, gap: 20)
+        for level in 0..<4 {
+            let base = ZoomGridSpec(level: level)
+            let columns = ZoomGeometry.columns[level]
+            for column in 0..<columns {
+                let index = (1500 / columns) * columns + column
+                let frame = base.frame(index: index, width: width, metrics: metrics)
+                for unitX: CGFloat in [0.15, 0.5, 0.85] {
+                    let point = CGPoint(x: frame.minX + frame.width * unitX, y: frame.midY)
+                    let anchor = ZoomAnchor(index: index, frame: frame, documentPoint: point,
+                        viewportPoint: CGPoint(x: point.x, y: 300))
+                    let plan = ZoomPlan(anchor: anchor, base: base, width: width, height: height,
+                                        count: count, metrics: metrics, endsAtNewest: true)
+                    for target in 0..<4 {
+                        let cell = plan.specs[target].frame(index: index, width: width, metrics: metrics)
+                        let displacement = abs(cell.minX + cell.width * unitX - point.x)
+                        let side = ZoomGeometry.side(width: width, columns: ZoomGeometry.columns[target], metrics: metrics)
+                        let best = (0..<ZoomGeometry.columns[target]).map {
+                            abs(metrics.left + CGFloat($0) * (side + metrics.gap) + side * unitX - point.x)
+                        }.min()!
+                        XCTAssertEqual(displacement, best, accuracy: 0.001,
+                            "A pointer on column \(column) of preset \(level) must not jump across the gallery in preset \(target)")
+                    }
+                }
+            }
+        }
+    }
     private func exhaustiveNearest(_ point: CGPoint, count: Int, width: CGFloat,
                                    spec: ZoomGridSpec, metrics: ZoomMetrics) -> Int? {
         (0..<count).min {

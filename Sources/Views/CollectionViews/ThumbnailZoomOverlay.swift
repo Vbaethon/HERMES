@@ -320,14 +320,15 @@ final class ThumbnailZoomOverlay: NSView {
                 } ?? false)
             }
         }
-        focalGrid.viewport.frame = CGRect(x: metrics.left, y: 0,
-            width: max(0, width - metrics.left - metrics.right), height: height)
+        // Every zoom grid clips at the same actual viewport edge. A fixed
+        // layout inset here cuts a moving focal photo with a white rectangle.
+        focalGrid.viewport.frame = bounds
         focalGrid.retain(focalRange)
         for (index, cell) in focalFrames {
             let tile = focalGrid.tile(at: index)
             tile.setPresentationHidden(false)
             tile.opacity = 1
-            tile.update(assets[index] ?? ZoomArtwork(), cell: cell.offsetBy(dx: -metrics.left, dy: 0), scale: 1)
+            tile.update(assets[index] ?? ZoomArtwork(), cell: cell, scale: 1)
         }
         CATransaction.commit()
     }

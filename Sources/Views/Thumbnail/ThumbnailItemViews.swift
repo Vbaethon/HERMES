@@ -12,6 +12,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var unavailableMessage: String?
     private var previewMessage: String?
     private var requestedThumbnailSide: CGFloat = 0
+    private var lastAppliedSize: CGSize = .zero
+    private var zoomPresentationSuppressed = false
     private struct Appearance: Equatable {
         let url: URL?
         let status: PairItem.Status
@@ -105,6 +107,9 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         representedURL = nil
         representedContentVersion = nil
         requestedThumbnailSide = 0
+        lastAppliedSize = .zero
+        zoomPresentationSuppressed = false
+        applyZoomPresentationVisibility()
         unavailableMessage = nil
         previewMessage = nil
         lastAppearance = nil
@@ -130,14 +135,31 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     override func apply(_ layoutAttributes: NSCollectionViewLayoutAttributes) {
         super.apply(layoutAttributes)
+        applyZoomPresentationVisibility()
         view.needsLayout = true
-        view.layoutSubtreeIfNeeded()
+        let sizeChanged = lastAppliedSize != view.bounds.size
+        lastAppliedSize = view.bounds.size
         // Keep the displayed bitmap while requesting enough pixels for a larger
         // settled preset. Resizing/status changes must not restart its fade.
         if let url = representedURL,
-           ceil(min(view.bounds.width, view.bounds.height)) > requestedThumbnailSide {
+           SystemThumbnailProvider.requestSize(for: min(view.bounds.width, view.bounds.height)) > requestedThumbnailSide
+                || (sizeChanged && thumbnailTask != nil && imageView?.image != nil) {
             startThumbnailLoad(for: url)
         }
+    }
+
+    func setZoomPresentationSuppressed(_ suppressed: Bool) {
+        zoomPresentationSuppressed = suppressed
+        applyZoomPresentationVisibility()
+    }
+
+    private func applyZoomPresentationVisibility() {
+        let alpha: CGFloat = zoomPresentationSuppressed ? 0 : 1
+        guard view.alphaValue != alpha else { return }
+        // Reusable native cells keep their identity and decoded image, but
+        // only the prepared presentation draws during a pinch and handoff.
+        view.layer?.removeAnimation(forKey: "opacity")
+        view.alphaValue = alpha
     }
 
     override var draggingImageComponents: [NSDraggingImageComponent] {
@@ -220,7 +242,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailTask?.cancel()
         let displayScale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let contentVersion = representedContentVersion ?? 0
-        let pointSize = max(ThumbnailCollectionStyle.cellSide, ceil(min(view.bounds.width, view.bounds.height)))
+        let pointSize = SystemThumbnailProvider.requestSize(for: min(view.bounds.width, view.bounds.height))
         requestedThumbnailSide = pointSize
         let allowsCachedThumbnail = unavailableMessage == nil
         if allowsCachedThumbnail, let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
@@ -231,12 +253,18 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             return
         }
         if imageView?.image == nil, allowsCachedThumbnail,
-           let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
-                pointSize: ThumbnailCollectionStyle.cellSide, scale: displayScale, contentVersion: contentVersion) {
+           let cached = SystemThumbnailProvider.shared.bestCachedThumbnail(for: url,
+                scale: displayScale, contentVersion: contentVersion) {
             showLoadedThumbnail(cached, animated: false)
         }
+        let hasArtwork = imageView?.image != nil
         thumbnailTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(35))
+            // Resizing a window or animating a sidebar keeps the current
+            // bitmap on screen. Generate extra detail only after sizing rests.
+            try? await Task.sleep(for: hasArtwork ? .milliseconds(140) : .milliseconds(35))
+            while self?.view.inLiveResize == true && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(80))
+            }
             guard !Task.isCancelled else { return }
             let result = await SystemThumbnailProvider.shared.thumbnail(
                 for: url,

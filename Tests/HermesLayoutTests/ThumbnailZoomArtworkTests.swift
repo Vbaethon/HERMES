@@ -29,8 +29,21 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
                            metrics: ZoomMetrics) throws -> CALayer {
         let viewport = try XCTUnwrap(overlay.layer?.sublayers?.last)
         let root = try XCTUnwrap(viewport.sublayers?.first)
-        let frame = try XCTUnwrap(overlay.focalFrames[index]).offsetBy(dx: -metrics.left, dy: 0)
+        let frame = try XCTUnwrap(overlay.focalFrames[index])
         return try XCTUnwrap(root.sublayers?.first { $0.frame == frame })
+    }
+
+    func testMovingFocalArtworkClipsAtTheActualViewportRatherThanLayoutPadding() throws {
+        let overlay = ThumbnailZoomOverlay(frame: CGRect(x: 0, y: 0, width: 1000, height: 600))
+        overlay.setAssets((0..<80).map { _ in ZoomArtwork(image: try? bitmap(width: 300, height: 400)) })
+        let plan = plan(level: 1, index: 42)
+        overlay.render(position: 2.8, plan: plan, weights: [0, 0, 0.1, 0.9])
+        let viewports = try XCTUnwrap(overlay.layer?.sublayers)
+        XCTAssertEqual(viewports.count, 5)
+        XCTAssertTrue(viewports.allSatisfy { $0.frame == overlay.bounds },
+                      "A moving focal image must not be cut off by a different inset clipping rectangle")
+        let tile = try focalTile(in: overlay, index: plan.anchor.index, metrics: plan.metrics)
+        XCTAssertEqual(tile.frame, overlay.focalFrames[plan.anchor.index])
     }
 
     private func focalBadge(in overlay: ThumbnailZoomOverlay, tile: CALayer) throws -> CALayer {

@@ -76,6 +76,7 @@ final class ThumbnailGridZoomController: NSObject {
     private var badgeBitmaps: [String: (image: CGImage?, size: CGSize)] = [:]
     private var badgeBackingScale: CGFloat = 0
     private(set) var badgesSuppressed = false
+    private(set) var cellsSuppressed = false
     private var lastPinchFactor: CGFloat = 1
     private var hasShownNewest = false
     private var pendingItems: ItemChange?
@@ -121,9 +122,10 @@ final class ThumbnailGridZoomController: NSObject {
             if let pinch { scroll?.removeGestureRecognizer(pinch) }
             scroll = enclosingScroll
             enclosingScroll.allowsMagnification = false
-            // Keep the presentation in the scroll document. Native toolbar and
-            // scroll-edge effects must see the same content throughout a pinch.
-            collection.addSubview(overlay, positioned: .above, relativeTo: nil)
+            // NSCollectionView owns the ordering of its reusable cell views.
+            // Keep the temporary presentation above the document in AppKit's
+            // clip view, where a newly inserted cell cannot cover it.
+            enclosingScroll.contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
             let recognizer = NSMagnificationGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             enclosingScroll.addGestureRecognizer(recognizer)
             pinch = recognizer
@@ -205,6 +207,7 @@ final class ThumbnailGridZoomController: NSObject {
 
     private func preparePlan(at point: CGPoint) {
         guard plan == nil, let anchor = nativeAnchor(at: point) else { return }
+        cancelImageTasks()
         plan = ZoomPlan(anchor: anchor, base: layout.spec, width: layout.viewportSize.width,
                         height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics,
                         endsAtNewest: true, pinsToNewest: isAtNewest)
@@ -221,6 +224,15 @@ final class ThumbnailGridZoomController: NSObject {
 
     func prepareBadgeAppearance(for cell: ThumbnailCollectionItem) {
         cell.setZoomBadgeSuppressed(badgesSuppressed, animated: false)
+        cell.setZoomPresentationSuppressed(cellsSuppressed)
+    }
+
+    private func setCellsSuppressed(_ suppressed: Bool) {
+        guard cellsSuppressed != suppressed else { return }
+        cellsSuppressed = suppressed
+        for case let cell as ThumbnailCollectionItem in collection?.visibleItems() ?? [] {
+            cell.setZoomPresentationSuppressed(suppressed)
+        }
     }
 
     private func setBadgesSuppressed(_ suppressed: Bool, animated: Bool) {
@@ -402,16 +414,20 @@ final class ThumbnailGridZoomController: NSObject {
     }
 
     private func applyOverlay() {
-        guard let plan, !applying, let scroll, let collection else { return }
+        guard let plan, !applying, let scroll, collection != nil else { return }
         imagesNeedDisplay = false
         handoffGeneration += 1
         applying = true
         defer { applying = false }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        overlay.frame = scroll.contentView.documentVisibleRect
-        if collection.subviews.last !== overlay { collection.addSubview(overlay, positioned: .above, relativeTo: nil) }
+        overlay.frame = scroll.contentView.bounds
+        overlay.bounds.origin = .zero
+        if scroll.contentView.subviews.last !== overlay {
+            scroll.contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        }
         overlay.render(position: position, plan: plan, weights: alpha.weights, elasticScale: elasticScale)
+        setCellsSuppressed(true)
         overlay.isHidden = false
         CATransaction.commit()
     }
@@ -440,12 +456,16 @@ final class ThumbnailGridZoomController: NSObject {
             scroll.reflectScrolledClipView(scroll.contentView)
             collection.layoutSubtreeIfNeeded()
             if holdingOverlay {
-                overlay.frame = scroll.contentView.documentVisibleRect
-                collection.addSubview(overlay, positioned: .above, relativeTo: nil)
+                overlay.frame = scroll.contentView.bounds
+                overlay.bounds.origin = .zero
+                scroll.contentView.addSubview(overlay, positioned: .above, relativeTo: nil)
                 retainHandoffImages()
             }
             for item in collection.visibleItems() { item.view.layoutSubtreeIfNeeded() }
-            if !holdingOverlay { overlay.isHidden = true }
+            if !holdingOverlay {
+                setCellsSuppressed(false)
+                overlay.isHidden = true
+            }
         }
         lastViewportBounds = scroll.contentView.documentVisibleRect
         lastViewportInsets = scroll.contentInsets
@@ -458,6 +478,7 @@ final class ThumbnailGridZoomController: NSObject {
                 collection.layoutSubtreeIfNeeded()
                 self.retainHandoffImages()
                 for item in collection.visibleItems() { item.view.layoutSubtreeIfNeeded() }
+                self.setCellsSuppressed(false)
                 self.overlay.isHidden = true
                 self.cancelImageTasks()
                 // Wait for layout and elastic settlement before revealing the
