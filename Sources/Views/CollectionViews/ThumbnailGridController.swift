@@ -151,7 +151,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
             let remainingIDs = Set(presentedIDs)
             let isRemoval = presentedIDs.count < previousIDs.count
                 && previousIDs.filter { remainingIDs.contains($0) } == presentedIDs
-            zoom.itemsWillChange(count: presentedItems.count, preservesRowStart: isRemoval)
+            zoom.itemsWillChange(count: presentedItems.count, preservesNewestPosition: isRemoval)
         }
         itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
         items = presentedItems
@@ -178,7 +178,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
             context.duration = ThumbnailCollectionAnimation.duration(animated: shouldAnimate)
             dataSource.apply(snapshot, animatingDifferences: shouldAnimate) { [weak self] in
                 guard let self, self.snapshotGeneration == generation else { return }
-                self.zoom.itemsDidChange()
+                self.zoom.itemsDidChange(snapshotCompleted: true)
                 self.updateVisibleItems()
             }
         }

@@ -447,3 +447,43 @@ NSWindow 中间帧确认原位淡出与保留项同时补位；连续删除、�
 保持一致；其余收据文件同样保持，只排除 Finder 的 .DS_Store 布局
 缓存。安装版实际含 GPS 素材已返回 Apple 地点名称及完整地址，
 地图与文字位于同一卡片内。临时安装副本、回滚应用和构建产品已清理。
+
+2026-10-07 3.0.7 删除补位方向修正：
+
+用户指出 3.0.6 删除后向列表开头补位。旧回归只检查保留首行、目标
+淡出及保留项发生移动，漏检了移动方向；固定 leadingSlots 的处理错误。
+本项目媒体仍按既有时间/帖子顺序排列，最新项目在尾端，不反转数据顺序。
+
+重新只读核对本机 GridZero 方法及 shared-cache 消息 stub：
+PXZoomablePhotosLayout._updateVisualShifting（0x24CA6B640）读取
+contentShiftStrategy、contentStartsAtEnd 和 anchoredContentEdges；
+调用 getLastItem:lastColumn:forBodyLayout: 及
+_performVisualShiftWithLayout:movingItem:toColumn:。
+getLastItem…（0x24CA679E4）取 numberOfItems-1 为末项，按列数和
+附加项目数计算末列。PXGGridLayout.shiftItem…（0x24CA39DAC）
+最终设置 visualItemShift。布局方向和尾端定位是独立于动画时长的机制。
+以上是本机原版方法检查，不宣称苹果公开了 Photos 完整源代码；没有
+删除或修改用户 Photos 图库，没有把私有框架加入正式版或测试目标。
+
+公开 AppKit 实现改为保留当前末项格位：纯删除将前导格增加移除数，
+删除位置之前的照片向后补空，之后的照片保留格位。缩放留下的非满末行
+同样保留，不强制排满。原生更新期间保留完整旧行空间；事务完成后只
+裁去完整空首行，并同步修正滚动原点，防止跨行时全列表移动或交接跳动。
+裁行等待当前 snapshot 完成，普通 bounds 通知不能提前结束删除。
+不在提交 snapshot 前失效布局，避免尾部尚存单元格在旧索引被移出、
+重建；裁行也先安装目标视口，再让 AppKit 布局，保留原生 cell 和位图。
+删除目标仍由同一 AppKit 事务原位淡出，连续删除及缩放交接规则保留。
+
+新增方向回归在 3.0.6 上复现 19 个断言失败。修正后 8 项删除回归通过：
+实际 NSWindow 中间帧检查前项向后、后项不动、目标原位淡出；跨行删除
+前后尾部 cell 身份和屏幕位置保持；覆盖四档缩放、非满末行、删除最新
+项、整行删除、中部浏览、连续删除与删除到空。
+
+本版完整验证：117 项 Swift 测试、16 组主窗口 UI/UX、27 组原生媒体、
+58 组模型安全和 42 组构建安装保护通过。下载、合成、媒体元数据及
+窗口布局回归通过。3.0.7（678）Release 构建成功。
+
+3.0.7（678）已安装并打开 /Applications/HERMES.app，严格签名通过。
+安装前后及启动后的 77/43 条记录、13 项业务设置、全部媒体与收据内容
+保持一致；实际安装版图库正常打开在最新端。事务回滚应用和管理的旧
+构建产品已由打包流程清理。

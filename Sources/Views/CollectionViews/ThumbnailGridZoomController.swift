@@ -98,9 +98,11 @@ final class ThumbnailGridZoomController: NSObject {
 
     private struct ItemChange {
         let followsNewest: Bool
+        let preservesNewestPosition: Bool
         let anchor: ZoomAnchor?
         let anchorID: String?
         let origin: CGFloat
+        var snapshotHasCompleted = false
     }
 
     private struct Animation {
@@ -158,7 +160,7 @@ final class ThumbnailGridZoomController: NSObject {
         itemsDidChange()
     }
 
-    func itemsWillChange(count: Int, preservesRowStart: Bool = false) {
+    func itemsWillChange(count: Int, preservesNewestPosition: Bool = false) {
         finishForInteraction()
         if cellsSuppressed {
             retainHandoffImages()
@@ -170,17 +172,28 @@ final class ThumbnailGridZoomController: NSObject {
         let previousItems = items()
         let anchorID = anchor.flatMap { previousItems.indices.contains($0.index) ? previousItems[$0.index].id : nil }
         pendingItems = ItemChange(followsNewest: !hasShownNewest || isAtNewest,
+                                 preservesNewestPosition: preservesNewestPosition,
                                  anchor: anchor, anchorID: anchorID, origin: origin)
         layout.beginItemChange()
-        layout.count = count
-        if !preservesRowStart {
+        if preservesNewestPosition && count > 0 {
+            // Count from the current newest slot, including a partial last row
+            // left by zoom. Earlier photos move toward the gap; later ones keep
+            // their slots. Retain whole leading rows during AppKit's transaction
+            // so a row boundary cannot shift every surviving photo mid-fade.
+            layout.spec.leadingSlots += layout.count - count
+        } else {
             layout.spec = .endingAtNewest(level: Int(position.rounded()), count: count)
         }
-        layout.invalidateLayout()
+        layout.count = count
+        // The diffable transaction invalidates the layout after it captures the
+        // old items. Invalidating here would evict the old final index before
+        // AppKit can remap that still-visible photo to its surviving index.
     }
 
-    func itemsDidChange() {
-        guard let pendingItems, let scroll, let collection, collection.window != nil,
+    func itemsDidChange(snapshotCompleted: Bool = false) {
+        if snapshotCompleted { pendingItems?.snapshotHasCompleted = true }
+        guard let pendingItems, pendingItems.snapshotHasCompleted,
+              let scroll, let collection, collection.window != nil,
               scroll.contentView.bounds.width > 0, scroll.contentView.bounds.height > 0,
               collection.numberOfSections > 0,
               collection.numberOfItems(inSection: 0) == layout.count else { return }
@@ -189,15 +202,26 @@ final class ThumbnailGridZoomController: NSObject {
             return
         }
         var origin = pendingItems.origin
+        if pendingItems.preservesNewestPosition {
+            // Removing empty whole leading rows and shifting the viewport by
+            // the same distance preserves every displayed pixel at handoff.
+            let columns = ZoomGeometry.columns[layout.spec.level]
+            let rows = layout.spec.leadingSlots / columns
+            layout.spec.leadingSlots %= columns
+            let pitch = ZoomGeometry.side(width: layout.viewportSize.width,
+                                          columns: columns, metrics: layout.metrics) + layout.metrics.gap
+            origin -= CGFloat(rows) * pitch
+        }
         if pendingItems.followsNewest { origin = maximumOrigin }
-        else if let anchor = pendingItems.anchor, let id = pendingItems.anchorID,
+        else if !pendingItems.preservesNewestPosition,
+                let anchor = pendingItems.anchor, let id = pendingItems.anchorID,
                 let index = items().firstIndex(where: { $0.id == id }) {
             let frame = layout.spec.frame(index: index, width: layout.viewportSize.width, metrics: layout.metrics)
             origin = frame.minY + frame.height * anchor.unitPoint.y - anchor.viewportPoint.y
         }
         self.pendingItems = nil
         if layout.count > 0 { hasShownNewest = true }
-        applyNative(origin: origin)
+        applyNative(origin: origin, layoutBeforeScrolling: !pendingItems.preservesNewestPosition)
     }
 
     func updateSectionInset(_ inset: NSEdgeInsets) {
@@ -483,7 +507,7 @@ final class ThumbnailGridZoomController: NSObject {
         CATransaction.commit()
     }
 
-    private func applyNative(origin: CGFloat, deferHandoff: Bool = false) {
+    private func applyNative(origin: CGFloat, deferHandoff: Bool = false, layoutBeforeScrolling: Bool = true) {
         guard !applying, let scroll, let collection else { return }
         applying = true
         defer { applying = false }
@@ -501,7 +525,7 @@ final class ThumbnailGridZoomController: NSObject {
             // Laying out at the old scroll origin first creates a second set
             // of offscreen cells during the same native handoff.
             // Startup/toolbar sizing still needs AppKit's initial layout pass.
-            if !deferHandoff { collection.layoutSubtreeIfNeeded() }
+            if !deferHandoff && layoutBeforeScrolling { collection.layoutSubtreeIfNeeded() }
             let documentOrigin = CGPoint(x: 0, y: min(maximumOrigin, max(0, origin)))
             scroll.contentView.scroll(to: scroll.contentView.convert(documentOrigin, from: collection))
             scroll.reflectScrolledClipView(scroll.contentView)
