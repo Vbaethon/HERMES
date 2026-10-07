@@ -2,6 +2,9 @@
 """Compile the current App sources and run UI/UX regressions in an isolated executable."""
 from pathlib import Path
 import subprocess
+import plistlib
+import shutil
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
@@ -17,4 +20,16 @@ with tempfile.TemporaryDirectory(prefix="hermes-uiux-", dir=cache) as directory:
     sources = [str(p) for p in sorted((root / "Sources").rglob("*.swift")) if p.name not in {"tool.swift", "HermesApp.swift"}]
     binary = temp / "HermesUIUXRegression"
     subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library", "-target", "arm64-apple-macos27.0", *sources, str(app), str(root / "Tests/HermesUIUXRegression/RegressionMain.swift"), "-o", str(binary)], check=True)
-    subprocess.run([str(binary), str(temp / "fixtures")], check=True, timeout=60)
+    preview = "--arrangement-preview" in sys.argv
+    if preview:
+        bundle = temp / "HERMES Arrangement Preview.app"
+        contents = bundle / "Contents"
+        executable = contents / "MacOS" / binary.name
+        executable.parent.mkdir(parents=True)
+        with (contents / "Info.plist").open("wb") as info:
+            plistlib.dump({"CFBundleIdentifier": "com.hermes.preview.arrangement",
+                "CFBundleExecutable": binary.name, "CFBundleName": "HERMES Arrangement Preview",
+                "CFBundlePackageType": "APPL"}, info)
+        shutil.move(binary, executable)
+        binary = executable
+    subprocess.run([str(binary), str(temp / "fixtures"), *sys.argv[1:]], check=True, timeout=120 if preview else 60)

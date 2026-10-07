@@ -208,13 +208,8 @@ struct ZoomPlan {
             let centerY = shifted.frame(index: anchor.index, width: width, metrics: metrics).midY
             let maxOrigin = max(0, shifted.height(count: count, width: width, metrics: metrics) - height)
             let origin = min(maxOrigin, max(0, centerY - desiredY))
-            if offset == 0 || origin >= shifted.frame(index: 0, width: width, metrics: metrics).maxY + metrics.gap {
-                return shifted
-            }
-            // A complete first row must retain the original focal asset too.
-            // Choose its real slot in this layout before showing the grid;
-            // never exchange the focal identity for a neighbouring photo.
-            return ZoomGridSpec(level: level, visualAnchorIndex: anchor.index)
+            return ThumbnailGridArrangementController.respectingVisibleStart(shifted, count: count,
+                origin: origin, width: width, metrics: metrics)
         }
     }
 

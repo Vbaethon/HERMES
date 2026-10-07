@@ -904,6 +904,137 @@ import Foundation
         expect(deletionCoordinator.collectionView!.numberOfItems(inSection: 0) == 0,
                "explicit removal must not leave a composition ghost for its minimum playback duration")
         pass("explicit deletion bypasses the retained completion effect and leaves an empty native collection")
+        for section in SidebarSection.allCases {
+            let arrangementModel = ImporterModel(refreshOnInit: false)
+            let ids = Array(0..<200)
+            func image(_ id: Int) -> URL { root.appendingPathComponent("arrangement-\(id).png") }
+            func pairs(_ snapshot: [Int]) -> [PairItem] {
+                snapshot.map { PairItem(imageURL: image($0), videoURL: image($0).deletingPathExtension().appendingPathExtension("mov")) }
+            }
+            func downloads(_ snapshot: [Int]) -> [DownloadGridItem] {
+                snapshot.map { DownloadGridItem(id: "photo:\(image($0).path)", imageURL: image($0), modifiedTime: 1,
+                    status: .finished, kind: .photo(image($0).path), isCompleted: false, mediaKind: .photo) }
+            }
+            func completed(_ snapshot: [Int]) -> [CompletedItem] { snapshot.map { CompletedItem(imagePath: image($0).path) } }
+            let arrangementScroll: NSScrollView
+            let arrangementGrid: ThumbnailGridController
+            let submit: ([Int]) -> Void
+            switch section {
+            case .queue:
+                let (scroll, coordinator) = PairCollectionView.make(items: pairs(ids), model: arrangementModel)
+                arrangementScroll = scroll
+                arrangementGrid = coordinator.gridController!
+                submit = { coordinator.applyItems(pairs($0), animatingDifferences: false) }
+            case .downloads:
+                let (scroll, coordinator) = DownloadCollectionView.make(items: downloads(ids), filter: .all,
+                    model: arrangementModel, bottomContentInset: 0)
+                arrangementScroll = scroll
+                arrangementGrid = coordinator.gridController!
+                submit = { coordinator.applyItems(downloads($0), animatingDifferences: false, defersCompletionRemoval: false) }
+            case .completed:
+                let (scroll, coordinator) = CompletedCollectionView.make(items: completed(ids), filter: .all, model: arrangementModel)
+                arrangementScroll = scroll
+                arrangementGrid = coordinator.gridController!
+                submit = { coordinator.applyItems(completed($0), animatingDifferences: false) }
+            }
+            let arrangementWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
+                                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            arrangementWindow.contentView = arrangementScroll
+            arrangementWindow.orderFront(nil)
+            let zoom = arrangementGrid.zoom!
+            try await Task.sleep(for: .milliseconds(30))
+            let focal = zoom.layout.spec.frame(index: 90, width: zoom.layout.viewportSize.width, metrics: zoom.layout.metrics)
+            arrangementScroll.contentView.scroll(to: CGPoint(x: 0, y: focal.midY - 220))
+            arrangementScroll.reflectScrolledClipView(arrangementScroll.contentView)
+            zoom.beginGesture(at: CGPoint(x: focal.minX + focal.width * 0.16, y: focal.midY))
+            zoom.zoom(to: 0)
+            zoom.displayFrame(at: CACurrentMediaTime() + 10)
+            try await Task.sleep(for: .milliseconds(30))
+            arrangementScroll.contentView.scroll(to: CGPoint(x: 0, y: zoom.maximumOrigin))
+            arrangementScroll.reflectScrolledClipView(arrangementScroll.contentView)
+            let tail = zoom.layout.spec.frame(index: 199, width: zoom.layout.viewportSize.width, metrics: zoom.layout.metrics)
+                .offsetBy(dx: 0, dy: -arrangementScroll.contentView.documentVisibleRect.minY)
+            let removed = ids.filter { ![11, 45, 191].contains($0) }
+            for snapshot in [removed, removed, removed.filter { $0 % 3 != 0 }, removed, [], removed + [200, 201]] {
+                submit(snapshot)
+                try await Task.sleep(for: .milliseconds(30))
+                expect(zoom.layout.count == snapshot.count, "every \(section) snapshot must reach the shared arrangement controller")
+                if !snapshot.isEmpty {
+                    let newest = arrangementGrid.nsCollectionView.item(at: IndexPath(item: snapshot.count - 1, section: 0))!
+                    let actual = newest.view.frame.offsetBy(dx: 0, dy: -arrangementScroll.contentView.documentVisibleRect.minY)
+                    expect(abs(actual.minX - tail.minX) < 0.5 && abs(actual.minY - tail.minY) < 0.5,
+                           "\(section) deletion, refresh, filter recovery and insertion must retain the zoomed tail in actual native cells")
+                }
+            }
+            arrangementWindow.orderOut(nil)
+        }
+        let emptyFilterModel = ImporterModel(refreshOnInit: false)
+        emptyFilterModel.completed = [CompletedItem(imagePath: missing.path)]
+        emptyFilterModel.completedFilter = .all
+        let emptyFilterPage = CompletedPageController(model: emptyFilterModel)
+        let emptyFilterWindow = NSWindow(contentViewController: emptyFilterPage)
+        emptyFilterWindow.setContentSize(NSSize(width: 600, height: 400))
+        emptyFilterWindow.orderFront(nil)
+        emptyFilterPage.reload()
+        try await Task.sleep(for: .milliseconds(30))
+        let emptyFilterCollection = descendants(emptyFilterPage.view).compactMap { $0 as? NSCollectionView }.first!
+        emptyFilterModel.completedFilter = .added
+        emptyFilterPage.reload()
+        try await Task.sleep(for: .milliseconds(450))
+        expect(emptyFilterCollection.numberOfItems(inSection: 0) == 0,
+               "the completed page must submit an empty filter snapshot, not leave hidden stale items")
+        emptyFilterModel.completedFilter = .all
+        emptyFilterPage.reload()
+        try await Task.sleep(for: .milliseconds(450))
+        expect(emptyFilterCollection.numberOfItems(inSection: 0) == 1, "filter recovery must restore the collection snapshot")
+        emptyFilterWindow.orderOut(nil)
+        pass("all three native page coordinators share reverse arrangement through zoom, removal, refresh, filters, empty recovery and new media")
+        let sparseModel = ImporterModel(refreshOnInit: false)
+        let sparseURLs = try (0..<2).map { index -> URL in
+            let url = root.appendingPathComponent("left-start-\(index).png")
+            let pixels = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 600, pixelsHigh: 340,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: pixels)
+            (index == 0 ? NSColor.systemBlue : NSColor.systemTeal).setFill()
+            NSRect(x: 0, y: 0, width: 600, height: 340).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            try pixels.representation(using: .png, properties: [:])!.write(to: url)
+            return url
+        }
+        sparseModel.downloadPhotos = sparseURLs
+        sparseModel.downloadFilter = .notComposed
+        sparseModel.downloadFilter = .all
+        try await waitUntil { sparseModel.visibleDownloadItems.count == 2 }
+        let sparseMain = MainWindowController(model: sparseModel)
+        sparseMain.showWindow(nil)
+        let sparseWindow = sparseMain.window!
+        sparseWindow.setContentSize(NSSize(width: 1309, height: 660))
+        sparseModel.selection = .downloads
+        try await Task.sleep(for: .milliseconds(100))
+        sparseWindow.contentView!.layoutSubtreeIfNeeded()
+        let sparseCollection = descendants(sparseWindow.contentView!).compactMap { $0 as? NSCollectionView }.first!
+        let sparseLayout = sparseCollection.collectionViewLayout as! ThumbnailGridLayout
+        expect(sparseLayout.count == 2 && sparseLayout.spec.leadingSlots == 0,
+               "the actual main window must start a two-photo library at the left")
+        for index in 0..<2 {
+            let cell = sparseCollection.item(at: IndexPath(item: index, section: 0))!
+            let expected = ZoomGridSpec(level: sparseLayout.spec.level).frame(index: index,
+                width: sparseLayout.viewportSize.width, metrics: sparseLayout.metrics)
+            expect(abs(cell.view.frame.minX - expected.minX) < 0.5,
+                   "sparse main-window photos must fill the first row from left to right")
+        }
+        pass("the real main-window hierarchy starts two photos at the left, including toolbar and inspector geometry")
+        if CommandLine.arguments.contains("--arrangement-preview") {
+            sparseWindow.center()
+            sparseWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+            print("Native two-photo arrangement preview ready")
+            fflush(stdout)
+            try await Task.sleep(for: .seconds(50))
+        }
+        sparseWindow.orderOut(nil)
         print("PASS: \(checks) UI/UX regression groups; no network, media deletion or Photos writes")
     }
 }

@@ -14,6 +14,7 @@ fi
 mkdir -p "$demo_app/Contents/MacOS"
 xcrun swiftc -O -swift-version 6 -parse-as-library \
   "$demo_source/ThumbnailZoomDemo.swift" "$demo_repo/Sources/Views/CollectionViews/ThumbnailZoomGeometry.swift" \
+  "$demo_repo/Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift" \
   "$demo_source/ZoomOverlay.swift" "$demo_source/ZoomChecks.swift" \
   -framework AppKit -framework QuartzCore -framework ImageIO \
   -o "$demo_app/Contents/MacOS/HERMESThumbnailZoomDemo"

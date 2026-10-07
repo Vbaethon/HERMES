@@ -290,6 +290,11 @@ final class ThumbnailZoomTests: XCTestCase {
             layout.spec.frame(index: $0, width: width, metrics: metrics)
         }
         guard let first = row.first, let last = row.last else { return }
+        if layout.count < columns {
+            XCTAssertEqual(first.minX, metrics.left, accuracy: 0.001, file: file, line: line)
+            XCTAssertTrue(row.allSatisfy { abs($0.minY - last.minY) < 0.001 }, file: file, line: line)
+            return
+        }
         XCTAssertEqual(last.maxX, width - metrics.right, accuracy: 0.001, file: file, line: line)
         if layout.count >= columns { XCTAssertEqual(first.minX, metrics.left, accuracy: 0.001, file: file, line: line) }
         XCTAssertTrue(row.allSatisfy { abs($0.minY - last.minY) < 0.001 }, file: file, line: line)

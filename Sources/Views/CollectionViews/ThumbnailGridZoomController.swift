@@ -3,9 +3,18 @@ import QuartzCore
 
 @MainActor
 final class ThumbnailGridLayout: NSCollectionViewLayout {
-    var viewportSize = CGSize(width: 900, height: 600)
-    var count = 0
-    var spec = ZoomGridSpec(level: 2)
+    let arrangement: ThumbnailGridArrangementController
+
+    init(flow: ThumbnailGridArrangementController.Flow) {
+        arrangement = ThumbnailGridArrangementController(flow: flow)
+        super.init()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    var viewportSize: CGSize { arrangement.viewportSize }
+    var count: Int { arrangement.count }
+    var spec: ZoomGridSpec { arrangement.spec }
     var sectionInset = ThumbnailCollectionStyle.sectionInset
     private var previousGeometry: (spec: ZoomGridSpec, count: Int, width: CGFloat, metrics: ZoomMetrics)?
     var metrics: ZoomMetrics {
@@ -13,8 +22,7 @@ final class ThumbnailGridLayout: NSCollectionViewLayout {
                     right: sectionInset.right, gap: ThumbnailCollectionStyle.itemSpacing)
     }
     override var collectionViewContentSize: NSSize {
-        NSSize(width: viewportSize.width,
-               height: max(viewportSize.height, spec.height(count: count, width: viewportSize.width, metrics: metrics)))
+        arrangement.contentSize
     }
     override func layoutAttributesForItem(at path: IndexPath) -> NSCollectionViewLayoutAttributes? {
         guard path.section == 0, (0..<count).contains(path.item) else { return nil }
@@ -64,7 +72,7 @@ final class ThumbnailGridLayout: NSCollectionViewLayout {
 /// clock. Prepared grids share one transform and crossfade rule for every item.
 @MainActor
 final class ThumbnailGridZoomController: NSObject {
-    let layout = ThumbnailGridLayout()
+    let layout: ThumbnailGridLayout
     let overlay = ThumbnailZoomOverlay(frame: .zero)
     private weak var collection: NSCollectionView?
     private weak var scroll: NSScrollView?
@@ -91,19 +99,8 @@ final class ThumbnailGridZoomController: NSObject {
     var badgeOpacity: CGFloat { badgeAnimation.opacity }
     private(set) var cellsSuppressed = false
     private var lastMagnification: CGFloat = 0
-    private var hasShownNewest = false
-    private var pendingItems: ItemChange?
     private var lastViewportBounds: CGRect?
     private var lastViewportInsets: NSEdgeInsets?
-
-    private struct ItemChange {
-        let followsNewest: Bool
-        let preservesNewestPosition: Bool
-        let anchor: ZoomAnchor?
-        let anchorID: String?
-        let origin: CGFloat
-        var snapshotHasCompleted = false
-    }
 
     private struct Animation {
         let from: CGFloat
@@ -128,11 +125,14 @@ final class ThumbnailGridZoomController: NSObject {
         imageTasks.values.forEach { $0.cancel() }
     }
 
-    init(collection: NSCollectionView, items: @escaping () -> [ThumbnailGridItem], sectionInset: NSEdgeInsets) {
+    init(collection: NSCollectionView, items: @escaping () -> [ThumbnailGridItem], sectionInset: NSEdgeInsets,
+         flow: ThumbnailGridArrangementController.Flow) {
+        layout = ThumbnailGridLayout(flow: flow)
         self.collection = collection
         self.items = items
         super.init()
         layout.sectionInset = sectionInset
+        _ = layout.arrangement.updateViewport(size: layout.viewportSize, metrics: layout.metrics, origin: 0)
         collection.collectionViewLayout = layout
     }
 
@@ -160,7 +160,7 @@ final class ThumbnailGridZoomController: NSObject {
         itemsDidChange()
     }
 
-    func itemsWillChange(count: Int, preservesNewestPosition: Bool = false) {
+    func itemsWillChange(ids: [String]) {
         finishForInteraction()
         if cellsSuppressed {
             retainHandoffImages()
@@ -168,32 +168,20 @@ final class ThumbnailGridZoomController: NSObject {
         }
         cancelImageTasks()
         let origin = scroll?.contentView.documentVisibleRect.minY ?? 0
-        let anchor = nativeAnchor(at: CGPoint(x: layout.viewportSize.width / 2, y: origin + 1))
-        let previousItems = items()
-        let anchorID = anchor.flatMap { previousItems.indices.contains($0.index) ? previousItems[$0.index].id : nil }
-        pendingItems = ItemChange(followsNewest: !hasShownNewest || isAtNewest,
-                                 preservesNewestPosition: preservesNewestPosition,
-                                 anchor: anchor, anchorID: anchorID, origin: origin)
-        layout.beginItemChange()
-        if preservesNewestPosition && count > 0 {
-            // Count from the current newest slot, including a partial last row
-            // left by zoom. Earlier photos move toward the gap; later ones keep
-            // their slots. Retain whole leading rows during AppKit's transaction
-            // so a row boundary cannot shift every surviving photo mid-fade.
-            layout.spec.leadingSlots += layout.count - count
-        } else {
-            layout.spec = .endingAtNewest(level: Int(position.rounded()), count: count)
+        if let rebasedOrigin = layout.arrangement.prepareSnapshot(ids, origin: origin) {
+            applyNative(origin: rebasedOrigin, layoutBeforeScrolling: false)
+            CATransaction.flush()
         }
-        layout.count = count
+        layout.beginItemChange()
+        layout.arrangement.beginPreparedSnapshot()
         // The diffable transaction invalidates the layout after it captures the
         // old items. Invalidating here would evict the old final index before
         // AppKit can remap that still-visible photo to its surviving index.
     }
 
     func itemsDidChange(snapshotCompleted: Bool = false) {
-        if snapshotCompleted { pendingItems?.snapshotHasCompleted = true }
-        guard let pendingItems, pendingItems.snapshotHasCompleted,
-              let scroll, let collection, collection.window != nil,
+        if snapshotCompleted { layout.arrangement.snapshotDidComplete() }
+        guard let scroll, let collection, collection.window != nil,
               scroll.contentView.bounds.width > 0, scroll.contentView.bounds.height > 0,
               collection.numberOfSections > 0,
               collection.numberOfItems(inSection: 0) == layout.count else { return }
@@ -201,42 +189,22 @@ final class ThumbnailGridZoomController: NSObject {
             viewportChanged()
             return
         }
-        var origin = pendingItems.origin
-        if pendingItems.preservesNewestPosition {
-            // Removing empty whole leading rows and shifting the viewport by
-            // the same distance preserves every displayed pixel at handoff.
-            let columns = ZoomGeometry.columns[layout.spec.level]
-            let rows = layout.spec.leadingSlots / columns
-            layout.spec.leadingSlots %= columns
-            let pitch = ZoomGeometry.side(width: layout.viewportSize.width,
-                                          columns: columns, metrics: layout.metrics) + layout.metrics.gap
-            origin -= CGFloat(rows) * pitch
-        }
-        if pendingItems.followsNewest { origin = maximumOrigin }
-        else if !pendingItems.preservesNewestPosition,
-                let anchor = pendingItems.anchor, let id = pendingItems.anchorID,
-                let index = items().firstIndex(where: { $0.id == id }) {
-            let frame = layout.spec.frame(index: index, width: layout.viewportSize.width, metrics: layout.metrics)
-            origin = frame.minY + frame.height * anchor.unitPoint.y - anchor.viewportPoint.y
-        }
-        self.pendingItems = nil
-        if layout.count > 0 { hasShownNewest = true }
-        applyNative(origin: origin, layoutBeforeScrolling: !pendingItems.preservesNewestPosition)
+        guard let origin = layout.arrangement.finishSnapshot() else { return }
+        // The controller has already resolved row-space and viewport together.
+        // Install that viewport before native cell layout at every handoff.
+        applyNative(origin: origin, layoutBeforeScrolling: false)
     }
 
     func updateSectionInset(_ inset: NSEdgeInsets) {
         guard !ThumbnailCollectionStyle.insetsEqual(layout.sectionInset, inset) else { return }
         finishForInteraction()
         let oldOrigin = scroll?.contentView.documentVisibleRect.minY ?? 0
-        let wasAtBottom = isAtNewest
         layout.sectionInset = inset
-        applyNative(origin: wasAtBottom ? maximumOrigin : oldOrigin)
+        let origin = layout.arrangement.updateViewport(size: layout.viewportSize, metrics: layout.metrics, origin: oldOrigin)
+        applyNative(origin: origin)
     }
 
-    var maximumOrigin: CGFloat { max(0, layout.collectionViewContentSize.height - layout.viewportSize.height) }
-    private var isAtNewest: Bool {
-        layout.count > 0 && (maximumOrigin == 0 || (scroll?.contentView.documentVisibleRect.minY ?? 0) >= maximumOrigin - 1)
-    }
+    var maximumOrigin: CGFloat { layout.arrangement.maximumOrigin }
 
     private func nativeAnchor(at point: CGPoint, origin: CGFloat? = nil) -> ZoomAnchor? {
         let width = layout.viewportSize.width
@@ -439,7 +407,7 @@ final class ThumbnailGridZoomController: NSObject {
         let state = ZoomLayerState(spec: plan.specs[level], position: position,
             width: layout.viewportSize.width, focusCenter: center, weights: weights, metrics: layout.metrics)
         overlay.render(position: position, plan: plan, weights: weights)
-        layout.spec = plan.specs[level]
+        layout.arrangement.commitZoom(plan.specs[level], origin: -state.offset.y)
         stopAnimation()
         gesture = nil
         self.plan = nil
@@ -472,16 +440,9 @@ final class ThumbnailGridZoomController: NSObject {
             // even when the clip size is unchanged. Preserve the pre-layout
             // bottom/reading anchor just as for a native window resize.
             let oldOrigin = lastViewportBounds?.minY ?? scroll.contentView.documentVisibleRect.minY
-            let wasAtBottom = pendingItems?.followsNewest == true
-                || (layout.count > 0 && (maximumOrigin == 0 || oldOrigin >= maximumOrigin - 1))
             if plan != nil { commitPlan() }
-            let top = nativeAnchor(at: CGPoint(x: layout.viewportSize.width / 2, y: oldOrigin + 1), origin: oldOrigin)
-            layout.viewportSize = size
-            let origin = top.map {
-                let frame = layout.spec.frame(index: $0.index, width: size.width, metrics: layout.metrics)
-                return frame.minY + frame.height * $0.unitPoint.y - $0.viewportPoint.y
-            } ?? oldOrigin
-            applyNative(origin: wasAtBottom ? maximumOrigin : origin)
+            let origin = layout.arrangement.updateViewport(size: size, metrics: layout.metrics, origin: oldOrigin)
+            applyNative(origin: origin)
         }
         lastViewportBounds = scroll.contentView.documentVisibleRect
         lastViewportInsets = scroll.contentInsets

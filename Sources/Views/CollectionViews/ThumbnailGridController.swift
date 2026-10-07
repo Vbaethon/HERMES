@@ -11,7 +11,7 @@ struct ThumbnailGridItem: Identifiable, Hashable {
 }
 
 @MainActor
-final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDraggingSource {
+final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSCollectionViewPrefetching, NSDraggingSource {
     private enum Section {
         static let main = "main"
     }
@@ -86,13 +86,15 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
     private var sharingServicePicker: NSSharingServicePicker?
     private var exportSession: NSDraggingSession?
     private var snapshotGeneration = 0
+    private var prefetchTasks: [String: Task<Void, Never>] = [:]
     private(set) var zoom: ThumbnailGridZoomController!
 
     var nsCollectionView: NSCollectionView { collectionView }
     var hasPresentedItems: Bool { !items.isEmpty }
     var onPresentationChange: (() -> Void)?
 
-    init(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset) {
+    init(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset,
+         flow: ThumbnailGridArrangementController.Flow = .newestEnd) {
         let collectionView = GridCollectionView()
         self.collectionView = collectionView
         self.dataSource = NSCollectionViewDiffableDataSource<String, String>(
@@ -122,7 +124,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
         collectionView.delegate = self
         ThumbnailCollectionStyle.prepare(collectionView, sectionInset: sectionInset)
         zoom = ThumbnailGridZoomController(collection: collectionView, items: { [weak self] in self?.items ?? [] },
-                                           sectionInset: sectionInset)
+                                           sectionInset: sectionInset, flow: flow)
+        collectionView.prefetchDataSource = self
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
     }
@@ -145,13 +148,12 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
             }
         }
         guard presentedItems != items else { return }
+        prefetchTasks.values.forEach { $0.cancel() }
+        prefetchTasks.removeAll()
         let previousIDs = items.map(\.id)
         let presentedIDs = presentedItems.map(\.id)
         if previousIDs != presentedIDs {
-            let remainingIDs = Set(presentedIDs)
-            let isRemoval = presentedIDs.count < previousIDs.count
-                && previousIDs.filter { remainingIDs.contains($0) } == presentedIDs
-            zoom.itemsWillChange(count: presentedItems.count, preservesNewestPosition: isRemoval)
+            zoom.itemsWillChange(ids: presentedIDs)
         }
         itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
         items = presentedItems
@@ -193,6 +195,35 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSDragg
             zoom.prepareBadgeAppearance(for: cell)
             cell.configure(with: item.url, status: item.status, mediaKind: item.mediaKind,
                            contentVersion: item.contentVersion, unavailableMessage: item.unavailableMessage)
+        }
+    }
+
+    isolated deinit { prefetchTasks.values.forEach { $0.cancel() } }
+
+    func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+        let columns = ZoomGeometry.columns[zoom.layout.spec.level]
+        let side = ZoomGeometry.side(width: zoom.layout.viewportSize.width, columns: columns, metrics: zoom.layout.metrics)
+        let scale = collectionView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        // AppKit supplies likely-to-appear paths in priority order. Bound the
+        // queue to two rows and share the same exact-revision loader as cells.
+        for path in indexPaths where prefetchTasks.count < columns * 2 {
+            guard let id = dataSource.itemIdentifier(for: path), let item = itemByID[id],
+                  item.unavailableMessage == nil, prefetchTasks[id] == nil,
+                  SystemThumbnailProvider.shared.cachedThumbnail(for: item.url, pointSize: side,
+                      scale: scale, contentVersion: item.contentVersion) == nil else { continue }
+            prefetchTasks[id] = Task { [weak self] in
+                _ = await SystemThumbnailProvider.shared.thumbnail(for: item.url, pointSize: side,
+                    scale: scale, contentVersion: item.contentVersion)
+                guard !Task.isCancelled else { return }
+                self?.prefetchTasks[id] = nil
+            }
+        }
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+        for path in indexPaths {
+            guard let id = dataSource.itemIdentifier(for: path) else { continue }
+            prefetchTasks.removeValue(forKey: id)?.cancel()
         }
     }
 

@@ -470,6 +470,15 @@ final class ThumbnailImageView: NSImageView {
 }
 
 final class ThumbnailBadgeLabel: NSTextField {
+    // The label remains an NSTextField for native text/accessibility semantics.
+    // Panning exposes new backing regions: reuse a small decoded bitmap instead
+    // of asking Core Text to paint the same format/duration on every scroll tick.
+    private static let bitmaps: NSCache<NSString, CGImage> = {
+        let cache = NSCache<NSString, CGImage>()
+        cache.countLimit = 200
+        cache.totalCostLimit = 2 * 1024 * 1024
+        return cache
+    }()
     private struct TextLayout {
         let value: String
         let text: NSString
@@ -510,10 +519,48 @@ final class ThumbnailBadgeLabel: NSTextField {
         nil
     }
 
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        layer.contentsScale = scale
+        layer.contentsGravity = .resize
+        layer.contents = bitmap(size: bounds.size, scale: scale)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        guard !stringValue.isEmpty else { return }
+        // Also used when the zoom presentation snapshots an unattached label.
+        guard let image = bitmap(size: bounds.size,
+                                 scale: window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) else { return }
+        NSImage(cgImage: image, size: bounds.size).draw(in: bounds)
+    }
+
+    private func bitmap(size: CGSize, scale: CGFloat) -> CGImage? {
+        guard !stringValue.isEmpty, size.width > 0, size.height > 0 else { return nil }
         let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let key = "\(stringValue)\n\(size.width):\(size.height):\(scale):\(opaque)" as NSString
+        if let cached = Self.bitmaps.object(forKey: key) { return cached }
+        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.scaleBy(x: scale, y: scale)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let bounds = CGRect(origin: .zero, size: size)
         NSColor.black.withAlphaComponent(opaque ? 1 : 0.62).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: ThumbnailBadgeStyle.cornerRadius,
                      yRadius: ThumbnailBadgeStyle.cornerRadius).fill()
@@ -531,6 +578,9 @@ final class ThumbnailBadgeLabel: NSTextField {
             height: layout.textHeight
         )
         layout.text.draw(in: textRect.integral, withAttributes: layout.attributes)
+        guard let image = context.makeImage() else { return nil }
+        Self.bitmaps.setObject(image, forKey: key, cost: width * height * 4)
+        return image
     }
 }
 

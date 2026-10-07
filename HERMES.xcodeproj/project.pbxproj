@@ -54,6 +54,7 @@
 		111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111156 /* Utilities/NativeMediaResources.swift */; };
 		111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111158 /* Views/Other/MediaInspectorController.swift */; };
 		11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115A /* Utilities/MediaInspection.swift */; };
+		11111111111111111111117A /* Views/CollectionViews/ThumbnailGridArrangementController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111179 /* Views/CollectionViews/ThumbnailGridArrangementController.swift */; };
 		11111111111111111111115D /* Views/CollectionViews/ThumbnailGridZoomController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115C /* Views/CollectionViews/ThumbnailGridZoomController.swift */; };
 		11111111111111111111115F /* Views/CollectionViews/ThumbnailZoomGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115E /* Views/CollectionViews/ThumbnailZoomGeometry.swift */; };
 		111111111111111111111161 /* Views/CollectionViews/ThumbnailZoomOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111160 /* Views/CollectionViews/ThumbnailZoomOverlay.swift */; };
@@ -133,6 +134,7 @@
 		111111111111111111111156 /* Utilities/NativeMediaResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/NativeMediaResources.swift; sourceTree = "<group>"; };
 		111111111111111111111158 /* Views/Other/MediaInspectorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MediaInspectorController.swift; sourceTree = "<group>"; };
 		11111111111111111111115A /* Utilities/MediaInspection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/MediaInspection.swift; sourceTree = "<group>"; };
+		111111111111111111111179 /* Views/CollectionViews/ThumbnailGridArrangementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridArrangementController.swift; sourceTree = "<group>"; };
 		11111111111111111111115C /* Views/CollectionViews/ThumbnailGridZoomController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridZoomController.swift; sourceTree = "<group>"; };
 		11111111111111111111115E /* Views/CollectionViews/ThumbnailZoomGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailZoomGeometry.swift; sourceTree = "<group>"; };
 		111111111111111111111160 /* Views/CollectionViews/ThumbnailZoomOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailZoomOverlay.swift; sourceTree = "<group>"; };
@@ -185,6 +187,7 @@
 				11111111111111111111103A /* Views/CollectionViews/PairCollectionView.swift */,
 				11111111111111111111103B /* Views/CollectionViews/DownloadCollectionView.swift */,
 				111111111111111111111033 /* Views/CollectionViews/CompletedCollectionView.swift */,
+				111111111111111111111179 /* Views/CollectionViews/ThumbnailGridArrangementController.swift */,
 				11111111111111111111115C /* Views/CollectionViews/ThumbnailGridZoomController.swift */,
 				11111111111111111111115E /* Views/CollectionViews/ThumbnailZoomGeometry.swift */,
 				111111111111111111111160 /* Views/CollectionViews/ThumbnailZoomOverlay.swift */,
@@ -406,6 +409,7 @@
 				111111111111111111111155 /* XHSCachedMotionReader.swift in Sources */,
 				111111111111111111111136 /* Views/Thumbnail/ThumbnailItemViews.swift in Sources */,
 				111111111111111111111137 /* Views/Thumbnail/ThumbnailService.swift in Sources */,
+				11111111111111111111117A /* Views/CollectionViews/ThumbnailGridArrangementController.swift in Sources */,
 				11111111111111111111115D /* Views/CollectionViews/ThumbnailGridZoomController.swift in Sources */,
 				11111111111111111111115F /* Views/CollectionViews/ThumbnailZoomGeometry.swift in Sources */,
 				111111111111111111111161 /* Views/CollectionViews/ThumbnailZoomOverlay.swift in Sources */,
@@ -574,7 +578,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 678;
+				CURRENT_PROJECT_VERSION = 679;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -586,7 +590,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.7;
+				MARKETING_VERSION = 3.0.8;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -608,7 +612,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 678;
+				CURRENT_PROJECT_VERSION = 679;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -620,7 +624,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.7;
+				MARKETING_VERSION = 3.0.8;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

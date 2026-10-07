@@ -5,6 +5,7 @@ import ImageIO
 struct MediaThumbnailResult: @unchecked Sendable {
     var image: NSImage?
     var unavailableMessage: String?
+    var smallImage: NSImage? = nil
 }
 
 @MainActor
@@ -33,7 +34,7 @@ final class SystemThumbnailProvider {
 
     private let cache = NSCache<NSString, NSImage>()
     private let detailCache = NSCache<NSString, NSImage>()
-    private static let sizes: [CGFloat] = [148, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
+    nonisolated private static let sizes: [CGFloat] = [148, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
     private let maxConcurrentRequests: Int
     private let loader: Loader
     private var loads: [Key: Load] = [:]
@@ -48,7 +49,8 @@ final class SystemThumbnailProvider {
         // images needed when the same library returns to nine columns.
         cache.totalCostLimit = 32 * 1024 * 1024
         detailCache.countLimit = 120
-        detailCache.totalCostLimit = 64 * 1024 * 1024
+        detailCache.totalCostLimit = min(256 * 1024 * 1024,
+            max(64 * 1024 * 1024, Int(ProcessInfo.processInfo.physicalMemory / 128)))
     }
 
     static func requestSize(for pointSize: CGFloat) -> CGFloat {
@@ -61,7 +63,8 @@ final class SystemThumbnailProvider {
     }
 
     private func cachedKeys(url: URL, version: TimeInterval, scale: CGFloat) -> [Key] {
-        Self.sizes.map { Key(url: url.standardizedFileURL, version: version, pointSize: $0, scale: scale) }
+        let canonicalURL = url.standardizedFileURL
+        return Self.sizes.map { Key(url: canonicalURL, version: version, pointSize: $0, scale: scale) }
     }
 
     /// A reused cell can restore decoded artwork immediately, without a task or fade.
@@ -154,11 +157,19 @@ final class SystemThumbnailProvider {
         guard let load = running.removeValue(forKey: id) else { return }
         if loads[load.key]?.id == id { loads.removeValue(forKey: load.key) }
         if let image = result.image, !load.waiters.isEmpty {
-            let cost = image.representations.reduce(0) {
-                $0 + max(0, $1.pixelsWide) * max(0, $1.pixelsHigh) * 4
+            let cost = image.representations.reduce(0) { cost, representation in
+                if let bitmap = representation as? NSBitmapImageRep {
+                    return cost + max(0, bitmap.bytesPerRow) * max(0, bitmap.pixelsHigh)
+                }
+                return cost + max(0, representation.pixelsWide) * max(0, representation.pixelsHigh) * 4
             }
             (load.key.pointSize == Self.sizes[0] ? cache : detailCache)
                 .setObject(image, forKey: load.key.cacheKey, cost: cost)
+            if let small = result.smallImage {
+                let key = Key(url: load.key.url, version: load.key.version, pointSize: Self.sizes[0], scale: load.key.scale)
+                let smallCost = small.representations.reduce(0) { $0 + max(0, $1.pixelsWide) * max(0, $1.pixelsHigh) * 4 }
+                cache.setObject(small, forKey: key.cacheKey, cost: smallCost)
+            }
         }
         for waiter in load.waiters.values { waiter.resume(returning: result) }
         load.waiters.removeAll()
@@ -198,8 +209,10 @@ final class SystemThumbnailProvider {
         }
         guard !Task.isCancelled else { return MediaThumbnailResult() }
         if let thumbnail {
-            return MediaThumbnailResult(image: NSImage(cgImage: thumbnail,
-                size: NSSize(width: CGFloat(thumbnail.width) / scale, height: CGFloat(thumbnail.height) / scale)))
+            let prepared = displayThumbnail(thumbnail)
+            let small = pointSize > Self.sizes[0] ? smallThumbnail(prepared, scale: scale) : nil
+            return MediaThumbnailResult(image: NSImage(cgImage: prepared,
+                size: NSSize(width: CGFloat(prepared.width) / scale, height: CGFloat(prepared.height) / scale)), smallImage: small)
         }
         // Quick Look can return no preview while its service is busy. Decode a
         // bounded image thumbnail directly instead of presenting a generic file icon.
@@ -215,6 +228,39 @@ final class SystemThumbnailProvider {
             return NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width) / scale, height: CGFloat(cgImage.height) / scale))
         }
         return MediaThumbnailResult(image: fallback, unavailableMessage: fallback == nil ? "预览暂不可用" : nil)
+    }
+
+    /// Quick Look HEIC previews can contain 16-bit integer Display P3 pixels.
+    /// Prepare their display bitmap once in this worker instead of repeating
+    /// Core Animation's image conversion on the main thread during scrolling.
+    /// Keep the original color space; floating-point HDR previews stay intact.
+    nonisolated static func displayThumbnail(_ image: CGImage) -> CGImage {
+        guard image.bitsPerComponent == 16, !image.bitmapInfo.contains(.floatComponents),
+              let colorSpace = image.colorSpace, colorSpace.model == .rgb else { return image }
+        return autoreleasepool {
+            guard !Task.isCancelled,
+                  let context = CGContext(data: nil, width: image.width, height: image.height,
+                      bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return context.makeImage() ?? image
+        }
+    }
+
+    /// Keep a bounded small-grid texture beside zoom detail. Returning to nine
+    /// columns must not upload dozens of three-column textures while scrolling.
+    nonisolated private static func smallThumbnail(_ image: CGImage, scale: CGFloat) -> NSImage? {
+        guard !Task.isCancelled, !image.bitmapInfo.contains(.floatComponents),
+              let colorSpace = image.colorSpace, colorSpace.model == .rgb else { return nil }
+        let factor = min(1, Self.sizes[0] * scale / CGFloat(max(image.width, image.height)))
+        let width = max(1, Int((CGFloat(image.width) * factor).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * factor).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: 0, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let small = context.makeImage() else { return nil }
+        return NSImage(cgImage: small, size: NSSize(width: CGFloat(width) / scale, height: CGFloat(height) / scale))
     }
 
 }

@@ -14,6 +14,107 @@ private actor ThumbnailLoadMetrics {
 
 @MainActor
 final class ThumbnailPerformanceTests: XCTestCase {
+    func testHEICDisplayPreparationKeepsP3ColorsAndLeavesFloatingHDRIntact() throws {
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let values: [UInt16] = [12000, 36000, 58000, 65535]
+        let bytes = values.withUnsafeBytes { Data($0) }
+        let provider = try XCTUnwrap(CGDataProvider(data: bytes as CFData))
+        let source = try XCTUnwrap(CGImage(width: 1, height: 1, bitsPerComponent: 16, bitsPerPixel: 64,
+            bytesPerRow: 8, space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let prepared = SystemThumbnailProvider.displayThumbnail(source)
+        XCTAssertEqual(prepared.bitsPerComponent, 8)
+        XCTAssertEqual(prepared.colorSpace?.name, source.colorSpace?.name)
+        func displayedPixels(_ image: CGImage) throws -> Data {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8,
+                bytesPerRow: 4, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return Data(bytes: try XCTUnwrap(context.data), count: 4)
+        }
+        XCTAssertEqual(try displayedPixels(prepared), try displayedPixels(source),
+                       "Preparing in the worker must match native rendering of the original P3 preview")
+        let hdrValues: [Float16] = [0.2, 0.5, 1.3, 1]
+        let hdrBytes = hdrValues.withUnsafeBytes { Data($0) }
+        let hdrProvider = try XCTUnwrap(CGDataProvider(data: hdrBytes as CFData))
+        let floating = try XCTUnwrap(CGImage(width: 1, height: 1, bitsPerComponent: 16, bitsPerPixel: 64,
+            bytesPerRow: 8, space: try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder16Little.rawValue),
+            provider: hdrProvider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        XCTAssertTrue(SystemThumbnailProvider.displayThumbnail(floating) === floating,
+                      "Floating-point HDR pixels must not be clipped to an integer preview")
+    }
+
+    func testScrollingAndReusedBadgesKeepDecodedTextWhileTextChangesInvalidateIt() throws {
+        _ = NSApplication.shared
+        let label = ThumbnailBadgeLabel(labelWithString: "HEIC")
+        label.wantsLayer = true
+        label.frame.size = ThumbnailBadgeStyle.size(for: label.stringValue)
+        label.updateLayer()
+        let initial = try XCTUnwrap(label.layer?.contents) as AnyObject
+        for offset in 0..<100 {
+            label.frame.origin.y = CGFloat(offset)
+            label.needsDisplay = true
+            label.updateLayer()
+            XCTAssertTrue((label.layer?.contents as AnyObject?) === initial,
+                          "A viewport translation must not rasterize the same text again")
+        }
+        let reused = ThumbnailBadgeLabel(labelWithString: "HEIC")
+        reused.wantsLayer = true
+        reused.frame.size = label.bounds.size
+        reused.updateLayer()
+        XCTAssertTrue((reused.layer?.contents as AnyObject?) === initial,
+                      "Recycled cells with the same text and display scale share its bitmap")
+        reused.stringValue = "0:42"
+        reused.updateLayer()
+        XCTAssertFalse((reused.layer?.contents as AnyObject?) === initial)
+        reused.stringValue = ""
+        reused.updateLayer()
+        XCTAssertNil(reused.layer?.contents, "A reused empty label must not leave an old duration behind")
+        XCTAssertTrue(label.wantsUpdateLayer)
+        XCTAssertEqual(label.stringValue, "HEIC", "Native label semantics remain available")
+    }
+
+    func testNativePrefetchLoadsAnOffscreenPhotoBeforeItsCellExists() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("ahead.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 400, pixelsHigh: 600,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 1000, height: 220))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        grid.updateItems((0..<70).map { ThumbnailGridItem(id: "prefetch-\($0)",
+            url: $0 == 15 ? url : folder.appendingPathComponent("missing-\($0).png"),
+            status: .finished, mediaKind: .photo, contentVersion: 7) }, animatingDifferences: false)
+        try await Task.sleep(for: .milliseconds(30))
+        let path = IndexPath(item: 15, section: 0)
+        XCTAssertNil(grid.nsCollectionView.item(at: path))
+        XCTAssertTrue(grid.nsCollectionView.prefetchDataSource === grid)
+        grid.collectionView(grid.nsCollectionView, prefetchItemsAt: [path])
+        let side = ZoomGeometry.side(width: grid.zoom.layout.viewportSize.width,
+                                     columns: 5, metrics: grid.zoom.layout.metrics)
+        let scale = window.backingScaleFactor
+        for _ in 0..<100 {
+            if SystemThumbnailProvider.shared.cachedThumbnail(for: url, pointSize: side,
+                scale: scale, contentVersion: 7) != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(SystemThumbnailProvider.shared.cachedThumbnail(for: url, pointSize: side,
+            scale: scale, contentVersion: 7), "The future cell's exact image is ready before it enters the viewport")
+        XCTAssertNil(grid.nsCollectionView.item(at: path), "Prefetching must not instantiate offscreen native cells")
+        XCTAssertNil(SystemThumbnailProvider.shared.cachedThumbnail(for: url, pointSize: side,
+            scale: scale, contentVersion: 8), "Prefetching never pairs an image with a different file revision")
+    }
+
     private func provider(limit: Int = 4, delay: Duration = .milliseconds(80),
                           metrics: ThumbnailLoadMetrics) -> SystemThumbnailProvider {
         SystemThumbnailProvider(maxConcurrentRequests: limit) { url, _, _ in

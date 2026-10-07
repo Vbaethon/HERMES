@@ -23,6 +23,10 @@ sources = [
     "Sources/UIModels.swift", "Sources/Utilities/FileSystemUtilities.swift",
     "Sources/Utilities/NativeMediaResources.swift",
     "Sources/Views/CollectionViews/ThumbnailGridController.swift",
+    "Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift",
+    "Sources/Views/CollectionViews/ThumbnailGridZoomController.swift",
+    "Sources/Views/CollectionViews/ThumbnailZoomGeometry.swift",
+    "Sources/Views/CollectionViews/ThumbnailZoomOverlay.swift",
     "Sources/Views/Thumbnail/ThumbnailService.swift",
     "Sources/Views/Thumbnail/ThumbnailItemViews.swift",
     "Sources/Views/Thumbnail/ThumbnailCompositionEffect.swift",
@@ -33,7 +37,11 @@ with tempfile.TemporaryDirectory(prefix="hermes-scroll-probe-") as directory:
     compiled_sources = [root / source for source in sources]
     if args.baseline:
         compiled_sources = []
+        existing = set(subprocess.check_output(
+            ["git", "ls-tree", "-r", "--name-only", args.baseline, "Sources"], cwd=root, text=True).splitlines())
         for source in sources:
+            if source not in existing:
+                continue
             target = temp / Path(source).name
             target.write_bytes(subprocess.check_output(
                 ["git", "show", f"{args.baseline}:{source}"], cwd=root))

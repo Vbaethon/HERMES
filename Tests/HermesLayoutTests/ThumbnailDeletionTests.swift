@@ -161,7 +161,7 @@ final class ThumbnailDeletionTests: XCTestCase {
         XCTAssertEqual(previous.view.frame.minY, latestFrame.minY, accuracy: 0.5)
     }
 
-    func testWholeRowRemovalKeepsTheZoomedNewestColumnAndMiddleScrollPosition() async throws {
+    func testWholeRowRemovalKeepsTheZoomedNewestColumnAndMiddleReadingAnchor() async throws {
         for level in 0..<4 {
             let (grid, scroll, window) = fixture(count: 200)
             defer { window.orderOut(nil) }
@@ -175,16 +175,18 @@ final class ThumbnailDeletionTests: XCTestCase {
             scroll.contentView.scroll(to: NSPoint(x: 0, y: zoom.maximumOrigin / 2))
             scroll.reflectScrolledClipView(scroll.contentView)
             let origin = scroll.contentView.documentVisibleRect.minY
-            let leading = zoom.layout.spec.leadingSlots
+            let focal = ZoomGeometry.nearestIndex(to: CGPoint(x: width / 2, y: origin + 1), count: 200,
+                                                 width: width, spec: zoom.layout.spec, metrics: metrics)!
+            let before = zoom.layout.spec.frame(index: focal, width: width, metrics: metrics).minY - origin
             let removed = Set(150..<(150 + columns + 1))
             grid.updateItems(items(200).filter { !removed.contains(Int($0.id.dropFirst(7))!) }, animatingDifferences: false)
             try await Task.sleep(for: .milliseconds(40))
             let frame = zoom.layout.spec.frame(index: 199 - removed.count, width: width, metrics: metrics)
             XCTAssertEqual(frame.minX, newestX, accuracy: 0.5)
-            let pitch = ZoomGeometry.side(width: width, columns: columns, metrics: metrics) + metrics.gap
-            let collapsedRows = (leading + removed.count) / columns
-            XCTAssertEqual(scroll.contentView.documentVisibleRect.minY, origin - CGFloat(collapsedRows) * pitch,
-                           accuracy: 0.5, "Deletion must only compensate trimmed rows, not pin a different top item")
+            let after = zoom.layout.spec.frame(index: focal, width: width, metrics: metrics).minY
+                - scroll.contentView.documentVisibleRect.minY
+            XCTAssertEqual(after, before, accuracy: 0.5,
+                           "Browsing older photos uses the same retained reading anchor for every snapshot")
         }
     }
 

@@ -487,3 +487,78 @@ getLastItem…（0x24CA679E4）取 numberOfItems-1 为末项，按列数和
 安装前后及启动后的 77/43 条记录、13 项业务设置、全部媒体与收据内容
 保持一致；实际安装版图库正常打开在最新端。事务回滚应用和管理的旧
 构建产品已由打包流程清理。
+
+
+2026-10-07 3.0.8 统一排列控制器、可见起点与滚动修正：
+
+3.0.7 仅纯删除保留最新端格位，刷新/新增/筛选恢复则重新计算满末行，
+导致同一图库在不同入口中出现相反补位。另一个遗漏是把倒序补位套成
+两张照片也靠右：倒序更新方向与可见第一行从左起是两个规则。
+
+公开 Apple 相簿手册允许最旧优先、最新优先和手动排序：
+https://support.apple.com/zh-cn/guide/photos/pht6d60a1f1/mac
+因此不把“所有相簿必为正序”当作固定系统配置。按本轮用户的原生参照，
+控制器明确区分 newestEnd（全局图库）和 oldestStart（相簿起始端补位），
+HERMES 当前三页采用前者；保持现有媒体时间/帖子与源内顺序，不反转数据。
+
+继续只读检查本机 GridZero：PXZoomablePhotosViewModel 具有独立的
+contentShiftStrategy / contentStartsAtEnd / anchorAssetReference。
+_updateCurrentDataSource 统一提交 dataSource 和 selectionSnapshot，
+PXZoomablePhotosLayout._updateDataSource 读取 changeDetails 并调用
+indexPathAfterApplyingChanges:toIndexPath:hasIncrementalChanges:objectChanged:
+重映射锚点。PXPhotosViewModel 的 reverseSortOrder 和 contentStartsAtEnd
+也是不同属性；后者读取配置或数据源。这里只确认实际方法调用和边界，
+不宣称完整私有 Photos 源代码已公开、也不把方法默认值当成当前界面配置。
+没有对 Photos 进程注入或写入其图库；正式版只使用公开 AppKit/MapKit。
+
+ThumbnailGridArrangementController 成为数量、前导格、当前最新列、稳定
+项目锚点与视口空间的唯一所有者。删除、扫描增减、筛选/清空/恢复、
+缩放提交和窗口/输入区尺寸变化统一向其提交。元数据刷新保留既有 cell、
+位图和缩放手势。首行可见或只剩一行时采用同一左边界，二张图片从左
+向右排列；图库起点约束同时供缩放规划使用，普通滚动不重排整张网格。
+保留缩放形成的非满末行；长图库按当前末列倒序计算增减，起始端模式
+则保留此前项目、后项向前补位。消失项保持原位淡出，AppKit 同时移动
+存活项目。新增需要补整行时先同步旧文档和滚动坐标再 flush；删除到空
+保留旧文档高度到事务结束，避免淡出过程中先跳动。Completed 空筛选
+也提交真正空 snapshot，恢复由同一控制器处理。
+
+回归覆盖真实 NSWindow/NSCollectionView 中的四档、两个方向、1/2/一行/
+跨行数量边界、删除/刷新/筛选恢复/混合扫描、动画中间帧与存活 cell
+身份。旧 3.0.7 的隔离副本在新增连续操作用例上复现 9 个断言失败。
+正式主窗口也用两张合成色块 PNG 验证左起排列，提供独立临时 Demo；
+该 Demo 的合格几何与自动检查不等同于用户最终手势观感验收。
+
+滚动单独使用读取真实媒体的隔离窗口测量。74 个本地 HEIC/JPG/PNG/WebP，
+1000x620 点、120Hz 显示时钟，每档 6 秒向前再向后、首次与重访各一轮。
+首次诊断同时采样线程：三列 11/7 次超过 25ms、最长 37.14ms；采样含
+额外负担，不能把这些值直接作为无采样 A/B 的基线。主线程中重复
+ThumbnailBadgeLabel.draw / Core Text 绘制及 CA::Render::prepare_image /
+CGContextDrawImage 占用明显。Quick Look 的 HEIC 实测为 16 位整数
+Display P3；旧成本计算还把所有位图一概按四字节计量。
+
+修正格式/时长标签为 NSTextField 保持文本语义、共享小位图呈现；
+AppKit NSCollectionViewPrefetching 提前加载至多两行，复用同一版本的
+请求与取消。缩略图工作线程提前准备整数 P3 显示位图，保留色域，
+浮点 HDR 预览保持原样。缓存按实际行字节计量，细节预算按物理内存
+1/128 设置并限制在 64–256MiB；为大图同时准备独立的小网格位图，
+九列重访不再继续上传三列的高分辨率纹理。只处理预览，不修改媒体。
+
+同批文件、相同窗口、无线程采样的旧版对照：三列首次/重访最大间隔
+25.03/25.01ms，P95 为 12.23/8.47ms。最终新代码六轮（五列、三列、
+九列，各两轮）均无超过 25ms 的间隔；三列最大 21.13/16.18ms、P95
+11.17/8.35ms；九列最大 17.19/16.13ms、P95 9.21/9.24ms。显示时钟
+间隔是本机隔离场景的实测，不保证所有机器/媒体永不掉帧。
+
+128 项 Swift 测试（25 网络、103 布局/交互/缩略图）通过；18 组真实
+主窗口 UI/UX 与 27 组原生媒体检查通过。P3 预览的显示像素与原生
+绘制一致、浮点 HDR 不裁切、标签复用和真正离屏预取都有专门回归。
+3.0.8（679）Release 构建成功。安装及 main 同步以实际完成记录为准。
+
+
+3.0.8（679）安装完成：/Applications/HERMES.app 已严格验签并重新启动，
+TeamIdentifier=FJP7ATDRW3；安装前后及启动后 77/43 条记录、13 项业务
+设置及全部媒体/收据校验保持一致。实际安装版图库完成上下往返滚动，
+格式和时长标签显示正常；临时安装/回滚应用和管理的历史构建产品均清理。
+58 组模型、42 组构建安装、下载/合成/元数据/窗口布局回归通过。
+原有缩放 Demo 的 6353 项检查通过，滚动/缩放探针的依赖列表同步新
+控制器；滚动探针改用 clip viewport 检查失效，避免将文档高度误当视口。

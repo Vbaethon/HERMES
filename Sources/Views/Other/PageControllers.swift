@@ -321,6 +321,17 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
         emptyView.showAllAction = model.completed.isEmpty ? nil : { [weak self] in self?.model.completedFilter = .all }
         emptyView.title = model.completed.isEmpty ? "还没有完成项目" : "当前筛选下没有项目"
         let visibleCompleted = model.visibleCompleted
+        // Empty filters are snapshots too. Hiding the page before submitting
+        // them leaves stale items and bypasses the common arrangement state.
+        if let scrollView, let coordinator {
+            CompletedCollectionView.update(
+                scrollView: scrollView,
+                coordinator: coordinator,
+                items: visibleCompleted,
+                filter: model.completedFilter,
+                model: model
+            )
+        }
         if visibleCompleted.isEmpty {
             scrollView?.isHidden = true
             emptyView.isHidden = false
@@ -336,13 +347,5 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
         }
         emptyView.isHidden = true
         scrollView?.isHidden = false
-        guard let scrollView, let coordinator else { return }
-        CompletedCollectionView.update(
-            scrollView: scrollView,
-            coordinator: coordinator,
-            items: visibleCompleted,
-            filter: model.completedFilter,
-            model: model
-        )
     }
 }

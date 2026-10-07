@@ -53,7 +53,7 @@ final class ThumbnailScrollBenchmark: NSObject, NSApplicationDelegate {
         }, animatingDifferences: false)
         scroll.layoutSubtreeIfNeeded()
         grid.nsCollectionView.layoutSubtreeIfNeeded()
-        print("document_layer_backed=\(grid.nsCollectionView.layer != nil) viewport_layer_backed=\(scroll.contentView.layer != nil) origin_invalidates_layout=\(grid.nsCollectionView.collectionViewLayout?.shouldInvalidateLayout(forBoundsChange: grid.nsCollectionView.bounds.offsetBy(dx: 0, dy: 5)) ?? false)")
+        print("document_layer_backed=\(grid.nsCollectionView.layer != nil) viewport_layer_backed=\(scroll.contentView.layer != nil) origin_invalidates_layout=\(grid.nsCollectionView.collectionViewLayout?.shouldInvalidateLayout(forBoundsChange: scroll.contentView.bounds.offsetBy(dx: 0, dy: 5)) ?? false)")
         heartbeat = Timer(timeInterval: 0.005, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }

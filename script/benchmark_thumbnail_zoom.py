@@ -40,6 +40,7 @@ SOURCES = [
     "Sources/UIModels.swift", "Sources/Utilities/FileSystemUtilities.swift",
     "Sources/Utilities/NativeMediaResources.swift",
     "Sources/Views/CollectionViews/ThumbnailGridController.swift",
+    "Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift",
     "Sources/Views/CollectionViews/ThumbnailGridZoomController.swift",
     "Sources/Views/CollectionViews/ThumbnailZoomGeometry.swift",
     "Sources/Views/CollectionViews/ThumbnailZoomOverlay.swift",
@@ -90,7 +91,12 @@ def instrument(source, signature, key, *, assume_main=False):
 
 def snapshot_sources(destination, revision):
     paths, digests = [], {}
+    existing = (set(subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", revision, "Sources"], cwd=ROOT, text=True).splitlines())
+        if revision is not None else None)
     for relative in SOURCES:
+        if existing is not None and relative not in existing:
+            continue
         source = ((ROOT / relative).read_text() if revision is None else
                   subprocess.check_output(["git", "show", f"{revision}:{relative}"], cwd=ROOT, text=True))
         digests[relative] = hashlib.sha256(source.encode()).hexdigest()
