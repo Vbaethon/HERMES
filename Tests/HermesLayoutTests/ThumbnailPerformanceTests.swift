@@ -46,34 +46,55 @@ final class ThumbnailPerformanceTests: XCTestCase {
                       "Floating-point HDR pixels must not be clipped to an integer preview")
     }
 
-    func testScrollingAndReusedBadgesKeepDecodedTextWhileTextChangesInvalidateIt() throws {
+    func testScrollingKeepsAppKitTextRasterWhileTextChangesInvalidateIt() async throws {
         _ = NSApplication.shared
         let label = ThumbnailBadgeLabel(labelWithString: "HEIC")
-        label.wantsLayer = true
-        label.frame.size = ThumbnailBadgeStyle.size(for: label.stringValue)
-        label.updateLayer()
-        let initial = try XCTUnwrap(label.layer?.contents) as AnyObject
-        for offset in 0..<100 {
-            label.frame.origin.y = CGFloat(offset)
-            label.needsDisplay = true
-            label.updateLayer()
-            XCTAssertTrue((label.layer?.contents as AnyObject?) === initial,
-                          "A viewport translation must not rasterize the same text again")
+        label.frame = NSRect(origin: CGPoint(x: 20, y: 20),
+                             size: ThumbnailBadgeStyle.size(for: label.stringValue))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 120, height: 120))
+        root.addSubview(label)
+        let window = NSWindow(contentRect: root.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = root
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        window.displayIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        window.displayIfNeeded()
+
+        func textRaster(_ layer: CALayer?) -> AnyObject? {
+            guard let layer, !layer.bounds.isEmpty else { return nil }
+            if let children = layer.sublayers, !children.isEmpty {
+                return children.compactMap { textRaster($0) }.last
+            }
+            return layer.contents as AnyObject?
         }
-        let reused = ThumbnailBadgeLabel(labelWithString: "HEIC")
-        reused.wantsLayer = true
-        reused.frame.size = label.bounds.size
-        reused.updateLayer()
-        XCTAssertTrue((reused.layer?.contents as AnyObject?) === initial,
-                      "Recycled cells with the same text and display scale share its bitmap")
-        reused.stringValue = "0:42"
-        reused.updateLayer()
-        XCTAssertFalse((reused.layer?.contents as AnyObject?) === initial)
-        reused.stringValue = ""
-        reused.updateLayer()
-        XCTAssertNil(reused.layer?.contents, "A reused empty label must not leave an old duration behind")
-        XCTAssertTrue(label.wantsUpdateLayer)
-        XCTAssertEqual(label.stringValue, "HEIC", "Native label semantics remain available")
+        let initial = try XCTUnwrap(textRaster(label.layer))
+        for offset in 0..<100 {
+            label.frame.origin.y = CGFloat(20 + offset % 40)
+            label.needsDisplay = true
+            window.displayIfNeeded()
+            XCTAssertTrue(textRaster(label.layer) === initial,
+                          "Panning must reuse AppKit's existing text raster instead of drawing the glyphs again")
+        }
+        label.stringValue = "0:42"
+        label.frame.size = ThumbnailBadgeStyle.size(for: label.stringValue)
+        label.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        window.displayIfNeeded()
+        XCTAssertFalse(textRaster(label.layer) === initial)
+        label.stringValue = ""
+        label.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        window.displayIfNeeded()
+        let empty = NSBitmapImageRep(cgImage: try XCTUnwrap(label.bitmap(scale: window.backingScaleFactor)))
+        let textPixels = (0..<empty.pixelsHigh).reduce(0) { count, y in
+            count + (0..<empty.pixelsWide).filter { x in
+                (empty.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.01
+            }.count
+        }
+        XCTAssertEqual(textPixels, 0, "Empty native text must not retain visible old duration pixels")
+        XCTAssertTrue(label.wantsUpdateLayer, "Keep AppKit's efficient layer-backed text path")
+        XCTAssertEqual(label.accessibilityValue() as? String, "")
     }
 
     func testNativePrefetchLoadsAnOffscreenPhotoBeforeItsCellExists() async throws {

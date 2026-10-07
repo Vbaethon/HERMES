@@ -587,7 +587,7 @@ final class ThumbnailGridZoomController: NSObject {
                     // label may already be fading out for the previous pinch.
                     let badge = ThumbnailBadgeLabel(labelWithString: text)
                     badge.frame.size = ThumbnailBadgeStyle.size(for: text)
-                    collection?.effectiveAppearance.performAsCurrentDrawingAppearance { value.badge = Self.bitmap(badge) }
+                    collection?.effectiveAppearance.performAsCurrentDrawingAppearance { value.badge = badge.bitmap(scale: scale) }
                     value.badgeSize = badge.bounds.size
                     badgeBitmaps[text] = (value.badge, value.badgeSize)
                 }

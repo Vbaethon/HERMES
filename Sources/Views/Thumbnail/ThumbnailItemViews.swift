@@ -66,12 +66,6 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.ringView = ringView
 
         let badgeLabel = ThumbnailBadgeLabel(labelWithString: "")
-        badgeLabel.alignment = .center
-        badgeLabel.font = ThumbnailBadgeStyle.font
-        badgeLabel.textColor = ThumbnailBadgeStyle.textColor
-        badgeLabel.isBordered = false
-        badgeLabel.drawsBackground = false
-        badgeLabel.lineBreakMode = .byClipping
         badgeLabel.wantsLayer = true
         badgeLabel.isHidden = true
         rootView.addSubview(badgeLabel)
@@ -470,124 +464,74 @@ final class ThumbnailImageView: NSImageView {
 }
 
 final class ThumbnailBadgeLabel: NSTextField {
-    // The label remains an NSTextField for native text/accessibility semantics.
-    // Panning exposes new backing regions: reuse a small decoded bitmap instead
-    // of asking Core Text to paint the same format/duration on every scroll tick.
-    private static let bitmaps: NSCache<NSString, CGImage> = {
-        let cache = NSCache<NSString, CGImage>()
-        cache.countLimit = 200
-        cache.totalCostLimit = 2 * 1024 * 1024
-        return cache
-    }()
-    private struct TextLayout {
-        let value: String
-        let text: NSString
-        let attributes: [NSAttributedString.Key: Any]
-        let textHeight: CGFloat
-        let badgeSize: NSSize
-    }
-    private var cachedTextLayout: TextLayout?
+    private var measuredText: String?
+    private var measuredSize: NSSize = .zero
 
-    fileprivate var badgeSize: NSSize { textLayout().badgeSize }
-
-    private func textLayout() -> TextLayout {
-        let value = stringValue
-        if let cachedTextLayout, cachedTextLayout.value == value { return cachedTextLayout }
-        let text = value as NSString
-        let font = ThumbnailBadgeStyle.font(for: value)
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = .center
-        paragraphStyle.lineBreakMode = .byClipping
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: ThumbnailBadgeStyle.textColor,
-            .paragraphStyle: paragraphStyle
-        ]
-        let layout = TextLayout(
-            value: value,
-            text: text,
-            attributes: attributes,
-            textHeight: ceil(text.size(withAttributes: attributes).height),
-            badgeSize: NSSize(width: ceil(text.size(withAttributes: [.font: font]).width)
-                + ThumbnailBadgeStyle.horizontalPadding * 2, height: ThumbnailBadgeStyle.height)
-        )
-        cachedTextLayout = layout
-        return layout
+    convenience init(labelWithString value: String) {
+        self.init(frame: .zero)
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        drawsBackground = false
+        alignment = .center
+        lineBreakMode = .byClipping
+        textColor = ThumbnailBadgeStyle.textColor
+        stringValue = value
+        font = ThumbnailBadgeStyle.font(for: value)
+        wantsLayer = true
+        layer?.cornerRadius = ThumbnailBadgeStyle.cornerRadius
+        layer?.masksToBounds = true
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+    override var stringValue: String {
+        didSet {
+            guard oldValue != stringValue else { return }
+            measuredText = nil
+            font = ThumbnailBadgeStyle.font(for: stringValue)
+        }
     }
 
-    override var wantsUpdateLayer: Bool { true }
+    fileprivate var badgeSize: NSSize {
+        if measuredText != stringValue {
+            measuredText = stringValue
+            measuredSize = ThumbnailBadgeStyle.size(for: stringValue)
+        }
+        return measuredSize
+    }
+
+    func bitmap(scale: CGFloat) -> CGImage? {
+        guard !bounds.isEmpty,
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                  pixelsWide: Int(ceil(bounds.width * scale)),
+                  pixelsHigh: Int(ceil(bounds.height * scale)),
+                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = bounds.size
+        cacheDisplay(in: bounds, to: rep)
+        return rep.cgImage
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func updateLayer() {
-        guard let layer else { return }
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        layer.contentsScale = scale
-        layer.contentsGravity = .resize
-        layer.contents = bitmap(size: bounds.size, scale: scale)
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        needsDisplay = true
+        // AppKit owns the text raster and reuses it while scrolling. Painting
+        // another text bitmap here duplicates its native label subview.
+        super.updateLayer()
+        let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(opaque ? 1 : 0.62).cgColor
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
-
-    override func draw(_ dirtyRect: NSRect) {
-        // Also used when the zoom presentation snapshots an unattached label.
-        guard let image = bitmap(size: bounds.size,
-                                 scale: window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) else { return }
-        NSImage(cgImage: image, size: bounds.size).draw(in: bounds)
-    }
-
-    private func bitmap(size: CGSize, scale: CGFloat) -> CGImage? {
-        guard !stringValue.isEmpty, size.width > 0, size.height > 0 else { return nil }
-        let opaque = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-            || NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        let key = "\(stringValue)\n\(size.width):\(size.height):\(scale):\(opaque)" as NSString
-        if let cached = Self.bitmaps.object(forKey: key) { return cached }
-        let width = Int(ceil(size.width * scale)), height = Int(ceil(size.height * scale))
-        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
-                                      bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.scaleBy(x: scale, y: scale)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        defer { NSGraphicsContext.restoreGraphicsState() }
-        let bounds = CGRect(origin: .zero, size: size)
-        NSColor.black.withAlphaComponent(opaque ? 1 : 0.62).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: ThumbnailBadgeStyle.cornerRadius,
-                     yRadius: ThumbnailBadgeStyle.cornerRadius).fill()
-        let textInsets = NSEdgeInsets(
-            top: 0,
-            left: ThumbnailBadgeStyle.horizontalPadding,
-            bottom: 0,
-            right: ThumbnailBadgeStyle.horizontalPadding
-        )
-        let layout = textLayout()
-        let textRect = NSRect(
-            x: bounds.minX + textInsets.left,
-            y: bounds.midY - layout.textHeight / 2,
-            width: bounds.width - textInsets.left - textInsets.right,
-            height: layout.textHeight
-        )
-        layout.text.draw(in: textRect.integral, withAttributes: layout.attributes)
-        guard let image = context.makeImage() else { return nil }
-        Self.bitmaps.setObject(image, forKey: key, cost: width * height * 4)
-        return image
-    }
 }
 
 final class ThumbnailItemView: NSView {
     let compositionEffect = ThumbnailCompositionEffect(frame: .zero)
     weak var imageView: NSImageView?
-    weak var badgeLabel: NSTextField?
+    weak var badgeLabel: ThumbnailBadgeLabel?
     weak var failureLabel: NSTextField?
     weak var placeholderLabel: NSTextField?
     weak var ringView: ThumbnailStateRingView?
@@ -677,8 +621,7 @@ final class ThumbnailItemView: NSView {
             let showsBadge = !interactiveFrame.isEmpty && !badgeLabel.stringValue.isEmpty
             badgeLabel.isHidden = !showsBadge
             guard showsBadge else { return }
-            let labelSize = (badgeLabel as? ThumbnailBadgeLabel)?.badgeSize
-                ?? ThumbnailBadgeStyle.size(for: badgeLabel.stringValue)
+            let labelSize = badgeLabel.badgeSize
             let origin = NSPoint(
                 x: baseFrame.maxX - labelSize.width - ThumbnailBadgeStyle.inset,
                 y: baseFrame.minY + ThumbnailBadgeStyle.inset
