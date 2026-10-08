@@ -319,4 +319,48 @@ sys.exit(subprocess.call(["/usr/bin/ditto", *sys.argv[1:]]))
     run(["script/package_app.sh", "--no-open", "--no-version-bump"], running="no", old_app=False,
         products_override=root / "Build", retained_staging=True)
     assert (root / "Build/HERMES.app/compiled").is_file(), "Legacy staging cleanup removed custom products"
+
+    # New worktree-local Debug products obey the same ownership and process guards.
+    development = root / ".build/development/DerivedData"
+    def development_product(name):
+        candidate = development / "Build/Products" / name
+        (candidate / "HERMES.app/Contents").mkdir(parents=True, exist_ok=True)
+        (candidate / ".hermes-managed-products").write_text("HERMES managed build products\n")
+        with (candidate / "HERMES.app/Contents/Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleIdentifier": "com.codex.Hermes"}, stream)
+        return candidate
+
+    idle_development = development_product("Debug.idle12")
+    custom_development = development_product("Debug.cust12")
+    (custom_development / ".hermes-custom-products").write_text("user output\n")
+    active_development = development_product("Debug.busy12")
+    start = subprocess.check_output(["/bin/ps", "-p", str(os.getpid()), "-o", "lstart="],
+                                    text=True, env=dict(os.environ, LC_ALL="C")).rstrip("\n")
+    (active_development / ".hermes-active-build").write_text(f"{os.getpid()}\n{start}\n")
+    intermediate = development / "Build/Intermediates.noindex/current.o"
+    intermediate.parent.mkdir(parents=True)
+    intermediate.write_text("keep compiler cache\n")
+    reset_installation()
+    run(["script/package_app.sh", "--no-open", "--no-version-bump"], running="no", old_app=False,
+        retained_staging=True)
+    assert not idle_development.exists(), "Installation retained an idle default Debug app"
+    assert custom_development.exists(), "Installation removed custom Debug products"
+    assert active_development.exists(), "Installation removed an active Debug build"
+    assert intermediate.is_file(), "Installation removed the Debug compilation cache"
+    assert (root / "Build/HERMES.app/compiled").is_file(), "Installation removed earlier custom products"
+
+    running_development = development_product("Debug.live12")
+    cleanup_command = 'ROOT_DIR="$HERMES_TEST_ROOT"; source script/project_config.sh; prune_default_development_products'
+    running_env = dict(env, HERMES_TEST_RUNNING="yes",
+                       HERMES_TEST_PROCESS_PATH=str(running_development / "HERMES.app/Contents/MacOS/HERMES"))
+    subprocess.run(["/bin/bash", "-c", cleanup_command], cwd=root, env=running_env, check=True)
+    assert running_development.exists(), "Debug cleanup removed a running app"
+    linked = development_product("Debug.link12")
+    linked_build = root / ".build/development/RealBuild"
+    (development / "Build").rename(linked_build)
+    (development / "Build").symlink_to(linked_build, target_is_directory=True)
+    subprocess.run(["/bin/bash", "-c", cleanup_command], cwd=root,
+                   env=dict(env, HERMES_TEST_RUNNING="no"), check=True)
+    assert (linked_build / "Products/Debug.link12").exists(), "Cleanup followed a linked custom output"
+    assert not (root / "killed").exists()
     print(f"PASS: {len(checks)} isolated build/install scenarios; Bash 3.2, version rollback, recovery, retention, concurrent-build and running-app protection")

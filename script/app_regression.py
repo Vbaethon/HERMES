@@ -16,6 +16,8 @@ import tempfile
 import time
 import uuid
 
+from regression_compilation import compile_program
+
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path.home() / "Library/Caches/HERMESRegression"
 SUITES = {
@@ -34,11 +36,15 @@ class Compiler:
 
     @property
     def flags(self):
-        # Parse the shared module once, while keeping debug checks and four codegen threads.
-        return ("-whole-module-optimization", "-Onone", "-num-threads", "4",
+        # Swift tracks dependencies between files; debug checks remain enabled.
+        return ("-incremental", "-j", "4", "-Onone", "-emit-dependencies", "-emit-module",
                 "-swift-version", "6", "-parse-as-library",
                 "-module-name", "HermesAppRegression", "-sdk", self.sdk,
                 "-target", self.target)
+
+    @property
+    def link_flags(self):
+        return ("-sdk", self.sdk, "-target", self.target)
 
     @classmethod
     def discover(cls):
@@ -84,9 +90,10 @@ def source_snapshot(root):
 def fingerprint(compiler, inputs):
     environment = {name: os.environ.get(name) for name in (
         "DEVELOPER_DIR", "TOOLCHAINS", "SDKROOT", "CPATH", "LIBRARY_PATH", "SWIFT_EXEC")}
-    digest = hashlib.sha256(json.dumps({"schema": 1, "project": "HERMES/app-regressions",
+    digest = hashlib.sha256(json.dumps({"schema": 2, "project": "HERMES/app-regressions",
         "command": compiler.command, "compiler": compiler.identity,
-        "flags": compiler.flags, "environment": environment}, sort_keys=True).encode())
+        "flags": compiler.flags, "link_flags": compiler.link_flags,
+        "environment": environment}, sort_keys=True).encode())
     for relative, content in sorted(inputs.items()):
         digest.update(relative.encode() + b"\0" + str(len(content)).encode() + b"\0" + content)
     return digest.hexdigest()
@@ -155,22 +162,15 @@ def prepare_program(root, build_cache, compiler):
             return binary, key, True
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    print("BUILD: shared model/UI/native regression program", flush=True)
+    print("BUILD: shared model/UI/native regression program (Swift incremental)", flush=True)
     with tempfile.TemporaryDirectory(prefix=".compile-", dir=build_cache) as directory:
         staging = Path(directory)
-        sources = []
-        for relative, content in sorted(inputs.items()):
-            path = staging / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-            sources.append(str(path))
-        built = staging / "regression"
-        env = dict(os.environ, TMPDIR=str(staging) + "/")
-        output = run_process([*compiler.command, *compiler.flags, *sources, "-o", str(built)],
-                             env=env, timeout=600, capture=True)
+        built, output = compile_program(compiler, inputs, build_cache, staging,
+                                        fingerprint(compiler, {}), run_process)
         for line in output.splitlines():
             if ": warning:" in line:
-                print(line.replace(str(staging) + "/", ""), file=sys.stderr)
+                print(line.replace(str(build_cache / "incremental/sources") + "/", "")
+                          .replace(str(staging) + "/", ""), file=sys.stderr)
         built.chmod(0o700)
         staged_manifest = staging / "manifest.json"
         staged_manifest.write_text(json.dumps({"key": key, "binary_sha256": binary_hash(built)}))

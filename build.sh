@@ -10,15 +10,17 @@ XCODE_DESTINATION="platform=macOS,arch=$MAC_ARCH"
 
 SHOULD_RUN=true
 SHOULD_CLEAN=false
+XCODE_TIMING_ARGS=()
 
 XCODE_DEVELOPER_DIR="$(resolve_developer_dir)"
 XCODEBUILD="$XCODE_DEVELOPER_DIR/usr/bin/xcodebuild"
 
 usage() {
-  echo "usage: $0 [--release] [--no-run] [--clean]" >&2
+  echo "usage: $0 [--release] [--no-run] [--clean] [--timing]" >&2
   echo "  --release   Build with Release configuration (default: Debug)" >&2
   echo "  --no-run    Build only, do not launch the app" >&2
   echo "  --clean     Clean build folder before building" >&2
+  echo "  --timing    Print Xcode build task timings" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +33,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --clean)
       SHOULD_CLEAN=true
+      ;;
+    --timing)
+      XCODE_TIMING_ARGS=(-showBuildTimingSummary)
       ;;
     --help|help)
       usage
@@ -86,6 +91,7 @@ mkdir -p "$DERIVED_DATA_DIR" "$PRODUCTS_DIR"
 
 
 DEVELOPER_DIR="$XCODE_DEVELOPER_DIR" "$XCODEBUILD" \
+  ${XCODE_TIMING_ARGS[@]+"${XCODE_TIMING_ARGS[@]}"} \
   -project "$ROOT_DIR/$PROJECT_NAME" \
   ${SIGNING_ARGS[@]+"${SIGNING_ARGS[@]}"} \
   -scheme "$SCHEME" \

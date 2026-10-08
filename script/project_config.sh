@@ -137,6 +137,19 @@ prune_obsolete_managed_products() {
   return "$result"
 }
 
+# Only this checkout's default Debug products; retain its compilation cache.
+prune_default_development_products() (
+  local directory
+  for directory in "$ROOT_DIR/.build" "$ROOT_DIR/.build/development" \
+                   "$ROOT_DIR/.build/development/DerivedData" \
+                   "$ROOT_DIR/.build/development/DerivedData/Build" \
+                   "$ROOT_DIR/.build/development/DerivedData/Build/Products"; do
+    [[ ! -L "$directory" ]] || return 0
+  done
+  DERIVED_DATA_DIR="$ROOT_DIR/.build/development/DerivedData"
+  prune_obsolete_managed_products
+)
+
 app_is_running() {
   pgrep -x "$APP_NAME" >/dev/null 2>&1
 }

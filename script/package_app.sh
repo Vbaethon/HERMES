@@ -124,7 +124,8 @@ cleanup() {
   else
     rm -rf "$PREVIOUS_APP"
     rm -f "$PROJECT_FILE_BACKUP"
-    if ! prune_obsolete_managed_products "$PRODUCTS_DIR" || ! remove_legacy_staged_app; then
+    if ! prune_obsolete_managed_products "$PRODUCTS_DIR" || ! prune_default_development_products \
+      || ! remove_legacy_staged_app; then
       echo "HERMES was installed, but obsolete build products could not be fully removed." >&2
       exit_code=1
     fi

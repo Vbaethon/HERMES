@@ -57,7 +57,13 @@ if any("FAIL" in pathlib.Path(a).read_text() for a in args if a.endswith(".swift
     print("fixture compiler failure")
     sys.exit(73)
 time.sleep(0.05)
-pathlib.Path(args[args.index("-o") + 1]).write_text(''' + repr(FAKE_PROGRAM) + ")\n")
+if "-c" in args:
+    mapping = json.loads(pathlib.Path(args[args.index("-output-file-map") + 1]).read_text())
+    for source, outputs in mapping.items():
+        if source:
+            pathlib.Path(outputs["object"]).write_text(pathlib.Path(source).read_text())
+else:
+    pathlib.Path(args[args.index("-o") + 1]).write_text(''' + repr(FAKE_PROGRAM) + ")\n")
         self.compiler = Compiler((sys.executable, str(fake)), "fixture Swift 1", "fixture SDK", "arm64-apple-macos27.0")
         self.calls = fake.with_suffix(".calls")
         self.runs = self.workspace / "runs.jsonl"
@@ -73,7 +79,7 @@ pathlib.Path(args[args.index("-o") + 1]).write_text(''' + repr(FAKE_PROGRAM) + "
                           compiler=kwargs.pop("compiler", self.compiler), **kwargs)
 
     def compilation_count(self):
-        return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+        return sum("-c" in json.loads(line) for line in self.calls.read_text().splitlines()) if self.calls.exists() else 0
 
     def assert_no_temporaries(self):
         self.assertFalse(list(self.cache.glob("hermes-app-regressions-*")))
@@ -124,10 +130,61 @@ pathlib.Path(args[args.index("-o") + 1]).write_text(''' + repr(FAKE_PROGRAM) + "
             self.verify(build_only=True)
         self.assertEqual(failed.exception.returncode, 73)
         self.assertEqual(before, {name: (build / name).read_bytes() for name in before})
+        self.assertFalse((build / "incremental").exists())
         self.app.write_text(original)
         self.assertTrue(self.verify(build_only=True)["reused"])
         self.assertEqual(self.compilation_count(), 2)
         self.assert_no_temporaries()
+
+    def test_small_change_keeps_unchanged_snapshot_paths_and_timestamps(self):
+        extra = self.root / "Sources/Other.swift"
+        extra.write_text("enum Other {}\n")
+        self.verify(build_only=True)
+        snapshot = self.cache / "app-regression-build/incremental/sources/Sources/Other.swift"
+        before = snapshot.stat().st_mtime_ns
+        self.app.write_text(self.app.read_text() + "// changed entry\n")
+        self.assertFalse(self.verify(build_only=True)["reused"])
+        self.assertEqual(snapshot.stat().st_mtime_ns, before)
+        self.assertEqual(snapshot.read_bytes(), extra.read_bytes())
+
+    def test_source_set_and_toolchain_changes_remove_obsolete_intermediates(self):
+        extra = self.root / "Sources/Old.swift"
+        extra.write_text("enum Old {}\n")
+        self.verify(build_only=True)
+        workspace = self.cache / "app-regression-build/incremental"
+        old = workspace / "objects/Sources/Old.swift.o"
+        self.assertTrue(old.exists())
+        extra.unlink()
+        self.verify(build_only=True)
+        self.assertFalse(old.exists())
+        unrelated = workspace / "obsolete.o"
+        unrelated.write_text("previous toolchain")
+        self.verify(compiler=replace(self.compiler, identity="different compiler"), build_only=True)
+        self.assertFalse(unrelated.exists())
+
+    def test_corrupt_intermediate_is_discarded_before_a_changed_source_build(self):
+        self.verify(build_only=True)
+        workspace = self.cache / "app-regression-build/incremental"
+        obj = workspace / "objects/Sources/HermesApp.swift.o"
+        obj.write_text("corrupt intermediate")
+        marker = workspace / "must-not-survive"
+        marker.write_text("previous state")
+        self.app.write_text(self.app.read_text() + "// new source bytes\n")
+        self.verify(build_only=True)
+        self.assertFalse(marker.exists())
+        self.assertNotEqual(obj.read_text(), "corrupt intermediate")
+
+    def test_linked_snapshot_is_discarded_without_overwriting_its_external_target(self):
+        self.verify(build_only=True)
+        outside = self.workspace / "outside.swift"
+        outside.write_text("preserve external file\n")
+        snapshot = self.cache / "app-regression-build/incremental/sources/Sources/HermesApp.swift"
+        snapshot.unlink()
+        snapshot.symlink_to(outside)
+        self.app.write_text(self.app.read_text() + "// changed source\n")
+        self.verify(build_only=True)
+        self.assertEqual(outside.read_text(), "preserve external file\n")
+        self.assertFalse(snapshot.is_symlink())
 
     def test_identical_sources_in_another_worktree_reuse_the_same_build(self):
         original = self.verify(build_only=True)
