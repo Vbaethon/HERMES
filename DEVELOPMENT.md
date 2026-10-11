@@ -1,8 +1,8 @@
 # HERMES 小改动开发
 
-版本 1.2；更新日期：2026-10-10。
+版本 1.4；更新日期：2026-10-11。
 
-变更摘要：原生窗口检查跨入口、跨工作树共用运行锁，避免窗口与动画测试交叠造成重测；保留共享编译缓存、专项与最终补充检查；将同类小改动约 13 分钟作为需要实际计时验证的效率目标。
+变更摘要：多选检查器复用单选原生表单显示共同元数据；缩放动态抽为对数列宽、增量平滑与速度弹簧组件，补齐系统照片参数证据、专项测试及不受呈现延迟影响的性能输入。
 
 ## 功能定位
 
@@ -15,10 +15,10 @@
 | 设置保存、重启恢复、目录书签 | `Sources/AppSettings.swift` | 旧偏好键兼容；导入、相簿、目录及授权书签、页面与筛选、检查器、设置分类、各页缩略图列数；窗口和分栏尺寸由 AppKit 原生自动保存 | `AppSettingsTests`、`ThumbnailZoomTests`、模型与 UI/UX 回归；目录相关修改补原生媒体与下载回归 |
 | 下载输入、进度覆盖层、结果提示 | `Sources/DownloadViews.swift` | 页面布局、输入高度、模型进度、集合视图；只改呈现不必自动扩大为平台下载回归 | `script/test_window_layout.py`、UI/UX 回归 |
 | 集合布局、滚动、选择、拖出、删除 | `Sources/Views/CollectionViews/ThumbnailGridController.swift`、`ThumbnailGridArrangementController.swift` | 单元格、媒体身份、文件操作；与系统 AppKit 行为核对 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
-| 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 六个相邻方向、边界、交接、位图身份、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
+| 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 对数列宽、33 ms 增量平滑、速度投影与弹簧；六个相邻方向、边界、交接、位图身份、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
 | 缩略图加载、缓存、单元格、合成效果 | `Sources/Views/Thumbnail/` | 系统缩略图、异步图像身份、复用、拖出、缩放交接 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
 | 下载、队列、已完成页面的媒体映射 | `Sources/Views/CollectionViews/DownloadCollectionView.swift`、`PairCollectionView.swift`、`CompletedCollectionView.swift` | `UIModels`、准确配对身份、原生资源动作、共享网格 | 布局、UI/UX、原生媒体回归 |
-| 检查器、媒体信息、地图位置卡 | `Sources/Views/Other/MediaInspectorController.swift`、`MediaLocationCard.swift`、`Sources/Utilities/MediaInspection.swift` | 元数据读取、坐标、迟到异步结果、宽度和可见性 | `LocationCardTests`、UI/UX、原生媒体回归 |
+| 检查器、媒体信息、地图位置卡 | `Sources/Views/Other/MediaInspectorController.swift`、`MediaInspectorSelection.swift`、`MediaLocationCard.swift`、`Sources/Utilities/MediaInspection.swift` | 页面选择映射、多选共同元数据、原生表单、坐标、迟到异步结果、宽度和可见性 | `LocationCardTests`、UI/UX、原生媒体回归 |
 | 队列、合成、历史记录、筛选、文件监控、目录迁移 | `Sources/Models/ImporterModel.swift` | 跨页面状态、文件读写、记录生命周期；按共享模型变更处理 | 模型、UI/UX、原生媒体回归；最终候选补下载、合成与元数据检查 |
 | 抖音、小红书、得物的解析和下载 | `Sources/dydl.swift`、`rndl.swift`、`dwdl.swift`、`DewuLogStore.swift` | 云端原始来源、准确资源身份、兼容网络、取消、媒体验证 | 网络、下载、来源归属回归；最终候选补应用及合成、元数据检查 |
 | 网络兼容、子进程、恢复策略 | `Sources/DownloaderHTTPCompatibility.swift`、`Sources/Utilities/DownloaderNetworkPolicy.swift`、`SubprocessRunner.swift`、`DouyinSourceResolver.swift`、`DewuDownloadRecoveryPolicy.swift`、`DewuPlaybackLogVideoExtractor.swift` | 同时被平台下载和测试使用 | `HermesNetworkingTests`、下载回归 |

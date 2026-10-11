@@ -13,8 +13,8 @@ final class MediaInspectorController: NSViewController {
     private var formLayoutUpdateScheduled = false
     private var loadTask: Task<Void, Never>?
     private var generation = UUID()
-    private var currentRequest: MediaInspection.Request?
-    private var currentRevision: String?
+    private var currentRequests: [MediaInspection.Request]?
+    private var currentRevisions: [String]?
     private var lastLayoutSize: NSSize?
     private var formNeedsLayout = true
     private var isScrolledToTop = true
@@ -317,49 +317,76 @@ final class MediaInspectorController: NSViewController {
     func reload(force: Bool = false) {
         guard isInspectionEnabled, !isPaneTransitioning else { return }
         _ = view
-        let count: Int
-        switch model.selection ?? .queue {
-        case .queue: count = model.selectedPairIDs.count
-        case .downloads: count = model.selectedDownloadItemIDs.count
-        case .completed: count = model.selectedCompletedIDs.count
-        }
-        guard count == 1 else {
+        let selection = MediaInspectorSelection(model: model)
+        guard selection.count > 0 else {
             cancelLoad()
-            currentRequest = nil
-            currentRevision = nil
-            showMessage(count > 1 ? "已选择多个项目，\n请选择一个项目查看信息。" : "选择一个项目以查看信息")
+            currentRequests = nil
+            currentRevisions = nil
+            showMessage("选择一个项目以查看信息")
             return
         }
-        guard let request = inspectionRequest else {
+        guard selection.requests.count == selection.count else {
             cancelLoad()
-            currentRequest = nil
-            currentRevision = nil
+            currentRequests = nil
+            currentRevisions = nil
             showMessage("所选项目已不可用")
             return
         }
-        let revision = MediaInspection.revision(for: request)
-        guard force || request != currentRequest || revision != currentRevision else { return }
+        let requests = selection.requests
+        let revisions = requests.map { MediaInspection.revision(for: $0) }
+        guard force || requests != currentRequests || revisions != currentRevisions else { return }
         cancelLoad()
-        currentRequest = request
-        currentRevision = revision
-        let cacheKey = InspectionCacheKey(request: request, revision: revision)
-        if !force, let cached = inspectionCache.object(forKey: cacheKey) {
-            display(cached.snapshot, isComplete: true)
+        currentRequests = requests
+        currentRevisions = revisions
+        let cacheKeys = zip(requests, revisions).map { InspectionCacheKey(request: $0, revision: $1) }
+        let cachedSnapshots = cacheKeys.map { force ? nil : inspectionCache.object(forKey: $0)?.snapshot }
+        if cachedSnapshots.allSatisfy({ $0 != nil }) {
+            displaySelection(cachedSnapshots.compactMap { $0 }, isComplete: true)
             return
         }
-        display(.init(rows: MediaInspection.preview(request)), isComplete: false)
+        let previews = requests.indices.map { index in
+            cachedSnapshots[index] ?? .init(rows: MediaInspection.preview(requests[index]))
+        }
+        displaySelection(previews, isComplete: false)
         let token = generation
         loadTask = Task { [weak self] in
-            let result = await MediaInspection.loadSnapshot(request)
+            var snapshots = cachedSnapshots
+            let pending = requests.indices.filter { snapshots[$0] == nil }
+            // Keep large selections from starting an unbounded set of media readers.
+            await withTaskGroup(of: (Int, MediaInspection.Snapshot).self) { group in
+                var remaining = pending.makeIterator()
+                for _ in 0..<min(4, pending.count) {
+                    guard let index = remaining.next() else { break }
+                    group.addTask { (index, await MediaInspection.loadSnapshot(requests[index])) }
+                }
+                for await (index, snapshot) in group {
+                    snapshots[index] = snapshot
+                    if !Task.isCancelled, let next = remaining.next() {
+                        group.addTask { (next, await MediaInspection.loadSnapshot(requests[next])) }
+                    }
+                }
+            }
             guard !Task.isCancelled, let self, self.generation == token, self.isInspectionEnabled else { return }
-            guard MediaInspection.revision(for: request) == revision else {
+            guard zip(requests, revisions).allSatisfy({ MediaInspection.revision(for: $0) == $1 }) else {
                 self.reload(force: true)
                 return
             }
             self.loadTask = nil
-            let cached = InspectionCacheSnapshot(result)
-            self.inspectionCache.setObject(cached, forKey: cacheKey, cost: cached.cost)
-            self.display(result, isComplete: true)
+            for index in requests.indices {
+                guard let snapshot = snapshots[index] else { continue }
+                let cached = InspectionCacheSnapshot(snapshot)
+                self.inspectionCache.setObject(cached, forKey: cacheKeys[index], cost: cached.cost)
+            }
+            self.displaySelection(snapshots.compactMap { $0 }, isComplete: true)
+        }
+    }
+
+    private func displaySelection(_ snapshots: [MediaInspection.Snapshot], isComplete: Bool) {
+        let result = MediaInspectorSelection.commonSnapshot(snapshots)
+        if snapshots.count > 1 && result.inspectorRows.isEmpty && result.location == nil {
+            showMessage(isComplete ? "所选项目没有相同的信息" : "正在读取文件信息…")
+        } else {
+            display(result, isComplete: isComplete)
         }
     }
 
@@ -372,8 +399,8 @@ final class MediaInspectorController: NSViewController {
     private func cancelPendingLoad() {
         guard loadTask != nil else { return }
         cancelLoad()
-        currentRequest = nil
-        currentRevision = nil
+        currentRequests = nil
+        currentRevisions = nil
     }
 
     func beginPaneTransition() {
@@ -400,53 +427,6 @@ final class MediaInspectorController: NSViewController {
         documentStack.isHidden = true
         clearForm()
         updateFormLayout()
-    }
-
-    private var inspectionRequest: MediaInspection.Request? {
-        switch model.selection ?? .queue {
-        case .queue:
-            guard let item = model.selectedPairs.first else { return nil }
-            let state: String
-            switch item.status {
-            case .waiting: state = "未合成"
-            case .running: state = "合成中"
-            case .finished: state = "已合成"
-            case .failed: state = "合成失败"
-            }
-            return .init(name: item.imageURL.deletingPathExtension().lastPathComponent,
-                sourceURLs: [item.imageURL, item.videoURL], displayedURLs: [item.imageURL, item.videoURL],
-                kind: "Live Photo 配对", compositionState: state)
-        case .downloads:
-            guard let item = model.visibleDownloadItems.first(where: { model.selectedDownloadItemIDs.contains($0.id) }) else { return nil }
-            let urls: [URL]
-            switch item.kind {
-            case .pair(let pairID):
-                guard let pair = model.downloadPairs.first(where: { $0.id == pairID }) else { return nil }
-                urls = [pair.imageURL, pair.videoURL]
-            case .photo, .video: urls = [item.imageURL]
-            }
-            let kind = item.mediaKind == .livePhoto ? "Live Photo 配对" : (item.mediaKind == .video ? "视频" : "照片")
-            let state = item.mediaKind == .livePhoto ? (item.isCompleted ? "已合成" : (item.status == .running ? "合成中" : "未合成")) : "不适用"
-            return .init(name: item.imageURL.lastPathComponent, sourceURLs: urls, displayedURLs: urls,
-                kind: kind, compositionState: state)
-        case .completed:
-            guard let item = model.selectedCompletedItems.first else { return nil }
-            let outputs = [item.imageURL] + (item.movieURL.map { [$0] } ?? [])
-            let sources = [item.sourceImagePath, item.sourceVideoPath].compactMap { $0 }.map { URL(fileURLWithPath: $0) }
-            let kind = item.mediaKind == .livePhoto ? "Live Photo" : (item.mediaKind == .video ? "视频" : "照片")
-            let hasCompositionRecord = item.movieURL != nil && item.sourceImagePath != nil && item.sourceVideoPath != nil
-            let currentOutput = item.outputIsCurrent
-            let currentSource = sources.count == 2 && item.sourceRevision != nil
-                && item.sourceRevision == MediaPairRevision(image: sources[0], movie: sources[1])
-            // Paths can be reused for another post. Only matching revisions
-            // establish that these source files still belong to this output.
-            let evidence = hasCompositionRecord ? (currentSource && currentOutput ? sources : []) : outputs
-            return .init(name: item.imageURL.lastPathComponent, sourceURLs: evidence,
-                displayedURLs: outputs, kind: kind,
-                compositionState: item.movieURL == nil ? "不适用" : (hasCompositionRecord
-                    ? (currentOutput ? "已合成" : "文件已变化，合成状态待确认") : "未记录合成状态"),
-                isCompositionOutput: hasCompositionRecord && currentOutput, importedToPhotos: item.importedToPhotos)
-        }
     }
 
 }

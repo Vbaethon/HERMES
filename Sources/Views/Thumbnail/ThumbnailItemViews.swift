@@ -547,7 +547,14 @@ final class ThumbnailBadgeLabel: NSView {
     }
 }
 
-final class ThumbnailItemView: NSView {
+final class ThumbnailItemView: NSView, NSCollectionViewElement {
+    // The grid supplies exact square frames. Re-fitting every label's Auto
+    // Layout subtree during native zoom handoff repeats work without changing
+    // those frames, so use AppKit's supplied attributes directly.
+    func preferredLayoutAttributesFitting(_ attributes: NSCollectionViewLayoutAttributes) -> NSCollectionViewLayoutAttributes {
+        attributes
+    }
+
     let compositionEffect = ThumbnailCompositionEffect(frame: .zero)
     weak var imageView: NSImageView?
     weak var badgeLabel: ThumbnailBadgeLabel?

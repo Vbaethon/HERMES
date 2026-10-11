@@ -54,6 +54,7 @@
 		111111111111111111111155 /* XHSCachedMotionReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111154 /* XHSCachedMotionReader.swift */; };
 		111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111156 /* Utilities/NativeMediaResources.swift */; };
 		111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111158 /* Views/Other/MediaInspectorController.swift */; };
+		111111111111111111111183 /* Views/Other/MediaInspectorSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111182 /* Views/Other/MediaInspectorSelection.swift */; };
 		11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115A /* Utilities/MediaInspection.swift */; };
 		11111111111111111111117A /* Views/CollectionViews/ThumbnailGridArrangementController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111179 /* Views/CollectionViews/ThumbnailGridArrangementController.swift */; };
 		11111111111111111111115D /* Views/CollectionViews/ThumbnailGridZoomController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11111111111111111111115C /* Views/CollectionViews/ThumbnailGridZoomController.swift */; };
@@ -135,6 +136,7 @@
 		111111111111111111111154 /* XHSCachedMotionReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/XHSCachedMotionReader.swift; sourceTree = "<group>"; };
 		111111111111111111111156 /* Utilities/NativeMediaResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/NativeMediaResources.swift; sourceTree = "<group>"; };
 		111111111111111111111158 /* Views/Other/MediaInspectorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MediaInspectorController.swift; sourceTree = "<group>"; };
+		111111111111111111111182 /* Views/Other/MediaInspectorSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/Other/MediaInspectorSelection.swift; sourceTree = "<group>"; };
 		11111111111111111111115A /* Utilities/MediaInspection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utilities/MediaInspection.swift; sourceTree = "<group>"; };
 		111111111111111111111179 /* Views/CollectionViews/ThumbnailGridArrangementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridArrangementController.swift; sourceTree = "<group>"; };
 		11111111111111111111115C /* Views/CollectionViews/ThumbnailGridZoomController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/CollectionViews/ThumbnailGridZoomController.swift; sourceTree = "<group>"; };
@@ -165,6 +167,7 @@
 			children = (
 				11111111111111111111115A /* Utilities/MediaInspection.swift */,
 				111111111111111111111158 /* Views/Other/MediaInspectorController.swift */,
+				111111111111111111111182 /* Views/Other/MediaInspectorSelection.swift */,
 				111111111111111111111162 /* Views/Other/MediaLocationCard.swift */,
 				111111111111111111111156 /* Utilities/NativeMediaResources.swift */,
 				111111111111111111111029 /* HermesApp.swift */,
@@ -402,6 +405,7 @@
 				111111111111111111111133 /* Views/Other/MainWindowController.swift in Sources */,
 				11111111111111111111115B /* Utilities/MediaInspection.swift in Sources */,
 				111111111111111111111159 /* Views/Other/MediaInspectorController.swift in Sources */,
+				111111111111111111111183 /* Views/Other/MediaInspectorSelection.swift in Sources */,
 				111111111111111111111163 /* Views/Other/MediaLocationCard.swift in Sources */,
 				111111111111111111111157 /* Utilities/NativeMediaResources.swift in Sources */,
 				111111111111111111111134 /* Views/Other/NativeWindowToolbarController.swift in Sources */,
@@ -582,7 +586,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 682;
+				CURRENT_PROJECT_VERSION = 683;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -594,7 +598,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.11;
+				MARKETING_VERSION = 3.0.12;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -616,7 +620,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 682;
+				CURRENT_PROJECT_VERSION = 683;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -628,7 +632,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.11;
+				MARKETING_VERSION = 3.0.12;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

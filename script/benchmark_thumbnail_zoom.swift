@@ -247,10 +247,19 @@ final class ThumbnailZoomBenchmark: NSObject, NSApplicationDelegate {
             // animation clock, final layout and deferred handoff all execute.
             let progress = CGFloat(step) / CGFloat(fixture.frames) * 0.9
             let desired = CGFloat(from) + CGFloat(to - from) * progress
+            // Use the unsmoothed target for input generation. Feeding the
+            // displayed size back would amplify input whenever smoothing lags.
+            #if HERMES_NATIVE_ZOOM_DYNAMICS
+            let currentWidth = ZoomDynamics.normalizedWidth(position: zoom.gesture!.position)
+            let desiredWidth = ZoomDynamics.normalizedWidth(position: desired)
+            let magnification = 2 * (desiredWidth - currentWidth) / zoom.gesture!.startWidth
+            #else
             let currentSide = ZoomGeometry.side(width: layout.viewportSize.width, position: zoom.position, metrics: layout.metrics)
             let desiredSide = ZoomGeometry.side(width: layout.viewportSize.width, position: desired, metrics: layout.metrics)
+            let magnification = 2 * (desiredSide - currentSide) / zoom.gesture!.startSide
+            #endif
             let start = ProcessInfo.processInfo.systemUptime
-            zoom.changeGesture(magnification: 2 * (desiredSide - currentSide) / zoom.gesture!.startSide)
+            zoom.changeGesture(magnification: magnification)
             inputSubmissions.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
             displaySubmissions.append(submitDisplay())
             maxTiles = max(maxTiles, zoom.overlay.retainedTileCount)

@@ -87,7 +87,7 @@ final class ThumbnailGridZoomController: NSObject {
     private(set) var elasticScale: CGFloat = 1
     private var displayLink: CADisplayLink?
     private var animation: Animation?
-    private var elasticReturn: ZoomElasticReturn?
+    private var motion: ZoomMotion?
     private var applying = false
     private var handoffGeneration = 0
     private var imageTasks: [Int: Task<Void, Never>] = [:]
@@ -104,11 +104,7 @@ final class ThumbnailGridZoomController: NSObject {
     private var lastViewportInsets: NSEdgeInsets?
 
     private struct Animation {
-        let from: CGFloat
         let to: CGFloat
-        let start: CFTimeInterval
-        let duration: CFTimeInterval
-        let curve: NSAnimation
     }
 
     @MainActor private final class DisplayTarget: NSObject {
@@ -276,13 +272,14 @@ final class ThumbnailGridZoomController: NSObject {
         CATransaction.commit()
     }
 
-    func beginGesture(at point: CGPoint) {
+    func beginGesture(at point: CGPoint, time: CFTimeInterval = CACurrentMediaTime()) {
         attachIfNeeded()
         stopAnimation()
         preparePlan(at: point)
         guard plan != nil else { return }
         gesture = ZoomGesture(position: position, width: layout.viewportSize.width,
-                              elasticScale: elasticScale, metrics: layout.metrics)
+                              elasticScale: elasticScale, metrics: layout.metrics, at: time)
+        motion = ZoomMotion(value: gesture!.coordinate)
         updateBadgeVisibility()
         applyOverlay()
     }
@@ -295,7 +292,7 @@ final class ThumbnailGridZoomController: NSObject {
             // zoom uses the visible mouse pointer, just like keyboard zoom.
             beginGesture(at: pointerInDocument())
         }
-        if recognizer.state == .began || recognizer.state == .changed || recognizer.state == .ended {
+        if recognizer.state == .began || recognizer.state == .changed {
             let magnification = recognizer.magnification
             changeGesture(magnification: magnification - lastMagnification)
             lastMagnification = magnification
@@ -304,20 +301,18 @@ final class ThumbnailGridZoomController: NSObject {
         if recognizer.state == .cancelled || recognizer.state == .failed { endGesture(cancelled: true) }
     }
 
-    func changeGesture(magnification: CGFloat) {
+    func changeGesture(magnification: CGFloat, at time: CFTimeInterval = CACurrentMediaTime()) {
         guard var gesture else { return }
-        gesture.update(magnification: magnification, width: layout.viewportSize.width)
+        gesture.update(magnification: magnification, width: layout.viewportSize.width, at: time)
         self.gesture = gesture
-        position = gesture.position
-        elasticScale = gesture.elasticScale
-        alpha.update(position: position)
+        motion?.move(to: gesture.coordinate, at: time)
         requestFrame()
     }
 
-    func endGesture(cancelled: Bool = false) {
+    func endGesture(cancelled: Bool = false, at time: CFTimeInterval = CACurrentMediaTime()) {
         guard let gesture else { return }
         self.gesture = nil
-        animate(to: gesture.destination(cancelled: cancelled))
+        animate(to: gesture.destination(cancelled: cancelled), velocity: cancelled ? 0 : gesture.velocity, at: time)
     }
 
     func step(_ direction: Int) {
@@ -333,24 +328,33 @@ final class ThumbnailGridZoomController: NSObject {
         animate(to: CGFloat(min(3, max(0, level))))
     }
 
-    private func animate(to target: CGFloat) {
-        stopAnimation()
+    private func animate(to target: CGFloat, velocity: CGFloat = 0, at time: CFTimeInterval = CACurrentMediaTime()) {
         guard plan != nil else { return }
-        // Persist the released/keyboard destination before its animation so
-        // quitting during settlement still restores the user's chosen preset.
+        // Persist the destination before settlement so quitting restores it.
         onLevelChange(Int(target))
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             position = target
             commitPlan()
             return
         }
-        animation = Animation(from: position, to: target, start: CACurrentMediaTime(),
-            duration: 0.30,
-            curve: NSAnimation(duration: 1, animationCurve: .easeInOut))
-        if elasticScale != 1 { elasticReturn = ZoomElasticReturn(initialScale: elasticScale, start: CACurrentMediaTime()) }
+        if motion == nil {
+            motion = ZoomMotion(value: ZoomDynamics.unclamped(ZoomDynamics.coordinate(position: position, elasticScale: elasticScale,
+                width: layout.viewportSize.width, metrics: layout.metrics)))
+        }
+        // Preserve any unfinished 33 ms input residuals when adding the native
+        // critically damped release spring, including its measured velocity.
+        motion?.move(to: ZoomDynamics.coordinate(width: ZoomDynamics.normalizedWidth(position: target)),
+                     at: time, velocity: velocity)
+        animation = Animation(to: target)
         updateBadgeVisibility()
-        applyOverlay()
         requestFrame()
+    }
+
+    private func present(coordinate: CGFloat) {
+        let value = ZoomDynamics.presentation(coordinate: ZoomDynamics.softClamp(coordinate), width: layout.viewportSize.width, metrics: layout.metrics)
+        position = value.position
+        elasticScale = value.elasticScale
+        alpha.update(position: position)
     }
 
     private func requestFrame() {
@@ -369,23 +373,16 @@ final class ThumbnailGridZoomController: NSObject {
         displayLink?.isPaused = false
     }
 
-    // Gesture events and bitmap completions update state immediately; AppKit's
-    // display link presents their latest state once per screen refresh. The
-    // same clock advances settlement, including while menus track events.
+    // AppKit's refresh clock samples input smoothing, spring settlement and
+    // opacity together, including while menus track events.
     func displayFrame(at timestamp: CFTimeInterval) {
-        let presentsZoom = plan != nil && (needsDisplay || animation != nil || elasticReturn != nil)
+        let presentsZoom = plan != nil && (needsDisplay || motion?.isAnimating == true || animation != nil)
         if presentsZoom {
-            if let animation {
-                let fraction = min(1, max(0, (timestamp - animation.start) / animation.duration))
-                animation.curve.currentProgress = Float(fraction)
-                position = ZoomGeometry.mix(animation.from, animation.to, CGFloat(animation.curve.currentValue))
-                if fraction >= 1 { self.animation = nil; position = animation.to }
+            if var motion {
+                present(coordinate: motion.advance(at: timestamp))
+                self.motion = motion
+                if !motion.isAnimating { animation = nil }
             }
-            if let elasticReturn {
-                elasticScale = elasticReturn.scale(at: timestamp)
-                if elasticReturn.isFinished(at: timestamp) { elasticScale = 1; self.elasticReturn = nil }
-            }
-            alpha.update(position: position)
             updateBadgeVisibility()
         }
         if badgeAnimation.isAnimating {
@@ -397,10 +394,10 @@ final class ThumbnailGridZoomController: NSObject {
         // they never rebuild the prepared image geometry or start new loads.
         if presentsZoom {
             applyOverlay()
-            if gesture == nil && animation == nil && elasticReturn == nil { commitPlan() }
+            if gesture == nil && animation == nil && motion?.isAnimating != true { commitPlan() }
         }
         if plan == nil && !badgeAnimation.isAnimating { stopDisplayLink() }
-        else if !needsDisplay && animation == nil && elasticReturn == nil && !badgeAnimation.isAnimating {
+        else if !needsDisplay && animation == nil && motion?.isAnimating != true && !badgeAnimation.isAnimating {
             displayLink?.isPaused = true
         }
     }
@@ -428,7 +425,7 @@ final class ThumbnailGridZoomController: NSObject {
 
     private func stopAnimation() {
         animation = nil
-        elasticReturn = nil
+        motion = nil
     }
 
     private func stopDisplayLink() {
@@ -563,9 +560,9 @@ final class ThumbnailGridZoomController: NSObject {
                 weights: [0, 0, 0, 0], metrics: layout.metrics)
             candidates.formUnion(state.visibleIndices(count: layout.count, width: width, height: height, metrics: layout.metrics))
         }
-        // The strongly resisted nine-column overshoot still reveals a few more
-        // rows in tall windows. Include its full asymptotic range up front.
-        let minimumScale = ZoomGesture.minimumElasticScale
+        // Inward overshoot reveals extra rows in tall windows. Cover the
+        // minimum supported input with this viewport's margins and gaps.
+        let minimumScale = ZoomGesture.minimumElasticScale(width: width, metrics: layout.metrics)
         let reducedCenter = plan.focusCenter(width: width, height: height, count: layout.count,
                                             position: 0, elasticScale: minimumScale)
         let reduced = ZoomLayerState(spec: plan.specs[0], position: 0, width: width,

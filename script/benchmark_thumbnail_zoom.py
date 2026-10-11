@@ -197,8 +197,10 @@ def main():
             snapshots.append((label, sources, binary, manifest))
             report["builds"].append({"label": label, "production_source_sha256": digests})
         for label, sources, binary, _ in snapshots:
+            native_dynamics = any(path.name == "ThumbnailZoomGeometry.swift" and "enum ZoomDynamics" in path.read_text() for path in sources)
+            flags = ["-D", "HERMES_NATIVE_ZOOM_DYNAMICS"] if native_dynamics else []
             run_process(["xcrun", "swiftc", "-j", "4", "-O", "-g", "-swift-version", "6", "-parse-as-library",
-                         "-target", f"{platform.machine()}-apple-macos27.0", *map(str, sources),
+                         "-target", f"{platform.machine()}-apple-macos27.0", *flags, *map(str, sources),
                          str(harness), "-o", str(binary)])
             print(f"COMPILED {label}", flush=True)
         if args.compile_only:

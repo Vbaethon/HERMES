@@ -251,6 +251,57 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         ])
         try expect(presentation.inspectorRows.map(\.key) == ["帖子标题/描述", "音轨"],
             "availability must describe the evidence rather than blacklist words in actual metadata")
+        let sharedRows: [MediaInspection.Row] = [
+            .init(key: "来源平台", value: "小红书"),
+            .init(key: "HDR", value: "否（SDR）", section: .image),
+            .init(key: "音轨", value: "无音轨", section: .video),
+            .init(key: "帖子标题/描述", value: "未记录")
+        ]
+        let firstCommonSnapshot = MediaInspection.Snapshot(rows: sharedRows + [
+            .init(key: "博主", value: "相同作者"),
+            .init(key: "显示尺寸", value: "19 × 11 像素", section: .image),
+            .init(key: "同名字段", value: "相同值", section: .image),
+            .init(key: "缺失字段", value: "未记录", availability: .missing),
+            .init(key: "读取中字段", value: "读取中…", availability: .loading),
+            .init(key: "下载时 SHA-256", value: "same-hash")
+        ], location: photoLocation)
+        let secondCommonSnapshot = MediaInspection.Snapshot(rows: sharedRows + [
+            .init(key: "博主", value: "相同作者"),
+            .init(key: "显示尺寸", value: "19 × 11 像素", section: .image),
+            .init(key: "同名字段", value: "相同值", section: .video),
+            .init(key: "缺失字段", value: "未记录"),
+            .init(key: "读取中字段", value: "读取中…"),
+            .init(key: "下载时 SHA-256", value: "same-hash")
+        ], location: photoLocation)
+        let thirdCommonSnapshot = MediaInspection.Snapshot(rows: sharedRows + [
+            .init(key: "博主", value: "不同作者"),
+            .init(key: "显示尺寸", value: "1 × 1 像素", section: .image)
+        ], location: photoLocation)
+        let twoCommon = MediaInspectorSelection.commonSnapshot([firstCommonSnapshot, secondCommonSnapshot])
+        try expect(twoCommon.inspectorRows == sharedRows + [
+            .init(key: "博主", value: "相同作者"),
+            .init(key: "显示尺寸", value: "19 × 11 像素", section: .image)
+        ] && twoCommon.location == photoLocation,
+            "common metadata must match section, key and value, preserve order and exclude unavailable or technical rows")
+        let threeCommon = MediaInspectorSelection.commonSnapshot([firstCommonSnapshot, secondCommonSnapshot, thirdCommonSnapshot])
+        try expect(threeCommon.inspectorRows == sharedRows && threeCommon.location == photoLocation,
+            "every selected item must agree; two matching items cannot override a third item's different metadata")
+        try expect(MediaInspectorSelection.commonSnapshot([]).inspectorRows.isEmpty
+            && MediaInspectorSelection.commonSnapshot([]).location == nil
+            && MediaInspectorSelection.commonSnapshot([firstCommonSnapshot]).inspectorRows == firstCommonSnapshot.inspectorRows,
+            "empty and single-item aggregation must retain the single-selection presentation rules")
+        let noCommon = MediaInspectorSelection.commonSnapshot([
+            .init(rows: [.init(key: "HDR", value: "否（SDR）", section: .image)], location: photoLocation),
+            .init(rows: [.init(key: "HDR", value: "否（SDR）", section: .video)], location: otherPhotoLocation)
+        ])
+        try expect(noCommon.inspectorRows.isEmpty && noCommon.location == nil,
+            "mixed image/video sections cannot borrow an equal-looking value and different coordinates cannot share a map")
+        try expect(MediaInspectorSelection.commonSnapshot([firstCommonSnapshot, .init(rows: [], location: nil)]).location == nil
+            && MediaInspectorSelection.commonSnapshot([firstCommonSnapshot,
+                .init(rows: [], location: .init(latitude: photoLocation.latitude + 0.000001,
+                    longitude: photoLocation.longitude))]).location == nil,
+            "a missing or merely nearby location cannot be displayed as a shared exact shooting location")
+        pass("multi-selection intersects only evidenced fields across every item and requires exact common location")
         if !CommandLine.arguments.contains("--sidebar-performance") {
             let context = CIContext()
             let rect = CGRect(x: 0, y: 0, width: 64, height: 64)
@@ -424,6 +475,43 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         try expect(staleRows.contains { $0.key == "原始文件" && $0.value == "待确认（文件已变更或记录失效）" },
             "a receipt for changed bytes must lose its original-source confirmation")
         pass("changing a source invalidates the original-file confirmation")
+
+        let selectionModel = ImporterModel(refreshOnInit: false)
+        let waitingSelectionPair = PairItem(imageURL: image, videoURL: movie)
+        let runningSelectionPair = PairItem(imageURL: secondImage, videoURL: movie, status: .running)
+        selectionModel.pairs = [waitingSelectionPair, runningSelectionPair]
+        selectionModel.selectedPairIDs = [waitingSelectionPair.id, runningSelectionPair.id]
+        selectionModel.selection = .queue
+        let queueSelection = MediaInspectorSelection(model: selectionModel)
+        try expect(queueSelection.count == 2 && queueSelection.requests.count == 2
+            && queueSelection.requests.map(\.compositionState) == ["未合成", "合成中"]
+            && queueSelection.requests.map(\.displayedURLs) == [[image, movie], [secondImage, movie]]
+            && queueSelection.requests.allSatisfy { $0.kind == "Live Photo 配对" && !$0.isCompositionOutput },
+            "queue multi-selection must build each pair's own request with its own composition state")
+        let composedSelectionItem = CompletedItem(imagePath: image.path, moviePath: movie.path,
+            importedToPhotos: true, revision: MediaPairRevision(image: image, movie: movie),
+            sourceImagePath: locatedImage.path, sourceVideoPath: movie.path,
+            sourceRevision: MediaPairRevision(image: locatedImage, movie: movie))
+        let standaloneSelectionItem = CompletedItem(imagePath: secondImage.path,
+            standaloneRevision: MediaFileRevision(secondImage))
+        selectionModel.completed = [composedSelectionItem, standaloneSelectionItem]
+        selectionModel.selectedCompletedIDs = [composedSelectionItem.id, standaloneSelectionItem.id]
+        selectionModel.selection = .completed
+        let completedSelection = MediaInspectorSelection(model: selectionModel)
+        try expect(completedSelection.count == 2 && completedSelection.requests.count == 2
+            && completedSelection.requests[0].sourceURLs == [locatedImage, movie]
+            && completedSelection.requests[0].displayedURLs == [image, movie]
+            && completedSelection.requests[0].isCompositionOutput
+            && completedSelection.requests[0].importedToPhotos == true
+            && completedSelection.requests[1].sourceURLs == [secondImage]
+            && completedSelection.requests[1].displayedURLs == [secondImage]
+            && !completedSelection.requests[1].isCompositionOutput
+            && completedSelection.requests[1].importedToPhotos == false,
+            "completed multi-selection must preserve each item's output, verified sources and Photos import state")
+        selectionModel.completed[0].sourceRevision = nil
+        try expect(MediaInspectorSelection(model: selectionModel).requests[0].sourceURLs.isEmpty,
+            "aggregating completed items must not restore an unverified source path as evidence")
+        pass("queue and completed multi-selection retain per-item state and source/output evidence boundaries")
 
         let model = ImporterModel(refreshOnInit: false)
         let pair = PairItem(imageURL: image, videoURL: movie)
@@ -851,14 +939,110 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         pass("repeated photo/Live Photo selections remove obsolete views and keep every information row separate")
         pass("selection previews do not blank the form, cached selections display immediately and file/receipt changes invalidate them")
         model.selectedDownloadItemIDs = [pairID, photoID]
-        try await waitUntil("multiple selections must clear per-file fields and show a native prompt") {
-            inspector.rows.isEmpty && inspector.sectionGrids.isEmpty
-                && descendants(inspector.view).compactMap { $0 as? NSTextField }
-                    .contains { !$0.isHidden && $0.stringValue.contains("多个") }
+        inspector.reload()
+        try await waitUntil("a photo and Live Photo must display their shared still-image information") {
+            !inspector.isLoading && inspector.rows.contains { $0.key == "显示尺寸" && $0.value == "19 × 11 像素" }
         }
+        try expect(inspector.sectionGrids[.image] === existingImageGrid
+            && inspector.sectionGrids[.video] == nil
+            && !inspector.rows.contains { $0.key == "博主" || $0.section == .video },
+            "mixed selections must reuse the single-item form and omit details absent from any selected item")
         try expect(!inspector.scrollView.isHidden && inspector.scrollView.borderType == .noBorder
             && !(inspector.view is NSVisualEffectView),
             "multiple selection must retain the same borderless native sidebar treatment")
+        try expectCleanInspectorForm(inspector, context: "shared photo and Live Photo metadata")
+
+        let commonPhotoA = root.appendingPathComponent("common-photo-a.jpg")
+        let commonPhotoB = root.appendingPathComponent("common-photo-b.jpg")
+        let commonPhotoC = root.appendingPathComponent("common-photo-c.jpg")
+        for url in [commonPhotoA, commonPhotoB, commonPhotoC] {
+            try writeJPEGImage(url, properties: cameraProperties)
+        }
+        let commonPostURL = URL(string: "https://www.xiaohongshu.com/explore/common-post")
+        let sharedAuthor = MediaPostAttribution(platform: "xhs", postID: "common-post", postURL: commonPostURL,
+            title: "第一张照片的标题", authorName: "共同作者")
+        sharedAuthor.write(to: commonPhotoA)
+        MediaPostAttribution(platform: "xhs", postID: "common-post", postURL: commonPostURL,
+            title: "第二张照片的标题", authorName: "共同作者").write(to: commonPhotoB)
+        model.downloadPhotos += [commonPhotoA, commonPhotoB, commonPhotoC]
+        model.downloadFilter = .notComposed
+        model.downloadFilter = .all
+        let commonPhotoAID = "photo:\(commonPhotoA.standardizedFileURL.path)"
+        let commonPhotoBID = "photo:\(commonPhotoB.standardizedFileURL.path)"
+        let commonPhotoCID = "photo:\(commonPhotoC.standardizedFileURL.path)"
+        model.selectedDownloadItemIDs = [commonPhotoAID, commonPhotoBID]
+        inspector.reload()
+        try await waitUntil("two photos must load their common attribution and shooting metadata") {
+            !inspector.isLoading && inspector.rows.contains { $0.key == "博主" && $0.value == "共同作者" }
+                && inspector.rows.contains { $0.key == "光圈" && $0.value == "f/1.78" }
+        }
+        try expect(inspector.rows.contains { $0.key == "显示尺寸" && $0.value == "19 × 11 像素" }
+            && inspector.rows.contains { $0.key == "来源帖子" }
+            && !inspector.rows.contains { $0.key == "帖子标题/描述" }
+            && inspector.sectionGrids[.image] === existingImageGrid,
+            "common fields must remain in their native sections while different photo titles are omitted")
+        try expectCleanInspectorForm(inspector, context: "two photos with common metadata")
+        model.selectedDownloadItemIDs = [commonPhotoAID]
+        inspector.reload()
+        try expect(!inspector.isLoading && inspector.rows.contains { $0.key == "帖子标题/描述" && $0.value == "第一张照片的标题" },
+            "returning to one photo must immediately restore its complete cached information")
+        model.selectedDownloadItemIDs = [commonPhotoAID, commonPhotoBID]
+        inspector.reload()
+        try expect(!inspector.isLoading && !inspector.rows.contains { $0.key == "帖子标题/描述" },
+            "a selection assembled from cached photos must display common information synchronously")
+        let commonByteRevision = MediaFileRevision(commonPhotoB)
+        MediaPostAttribution(platform: "xhs", postID: "common-post", postURL: commonPostURL,
+            title: "第二张照片的标题", authorName: "不同作者").write(to: commonPhotoB)
+        try expect(MediaFileRevision(commonPhotoB) == commonByteRevision,
+            "the common-attribution fixture must preserve its media-byte revision")
+        inspector.reload()
+        try expect(inspector.isLoading && !inspector.rows.contains { $0.key == "博主" },
+            "a changed member's attribution must immediately remove a stale common author during loading")
+        try await waitUntil("changed common attribution must finish loading") { !inspector.isLoading }
+        try expect(!inspector.rows.contains { $0.key == "博主" }
+            && inspector.rows.contains { $0.key == "光圈" && $0.value == "f/1.78" },
+            "a divergent author must not remove unrelated shared shooting information")
+        sharedAuthor.write(to: commonPhotoB)
+        model.selectedDownloadItemIDs = [commonPhotoAID, commonPhotoBID, commonPhotoCID]
+        inspector.reload()
+        try await waitUntil("three photos must include the member without attribution") { !inspector.isLoading }
+        try expect(!inspector.rows.contains { ["博主", "来源平台", "来源帖子", "帖子标题/描述"].contains($0.key) }
+            && inspector.rows.contains { $0.key == "显示尺寸" && $0.value == "19 × 11 像素" }
+            && inspector.sectionGrids[.capture] != nil && inspector.sectionGrids[.post] == nil,
+            "missing attribution in any selected photo must hide those fields and empty headings without losing shared metadata")
+        try expectCleanInspectorForm(inspector, context: "three photos with missing attribution")
+        try tiny.representation(using: .png, properties: [:])!.write(to: commonPhotoB)
+        model.selectedDownloadItemIDs = [commonPhotoAID, commonPhotoBID]
+        inspector.reload()
+        try await waitUntil("replacement bytes in a multi-selection must finish inspecting") { !inspector.isLoading }
+        try expect(!inspector.rows.contains { $0.key == "显示尺寸" || $0.section == .capture },
+            "different dimensions and missing EXIF in one replacement must invalidate formerly common media fields")
+        try writeJPEGImage(commonPhotoB, properties: cameraProperties)
+        inspector.reload()
+        try expect(inspector.isLoading, "a changed member of an unchanged selection must invalidate the aggregate cache")
+        model.selectedDownloadItemIDs = [pairID]
+        inspector.reload()
+        try await Task.sleep(for: .milliseconds(80))
+        try expect(!inspector.isLoading && inspector.rows.contains { $0.key == "博主" && $0.value == "来源博主" },
+            "a cancelled multi-selection load must never replace a later cached single selection")
+        model.selectedDownloadItemIDs = [commonPhotoAID, commonPhotoBID]
+        inspector.reload()
+        try tiny.representation(using: .png, properties: [:])!.write(to: commonPhotoB)
+        try await waitUntil("a member changed during a multi-selection read must resolve its latest revision") { !inspector.isLoading }
+        try expect(!inspector.rows.contains { $0.key == "显示尺寸" || $0.section == .capture },
+            "an in-flight revision change must not display stale shared dimensions or camera metadata")
+        pass("two and three photos share only matching metadata, restore single selections and invalidate changed or cancelled members")
+
+        model.downloadVideos = [movie]
+        model.downloadFilter = .notComposed
+        model.downloadFilter = .all
+        model.selectedDownloadItemIDs = [commonPhotoAID, "video:\(movie.standardizedFileURL.path)"]
+        inspector.reload()
+        try await waitUntil("a mixed photo/video selection must finish inspecting") { !inspector.isLoading }
+        try expect(!inspector.rows.contains { [.image, .video, .capture].contains($0.section) }
+            && inspector.sectionGrids[.image] == nil && inspector.sectionGrids[.video] == nil,
+            "a photo and standalone video must not display media properties belonging to only one selected item")
+        pass("mixed photo/video selections do not borrow kind-specific metadata")
         model.selectedDownloadItemIDs = []
         try await waitUntil("empty selection must clear per-file fields") { inspector.rows.isEmpty }
         try expect(defaults.data(forKey: "CompletedRecords.v1") == completedSentinel
@@ -970,11 +1154,31 @@ private final class SidebarReloadCounter: NSObject, NSTableViewDataSource {
         mapInspector.reload()
         mapModel.selectedDownloadItemIDs = [locatedID, relocatedID]
         mapInspector.reload()
-        try await Task.sleep(for: .milliseconds(50))
-        try expect(mapInspector.rows.isEmpty && mapInspector.location == nil && currentMap() == nil,
-            "multi-selection and cancelled loads must clear the previous file's location")
+        try await waitUntil("photos at the same exact GPS must display their shared native map") {
+            !mapInspector.isLoading && mapInspector.location == otherPhotoLocation && currentMap() != nil
+        }
+        try expect(currentMap()?.annotations.count == 1
+            && currentMap()?.annotations.first?.coordinate.latitude == otherPhotoLocation.latitude
+            && mapInspector.rows.contains { $0.key == "光圈" && $0.value == "f/1.78" },
+            "a common location must use the same one-pin MapKit card and shooting-information sections as a single photo")
+        try expectCleanInspectorForm(mapInspector, context: "photos sharing exact GPS")
         try writeGPSImage(locatedImage, latitude: 33.865, longitude: 151.2094, latitudeRef: "S", longitudeRef: "E")
-        pass("native MapKit pin, rounded responsive layout, section order, cache invalidation and selection clearing")
+        mapInspector.reload()
+        try expect(mapInspector.location == nil && currentMap() == nil,
+            "a member changed during multi-selection must immediately remove an unverified shared pin")
+        try await waitUntil("different shooting locations must finish inspecting") { !mapInspector.isLoading }
+        try expect(mapInspector.location == nil && currentMap() == nil && mapInspector.sectionGrids[.capture] != nil,
+            "different GPS must remove the entire location section while retaining shared camera settings")
+        mapModel.selectedDownloadItemIDs = [locatedID, photoID]
+        mapInspector.reload()
+        try expect(!mapInspector.isLoading && mapInspector.location == nil && currentMap() == nil
+            && !descendants(mapInspector.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "位置" },
+            "one photo without GPS must prevent a cached located photo from lending its pin or heading to the selection")
+        mapModel.selectedDownloadItemIDs = [locatedID]
+        mapInspector.reload()
+        try expect(!mapInspector.isLoading && mapInspector.location == photoLocation && currentMap() != nil,
+            "returning from common information to one cached photo must restore its own native map immediately")
+        pass("native MapKit pin, rounded layout, section order and exact common-location visibility with cache invalidation")
         if CommandLine.arguments.contains("--inspector-location-preview") {
             mapModel.selectedDownloadItemIDs = [locatedID]
             mapInspector.reload()

@@ -24,11 +24,13 @@ final class ThumbnailZoomTests: XCTestCase {
     }
 
     private func pinch(_ zoom: ThumbnailGridZoomController, to position: CGFloat) {
-        let width = zoom.layout.viewportSize.width, metrics = zoom.layout.metrics
-        let before = ZoomGeometry.side(width: width, position: zoom.position, metrics: metrics)
-        let after = ZoomGeometry.side(width: width, position: position, metrics: metrics)
-        zoom.changeGesture(magnification: 2 * (after - before) / zoom.gesture!.startSide)
-        zoom.displayFrame(at: CACurrentMediaTime())
+        let gesture = zoom.gesture!
+        let before = ZoomDynamics.normalizedWidth(position: gesture.position)
+        let after = ZoomDynamics.normalizedWidth(position: position)
+        // Geometry checks use a stationary input sample. Tests below provide
+        // advancing timestamps when release velocity is part of the behavior.
+        zoom.changeGesture(magnification: 2 * (after - before) / gesture.startWidth, at: 0)
+        zoom.displayFrame(at: CACurrentMediaTime() + ZoomDynamics.smoothingDuration)
     }
 
     func testEachPageRestoresItsColumnsBeforeLoadingAndRetainsThemAcrossResize() async {
@@ -469,7 +471,7 @@ final class ThumbnailZoomTests: XCTestCase {
     func testEndpointResistanceAndImmediateReversalRemainInteractive() {
         var small = ZoomGesture(position: 0, width: 1000)
         for _ in 0..<1000 { small.update(magnification: -0.2, width: 1000) }
-        XCTAssertGreaterThan(small.elasticScale, ZoomGesture.minimumElasticScale)
+        XCTAssertGreaterThan(small.elasticScale, 0.8, "Sustained inward input cannot collapse the smallest grid")
         XCTAssertLessThan(small.elasticScale, 0.95)
         let compressed = small.elasticScale
         small.update(magnification: 0.2, width: 1000)
@@ -483,20 +485,204 @@ final class ThumbnailZoomTests: XCTestCase {
         XCTAssertLessThan(large.elasticScale, extended)
     }
 
-    func testNativeMagnificationDeltasProduceLinearSizeAndIgnoreEventPartitioning() {
+    func testNativeMagnificationDeltasProduceLinearNormalizedWidthAndIgnoreEventPartitioning() {
         let width: CGFloat = 1000
-        var single = ZoomGesture(position: 0, width: width)
-        var split = ZoomGesture(position: 0, width: width)
-        single.update(magnification: 1, width: width)
-        for _ in 0..<20 { split.update(magnification: 0.05, width: width) }
-        let expected = single.startSide * 1.5
-        XCTAssertEqual(ZoomGeometry.side(width: width, position: single.position), expected, accuracy: 0.0001)
-        XCTAssertEqual(ZoomGeometry.side(width: width, position: split.position), expected, accuracy: 0.0001)
-        split.update(magnification: -0.4, width: width)
-        XCTAssertEqual(ZoomGeometry.side(width: width, position: split.position), split.startSide * 1.3, accuracy: 0.0001)
-        split.update(magnification: -0.6, width: width)
+        var single = ZoomGesture(position: 0, width: width, at: 10)
+        var split = ZoomGesture(position: 0, width: width, at: 10)
+        single.update(magnification: 1, width: width, at: 11)
+        for event in 1...20 { split.update(magnification: 0.05, width: width, at: 10 + Double(event) / 20) }
+        let expected = single.startWidth * 1.5
+        XCTAssertEqual(ZoomDynamics.normalizedWidth(position: single.position), expected, accuracy: 0.0001)
+        XCTAssertEqual(ZoomDynamics.normalizedWidth(position: split.position), expected, accuracy: 0.0001)
+        split.update(magnification: -0.4, width: width, at: 12)
+        XCTAssertEqual(ZoomDynamics.normalizedWidth(position: split.position), split.startWidth * 1.3, accuracy: 0.0001)
+        split.update(magnification: -0.6, width: width, at: 13)
         XCTAssertEqual(split.position, 0, accuracy: 0.0001)
         XCTAssertEqual(split.elasticScale, 1, accuracy: 0.0001)
+    }
+
+    func testFinitePinchSmoothingKeepsUnfinishedInputWhenDirectionReverses() {
+        var motion = ZoomMotion(value: 0)
+        motion.move(to: 1, at: 10)
+        XCTAssertEqual(motion.advance(at: 10), 0, accuracy: 0.000001, "The first input does not jump the displayed size")
+        XCTAssertEqual(motion.advance(at: 10 + 1.0 / 60), 0.5, accuracy: 0.000001)
+        motion.move(to: 0, at: 10 + 1.0 / 60)
+        XCTAssertEqual(motion.advance(at: 10 + 1.0 / 60), 0.5, accuracy: 0.000001,
+                       "Reversal retains the unfinished prior input rather than resetting the presentation")
+        XCTAssertEqual(motion.advance(at: 10 + 1.0 / 30), 0.5, accuracy: 0.000001)
+        XCTAssertEqual(motion.advance(at: 10.051), 0, accuracy: 0.000001)
+        XCTAssertFalse(motion.isAnimating, "Input smoothing has a finite end and can release the display clock")
+    }
+
+    func testBurstInputSmoothingDoesNotDependOnEventPartitioningOrRefreshCadence() {
+        var single = ZoomMotion(value: 0)
+        var burst = ZoomMotion(value: 0)
+        single.move(to: 2, at: 10)
+        burst.move(to: 1, at: 10)
+        burst.move(to: 2, at: 10)
+        for time in [10.0, 10 + 1.0 / 120, 10 + 1.0 / 60, 10.04] {
+            XCTAssertEqual(single.advance(at: time), burst.advance(at: time), accuracy: 0.000001)
+        }
+        var frequent = ZoomMotion(value: 2)
+        var skipped = ZoomMotion(value: 2)
+        frequent.move(to: 3, at: 20, velocity: 0.5)
+        skipped.move(to: 3, at: 20, velocity: 0.5)
+        for frame in 0..<24 { _ = frequent.advance(at: 20 + Double(frame) / 120) }
+        XCTAssertEqual(frequent.advance(at: 20.2), skipped.advance(at: 20.2), accuracy: 0.000001,
+                       "An interrupted display clock samples elapsed motion without slowing down the spring")
+    }
+
+    func testReleasePreservesDisplayedSizeAndOutstandingInputVelocity() {
+        var motion = ZoomMotion(value: 0)
+        motion.move(to: 1, at: 10)
+        let beforeRelease = motion.advance(at: 10.01)
+        motion.move(to: 2, at: 10.01, velocity: 0)
+        XCTAssertEqual(motion.advance(at: 10.01), beforeRelease, accuracy: 0.000001,
+                       "Release must not jump ahead to the unsmoothed finger target")
+        let shortlyAfter = motion.advance(at: 10.01001)
+        XCTAssertEqual((shortlyAfter - beforeRelease) / 0.00001, 30, accuracy: 0.01,
+                       "Unfinished linear input keeps moving while the release spring starts")
+        XCTAssertGreaterThan(motion.advance(at: 10.05), beforeRelease)
+        XCTAssertEqual(motion.advance(at: 12), 2, accuracy: 0.000001)
+        XCTAssertFalse(motion.isAnimating)
+    }
+
+    func testReleaseSpringCarriesInitialVelocityAndSurvivesItsFirstZeroCrossing() {
+        var outward = ZoomMotion(value: 1)
+        var inward = ZoomMotion(value: 1)
+        outward.move(to: 2, at: 10, velocity: 3)
+        inward.move(to: 2, at: 10, velocity: -3)
+        XCTAssertEqual(outward.advance(at: 10), 1, accuracy: 0.000001)
+        XCTAssertEqual(inward.advance(at: 10), 1, accuracy: 0.000001)
+        XCTAssertGreaterThan(outward.advance(at: 10.01), 1)
+        XCTAssertLessThan(inward.advance(at: 10.01), 1)
+        var energetic = ZoomMotion(value: 1)
+        energetic.move(to: 2, at: 10, velocity: 30)
+        let beforeCrossing = energetic.advance(at: 10.05)
+        let afterCrossing = energetic.advance(at: 10.07)
+        XCTAssertLessThan(beforeCrossing, 2)
+        XCTAssertGreaterThan(afterCrossing, 2)
+        XCTAssertTrue(energetic.isAnimating, "Crossing the destination is not completion while the spring still has momentum")
+        XCTAssertEqual(energetic.advance(at: 12), 2, accuracy: 0.000001)
+        XCTAssertFalse(energetic.isAnimating)
+    }
+
+    func testFastReleaseProjectsFartherThanSlowInputAndCancellationRestoresTheInitialPreset() {
+        let width: CGFloat = 1000
+        var slow = ZoomGesture(position: 0, width: width, at: 10)
+        var fast = ZoomGesture(position: 0, width: width, at: 10)
+        let delta = 2 * (ZoomDynamics.normalizedWidth(position: 1.1) / slow.startWidth - 1)
+        slow.update(magnification: delta / 2, width: width, at: 10.5)
+        slow.update(magnification: delta / 2, width: width, at: 11)
+        fast.update(magnification: delta / 2, width: width, at: 10.005)
+        fast.update(magnification: delta / 2, width: width, at: 10.01)
+        XCTAssertEqual(slow.position, fast.position, accuracy: 0.000001)
+        XCTAssertGreaterThan(fast.velocity, slow.velocity)
+        XCTAssertGreaterThan(fast.destination(), slow.destination(), "Release momentum affects the snapped preset")
+        XCTAssertEqual(fast.destination(cancelled: true), 0)
+    }
+
+    func testZeroMagnificationBeganSampleSeedsVelocityBeforeTheFirstMovingEvent() {
+        let width: CGFloat = 1000
+        var seeded = ZoomGesture(position: 1, width: width, at: 10)
+        var unseeded = ZoomGesture(position: 1, width: width, at: 10)
+        seeded.update(magnification: 0, width: width, at: 10)
+        XCTAssertEqual(seeded.velocity, 0)
+        seeded.update(magnification: 0.2, width: width, at: 10.01)
+        unseeded.update(magnification: 0.2, width: width, at: 10.01)
+        XCTAssertGreaterThan(seeded.velocity, 0,
+                             "A stationary began event provides the first sample so the first movement contributes velocity")
+        XCTAssertEqual(unseeded.velocity, 0, "An unseeded first sample does not invent movement before it began")
+        let movingVelocity = seeded.velocity
+        seeded.update(magnification: 0, width: width, at: 10.02)
+        XCTAssertEqual(seeded.velocity, movingVelocity, "Unchanged input does not replace the last measured release velocity")
+    }
+
+    func testRegrabbingElasticEndpointsPreservesTheDisplayedSizeAndReversesWithoutAJump() {
+        let width: CGFloat = 1000
+        for (level, input) in [(0, CGFloat(-0.8)), (3, CGFloat(1.2))] {
+            var first = ZoomGesture(position: CGFloat(level), width: width, at: 10)
+            first.update(magnification: input, width: width, at: 10.1)
+            let shownSide = ZoomGeometry.side(width: width, position: first.position) * first.elasticScale
+            var regrabbed = ZoomGesture(position: first.position, width: width, elasticScale: first.elasticScale, at: 11)
+            regrabbed.update(magnification: 0, width: width, at: 11.1)
+            let regrabbedSide = ZoomGeometry.side(width: width, position: regrabbed.position) * regrabbed.elasticScale
+            XCTAssertEqual(regrabbedSide, shownSide, accuracy: 0.000001)
+            regrabbed.update(magnification: input > 0 ? -0.1 : 0.1, width: width, at: 11.2)
+            let reversedSide = ZoomGeometry.side(width: width, position: regrabbed.position) * regrabbed.elasticScale
+            if input > 0 { XCTAssertLessThan(reversedSide, regrabbedSide) }
+            else { XCTAssertGreaterThan(reversedSide, regrabbedSide) }
+            XCTAssertEqual(regrabbed.destination(cancelled: true), CGFloat(level))
+        }
+    }
+
+    func testReleaseAndRegrabUseThePresentedFrameWhileFingerInputIsStillSmoothing() throws {
+        let (grid, _, window) = fixture(count: 71)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let index = 63
+        let frame = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
+                                          metrics: zoom.layout.metrics)
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        zoom.beginGesture(at: point, time: 10)
+        zoom.changeGesture(magnification: 0.2, at: 10)
+        zoom.displayFrame(at: 10.012)
+        let held = try XCTUnwrap(zoom.overlay.focalFrames[index])
+        XCTAssertGreaterThan(held.width, frame.width)
+        let raw = try XCTUnwrap(zoom.gesture)
+        let rawSide = ZoomGeometry.side(width: zoom.layout.viewportSize.width, position: raw.position,
+                                        metrics: zoom.layout.metrics) * raw.elasticScale
+        XCTAssertLessThan(held.width, rawSide, "The presented frame is still catching up within the finite input window")
+        zoom.endGesture(at: 10.012)
+        zoom.displayFrame(at: 10.012)
+        let released = try XCTUnwrap(zoom.overlay.focalFrames[index])
+        XCTAssertEqual(released.width, held.width, accuracy: 0.000001,
+                       "Release keeps the shown frame instead of exposing the raw target")
+        XCTAssertEqual(released.midX, held.midX, accuracy: 0.000001)
+        XCTAssertEqual(released.midY, held.midY, accuracy: 0.000001)
+        zoom.beginGesture(at: point, time: 10.012)
+        let regrabbed = try XCTUnwrap(zoom.overlay.focalFrames[index])
+        XCTAssertEqual(regrabbed.width, held.width, accuracy: 0.000001,
+                       "A new pinch begins from the currently displayed size")
+        XCTAssertEqual(regrabbed.midX, held.midX, accuracy: 0.000001)
+        XCTAssertEqual(regrabbed.midY, held.midY, accuracy: 0.000001)
+        zoom.changeGesture(magnification: -0.05, at: 10.020)
+        zoom.displayFrame(at: 10.030)
+        XCTAssertLessThan(try XCTUnwrap(zoom.overlay.focalFrames[index]).width, held.width,
+                          "Reversed input takes effect within the same smoothing window")
+        zoom.endGesture(cancelled: true, at: 10.030)
+        zoom.displayFrame(at: 20)
+        XCTAssertEqual(zoom.layout.spec.level, 2)
+        XCTAssertNil(zoom.plan)
+    }
+
+    func testRegrabDoesNotBacktrackAfterTheDisplayClockSamplesAFutureTargetTimestamp() throws {
+        let (grid, _, window) = fixture(count: 71)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        let index = 63
+        let frame = zoom.layout.spec.frame(index: index, width: zoom.layout.viewportSize.width,
+                                          metrics: zoom.layout.metrics)
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        zoom.beginGesture(at: point, time: 10)
+        zoom.changeGesture(magnification: 0.2, at: 10)
+        zoom.displayFrame(at: 10.008)
+        zoom.endGesture(at: 10.009)
+        // CADisplayLink's targetTimestamp may lie after the next input event.
+        zoom.displayFrame(at: 10.020)
+        let held = try XCTUnwrap(zoom.overlay.focalFrames[index])
+        zoom.beginGesture(at: point, time: 10.012)
+        let regrabbed = try XCTUnwrap(zoom.overlay.focalFrames[index])
+        XCTAssertEqual(regrabbed.width, held.width, accuracy: 0.000001,
+                       "Regrab freezes the shown size instead of evaluating the old motion at an earlier time")
+        XCTAssertEqual(regrabbed.midX, held.midX, accuracy: 0.000001)
+        XCTAssertEqual(regrabbed.midY, held.midY, accuracy: 0.000001)
+        zoom.changeGesture(magnification: 0, at: 10.012)
+        zoom.displayFrame(at: 10.020)
+        XCTAssertEqual(try XCTUnwrap(zoom.overlay.focalFrames[index]).width, held.width, accuracy: 0.000001)
+        zoom.endGesture(cancelled: true, at: 10.021)
+        zoom.displayFrame(at: 20)
+        XCTAssertNil(zoom.plan)
     }
 
     func testNativeDisplayLinkCoalescesBurstInputAndCompletesTheHandoff() async throws {
@@ -513,10 +699,14 @@ final class ThumbnailZoomTests: XCTestCase {
                        "A burst of input must update state without rebuilding ten layer trees in one frame")
         try await Task.sleep(for: .milliseconds(80))
         let shown = try XCTUnwrap(zoom.overlay.focalFrames[focal])
-        XCTAssertEqual(shown.width, initial.width * 1.2, accuracy: 0.001,
+        let expected = ZoomDynamics.presentation(coordinate: ZoomDynamics.coordinate(width: ZoomDynamics.normalizedWidth(position: 2) * 1.2),
+                                                width: zoom.layout.viewportSize.width, metrics: zoom.layout.metrics)
+        let expectedSide = ZoomGeometry.side(width: zoom.layout.viewportSize.width, position: expected.position,
+                                             metrics: zoom.layout.metrics) * expected.elasticScale
+        XCTAssertEqual(shown.width, expectedSide, accuracy: 0.001,
                        "The native refresh clock must present the most recent input without a synthetic tick")
         zoom.endGesture()
-        try await Task.sleep(for: .milliseconds(600))
+        try await Task.sleep(for: .milliseconds(1200))
         XCTAssertNil(zoom.plan)
         XCTAssertTrue(zoom.overlay.isHidden)
         XCTAssertFalse(zoom.cellsSuppressed)

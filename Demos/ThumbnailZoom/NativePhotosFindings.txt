@@ -1,4 +1,70 @@
-macOS 照片缩略图缩放反推记录 — 2026-10-06
+macOS 照片缩略图缩放反推记录 — 2026-10-11
+
+版本 1.1；更新日期：2026-10-11。
+变更摘要：补齐普通松手归位的弹簧、速度投影、增量平滑、动态坐标及端点阻力。
+以下本次核验结论修正后文早期的曲线近似，早期证据保留以便追溯。
+
+2026-10-11 核验：Photos 12.0 (911.0.134)，macOS 27.0.1 (26A434)。
+只读解码本机 GridZero、PhotosUIFoundation、Tungsten；独立辅助进程仅解析
+共享缓存的元数据与常量。未注入 Photos、未访问图库、未创建私有布局实例。
+HERMES 的实现使用公开 AppKit / Core Animation API 和独立数学组件。
+框架默认参数与实际方法分支已确认；Photos 当前实例配置及物理触控板力度未测量。
+
+1. 动态列宽 w=1/列数，z=log10(1+1000*w)，不是像素列宽/容器宽。
+   setAllowedColumns: 0x24CA4F6C4–6CC 明确计算倒数。
+   HERMES 9/7/5/3 档对应 1/9、1/7、1/5、1/3，再映射回原有间距和像素布局。
+
+2. 原生累计 magnification 的相邻差值以 .5 增益加到手势 scale，最低 .001。
+   handleMagnification: 0x24CA32AF8–B58；scaleVelocity 只标记最后输入方向 ±.1，
+   不表示手指压力。公开 NSMagnificationGestureRecognizer 也未提供双指压力值。
+
+3. 跟手默认平滑 1/30 秒，曲线线性。每次变化附加 oldTarget-newTarget 的残量，
+   显示值为新目标加所有未完成残量；不是每次重启的指数滤波。
+   _updateZoomState 0x24CA51598–5162C 与 PXValueDefaultAnimation.currentValue
+   0x2848F7800–78CC。松手追加弹簧时保留未完成线性残量，setValue:animateImmediately:
+   0x284941E18–F84 仅在无动画模式清空残量。
+
+4. 速度使用未施加端点阻力的 z；采样间隔 >.003 秒、变化 >约 .00001 才更新，
+   第一份样本建立基线，其后 v=.5*旧速度+.5*Δz/Δt。
+   _updatePinchVelocity 0x24CA50AF0–C20。
+   默认减速率 992*.001=.992，投影 z+v*.124；按 z 中最近端点选择释放档位。
+   PXProjectValueWithDecelerationRate 0x28495B1B4。
+   如果投影仍落回起点，最后输入方向与累计变化同向时至少前进一档；无方向时
+   累计宽度变化超过10%也前进一档。_nextColumnIndex... 0x24CA4E894–93C。
+
+5. 普通松手也采用质量1、刚度150、阻尼比1的临界阻尼弹簧，包含输入速度。
+   _updateZoomState 0x24CA51490–51504。残量 x0=oldTarget-newTarget，
+   x(t)=[x0+(sqrt(150)*x0+v0)*t]*exp(-sqrt(150)*t)，v0 没有反号。
+   PXValueSpringAnimation.init 0x2848F7B88–BA0，currentValue 0x2848F7BDC–BF4。
+   动态精度 epsilon=.0001（log 坐标），不是统一 .3 秒 easeInOut。
+   HERMES 根据实际残量结束，并保留连续精度以避免末端量化跳变。
+
+6. 端点阻力施加在动画呈现 z 上，再还原 w：bound±s*ln(1+distance/s)。
+   放大 s=.5；缩小实际 s=5*.001=.005。PXSoftClamp 0x28495B120–198，
+   调用 0x24CA518BC–8D4 / 0x24CA5190C–92C。
+   HERMES 预取覆盖由实际窗口、间距和最小弹性尺寸共同计算。
+
+7. PXStepZoomInteraction 的独立 transition 是 .3 秒 curve0；Tungsten 解码
+   curve0 为线性（0x29E206F64–F70），curve1 为二次 easeInOut。它与上述连续列宽
+   弹簧是不同路径，不能用该 .3 秒证明普通松手也采用同一时间与曲线。
+
+性能验证（2026-10-11，同机、隔离合成图片、公开原生窗口）：
+- Time Profiler 定位到 NSCollectionView 对已给定方形尺寸的单元格重复调用
+  preferredLayoutAttributesFitting → systemLayoutSizeFittingSize → NSISEngine。
+- 使用公开 NSCollectionViewElement.preferredLayoutAttributesFitting 返回网格
+  已给定的属性，省去重复自适应尺寸计算；现有原生标签约束和外观继续保留。
+- 独立 A/B：70 项，7→9，首次加7次重访。重访布局中位耗时 11.780→5.625 ms；
+  重访完整交接 18.450→13.837 ms；首次完整交接 34.834→33.692 ms。
+  单元格首次创建仍有额外开销，不能据此宣称零掉帧。
+- 最终候选：70/1500 项、六个相邻方向、内部/最新位置及冷暖缓存共28阶段，
+  全部完成交接，无外部输入干扰，无最终空图。相同配置下，原生交接最慢
+  29.501→17.113 ms，超过16.67 ms的阶段7→2；刷新回调最长间隔33.296→25.020 ms。
+  这是本次合成图片测量，显示输入已按各版本的实际尺度映射，不能保证所有媒体和设备相同。
+- 性能探针用未平滑目标生成输入，避免把呈现延迟反馈成额外手势力度。
+  主线程工作与刷新回调间隔分别记录；它们不能当作屏幕实际 FPS。
+物理双指手感和 GPU 实际掉帧仍需在目标设备上直接验收。
+
+---------------- 2026-10-06 及后续早期记录 ----------------
 
 环境：本机 macOS 27.0.1 (26A434)。参考用户观察、已安装的 Photos.app
 以及本机系统框架。只读分析；没有访问照片图库数据库，没有注入 Photos

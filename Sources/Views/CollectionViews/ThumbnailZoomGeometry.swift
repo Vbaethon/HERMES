@@ -268,61 +268,160 @@ struct ZoomAlphaPresentation {
     }
 }
 
+/// Photos' zoom animator operates on logarithmic reciprocal column counts.
+/// Keep its dynamics independent of the viewport's pixel size and grid gaps.
+enum ZoomDynamics {
+    static let smoothingDuration: TimeInterval = 1.0 / 30
+    static let epsilon: CGFloat = 0.0001
+    static let projectionDuration: CGFloat = 0.124 // .992 / (1 - .992) / 1000
+    static let widths = ZoomGeometry.columns.map { 1 / CGFloat($0) }
+
+    static func coordinate(width: CGFloat) -> CGFloat { log10(1 + 1000 * max(0, width)) }
+    static func width(coordinate: CGFloat) -> CGFloat { max(0, (pow(10, coordinate) - 1) / 1000) }
+    static func normalizedWidth(position: CGFloat) -> CGFloat {
+        let p = ZoomGeometry.clamped(position), lower = Int(floor(p)), upper = min(3, lower + 1)
+        return ZoomGeometry.mix(widths[lower], widths[upper], p - CGFloat(lower))
+    }
+    static func position(width: CGFloat) -> CGFloat {
+        if width <= widths[0] { return 0 }
+        for level in 0..<3 where width <= widths[level + 1] {
+            return CGFloat(level) + (width - widths[level]) / (widths[level + 1] - widths[level])
+        }
+        return 3
+    }
+    static func nearestLevel(coordinate: CGFloat) -> Int {
+        (0..<4).min { abs(Self.coordinate(width: widths[$0]) - coordinate) < abs(Self.coordinate(width: widths[$1]) - coordinate) }!
+    }
+    static func softClamp(_ value: CGFloat) -> CGFloat {
+        let lower = coordinate(width: widths[0]), upper = coordinate(width: widths[3])
+        if value < lower { return lower - 0.005 * log1p((lower - value) / 0.005) }
+        if value > upper { return upper + 0.5 * log1p((value - upper) / 0.5) }
+        return value
+    }
+    static func unclamped(_ value: CGFloat) -> CGFloat {
+        let lower = coordinate(width: widths[0]), upper = coordinate(width: widths[3])
+        if value < lower { return lower - 0.005 * expm1((lower - value) / 0.005) }
+        if value > upper { return upper + 0.5 * expm1((value - upper) / 0.5) }
+        return value
+    }
+    static func presentation(coordinate: CGFloat, width: CGFloat, metrics: ZoomMetrics) -> (position: CGFloat, elasticScale: CGFloat) {
+        let normalized = Self.width(coordinate: coordinate)
+        let position = position(width: normalized)
+        let side = max(1, (width - metrics.left - metrics.right + metrics.gap) * normalized - metrics.gap)
+        let bounded = ZoomGeometry.side(width: width, position: position, metrics: metrics)
+        return (position, side / bounded)
+    }
+    static func coordinate(position: CGFloat, elasticScale: CGFloat, width: CGFloat, metrics: ZoomMetrics) -> CGFloat {
+        let side = ZoomGeometry.side(width: width, position: position, metrics: metrics) * elasticScale
+        return coordinate(width: (side + metrics.gap) / max(1, width - metrics.left - metrics.right + metrics.gap))
+    }
+}
+
+/// Each input adds a finite linear residual; release appends a spring without
+/// discarding unfinished input. A single display clock samples their sum.
+struct ZoomMotion {
+    private struct Residual {
+        let value: CGFloat
+        let velocity: CGFloat?
+        let start: TimeInterval
+        func sample(at time: TimeInterval) -> CGFloat {
+            let t = max(0, time - start)
+            if let velocity {
+                let omega = sqrt(150.0)
+                return (value + (CGFloat(omega) * value + velocity) * CGFloat(t)) * CGFloat(exp(-omega * t))
+            }
+            return value * CGFloat(max(0, 1 - t / ZoomDynamics.smoothingDuration))
+        }
+        func finished(at time: TimeInterval) -> Bool {
+            if velocity == nil { return time - start >= ZoomDynamics.smoothingDuration }
+            // Do not finish at the first zero crossing of an energetic spring.
+            return time > start && abs(sample(at: time)) < ZoomDynamics.epsilon
+                && abs(sample(at: time + 1.0 / 120)) < ZoomDynamics.epsilon
+        }
+    }
+    private(set) var target: CGFloat
+    private var residuals: [Residual] = []
+    var isAnimating: Bool { !residuals.isEmpty }
+    init(value: CGFloat) { target = value }
+    mutating func move(to value: CGFloat, at time: TimeInterval, velocity: CGFloat? = nil) {
+        residuals.removeAll { $0.finished(at: time) }
+        if value != target || velocity != nil {
+            residuals.append(Residual(value: target - value, velocity: velocity, start: time))
+            target = value
+        }
+    }
+    mutating func advance(at time: TimeInterval) -> CGFloat {
+        residuals.removeAll { $0.finished(at: time) }
+        return target + residuals.reduce(0) { $0 + $1.sample(at: time) }
+    }
+}
+
 struct ZoomGesture {
-    private static let enlargedResistance: CGFloat = 0.32
-    private static let reducedResistance: CGFloat = 5
-    static let minimumElasticScale: CGFloat = 1 - 0.5 / reducedResistance
+    // The smallest raw input is .001; the native logarithmic soft clamp stays
+    // finite even after a long inward pinch.
+    static func minimumElasticScale(width: CGFloat, metrics: ZoomMetrics = .demo) -> CGFloat {
+        let minimum = ZoomDynamics.softClamp(ZoomDynamics.coordinate(width: ZoomDynamics.widths[0] * 0.001))
+        return ZoomDynamics.presentation(coordinate: minimum, width: width, metrics: metrics).elasticScale
+    }
+    static var minimumElasticScale: CGFloat { minimumElasticScale(width: 1000) }
     let metrics: ZoomMetrics
     let startPosition: CGFloat
     let startSide: CGFloat
+    let startWidth: CGFloat
     private var inputScale: CGFloat = 1
+    private var sampleTime: TimeInterval
+    private var sampleCoordinate: CGFloat
+    private var hasVelocitySample = false
+    private var scaleVelocity: CGFloat = 0
+    private(set) var coordinate: CGFloat
+    private(set) var velocity: CGFloat = 0
     var position: CGFloat
     private(set) var elasticScale: CGFloat = 1
 
-    init(position: CGFloat, width: CGFloat, elasticScale: CGFloat = 1, metrics: ZoomMetrics = .demo) {
+    init(position: CGFloat, width: CGFloat, elasticScale: CGFloat = 1, metrics: ZoomMetrics = .demo, at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         self.metrics = metrics
         startPosition = position
         self.position = position
         startSide = ZoomGeometry.side(width: width, position: position, metrics: metrics)
+        startWidth = ZoomDynamics.normalizedWidth(position: position)
+        coordinate = ZoomDynamics.unclamped(ZoomDynamics.coordinate(position: position, elasticScale: elasticScale, width: width, metrics: metrics))
         self.elasticScale = elasticScale
-        if elasticScale != 1 {
-            if elasticScale > 1 {
-                let resistance = Self.enlargedResistance
-                inputScale = 1 + resistance * expm1((elasticScale - 1) / resistance)
-            } else {
-                let compression = min(1 - 0.000001, (1 - elasticScale) * Self.reducedResistance)
-                inputScale = max(0.001, 1 - compression / (1 - compression))
-            }
-        }
+        inputScale = max(0.001, ZoomDynamics.width(coordinate: coordinate) / startWidth)
+        sampleCoordinate = coordinate
+        sampleTime = 0
     }
 
-    mutating func update(magnification: CGFloat, width: CGFloat) {
+    mutating func update(magnification: CGFloat, width: CGFloat, at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard magnification.isFinite else { return }
-        // NSMagnificationGestureRecognizer reports a cumulative magnification.
-        // Its raw deltas add to the gesture's scale, with Photos' default 0.5
-        // damping. Multiplying ratios and taking their square root changes the
-        // response as the fingers move farther from their starting distance.
+        // AppKit delivers cumulative magnification. Deltas add with Photos'
+        // default .5 gain, independent of the number of delivered events.
         inputScale = max(0.001, inputScale + magnification * 0.5)
-        let maximum = ZoomGeometry.side(width: width, columns: 3, metrics: metrics) / startSide
-        let minimum = ZoomGeometry.side(width: width, columns: 9, metrics: metrics) / startSide
-        let bounded = min(maximum, max(minimum, inputScale))
-        position = inputScale >= maximum ? 3 : (inputScale <= minimum ? 0 :
-            ZoomGeometry.position(forSide: startSide * bounded, width: width, metrics: metrics))
-        let excess = inputScale / bounded - 1
-        if excess >= 0 {
-            let resistance = Self.enlargedResistance
-            elasticScale = 1 + resistance * log1p(excess / resistance)
-        } else {
-            // The small-grid endpoint is deliberately much stiffer. It tends
-            // toward a finite compression, so prolonged input cannot collapse
-            // the grid to zero. This is continuous resistance, not a hard clamp.
-            let pull = -excess
-            elasticScale = 1 - (pull / (1 + pull)) / Self.reducedResistance
+        coordinate = ZoomDynamics.coordinate(width: startWidth * inputScale)
+        scaleVelocity = magnification > 0 ? 0.1 : (magnification < 0 ? -0.1 : 0)
+        let presentation = ZoomDynamics.presentation(coordinate: ZoomDynamics.softClamp(coordinate), width: width, metrics: metrics)
+        position = presentation.position
+        elasticScale = presentation.elasticScale
+        let dt = time - sampleTime
+        if dt > 0.003, !hasVelocitySample || abs(coordinate - sampleCoordinate) > 0.00001 {
+            if hasVelocitySample { velocity = 0.5 * velocity + 0.5 * (coordinate - sampleCoordinate) / CGFloat(dt) }
+            hasVelocitySample = true
+            sampleCoordinate = coordinate
+            sampleTime = time
         }
     }
 
     func destination(cancelled: Bool = false) -> CGFloat {
-        cancelled ? startPosition.rounded() : position.rounded()
+        let initial = ZoomDynamics.nearestLevel(coordinate: ZoomDynamics.coordinate(width: startWidth))
+        if cancelled { return CGFloat(initial) }
+        let projected = ZoomDynamics.nearestLevel(coordinate: coordinate + velocity * ZoomDynamics.projectionDuration)
+        if projected != initial { return CGFloat(projected) }
+        let currentWidth = ZoomDynamics.width(coordinate: coordinate)
+        let direction = currentWidth > startWidth ? 1 : (currentWidth < startWidth ? -1 : 0)
+        if (scaleVelocity > 0 && direction > 0) || (scaleVelocity < 0 && direction < 0)
+            || (scaleVelocity == 0 && abs(currentWidth / startWidth - 1) > 0.1) {
+            return CGFloat(min(3, max(0, initial + direction)))
+        }
+        return CGFloat(initial)
     }
 }
 
