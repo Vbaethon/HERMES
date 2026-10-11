@@ -337,6 +337,42 @@ final class ThumbnailZoomTests: XCTestCase {
         XCTAssertEqual(grid.nsCollectionView.alphaValue, 1)
     }
 
+    func testDensePinchRestoresOriginalDetailWhenItsDirectionReverses() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("reversal.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1200, pixelsHigh: 1600,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+        let (grid, _, window) = fixture(count: 0)
+        defer { window.orderOut(nil) }
+        let scale = window.backingScaleFactor
+        let result = await SystemThumbnailProvider.shared.thumbnail(for: url, pointSize: 384, scale: scale, contentVersion: 7)
+        let detail = try XCTUnwrap(result.image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let small = try XCTUnwrap(SystemThumbnailProvider.shared.cachedThumbnail(for: url,
+            pointSize: 148, scale: scale, contentVersion: 7)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        grid.updateItems((0..<70).map { ThumbnailGridItem(id: "reversal-\($0)", url: url,
+            status: .finished, mediaKind: .photo, contentVersion: 7) }, animatingDifferences: false)
+        let zoom = grid.zoom!
+        zoom.zoom(to: 3)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
+        await Task.yield()
+        let focal = 67
+        let frame = zoom.layout.spec.frame(index: focal, width: zoom.layout.viewportSize.width, metrics: zoom.layout.metrics)
+        zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
+        XCTAssertTrue(zoom.overlay.image(at: focal) === detail)
+        pinch(zoom, to: 0)
+        XCTAssertTrue(zoom.overlay.image(at: focal) === small)
+        pinch(zoom, to: 3)
+        XCTAssertTrue(zoom.overlay.image(at: focal) === detail,
+                      "Reversing the same pinch must restore the already decoded detail")
+        zoom.endGesture(cancelled: true)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
+        await Task.yield()
+    }
+
     private func assertNewestRowIsFull(_ zoom: ThumbnailGridZoomController, file: StaticString = #filePath, line: UInt = #line) {
         let layout = zoom.layout, columns = ZoomGeometry.columns[layout.spec.level]
         let width = layout.viewportSize.width, metrics = layout.metrics
@@ -711,5 +747,39 @@ final class ThumbnailZoomTests: XCTestCase {
         XCTAssertTrue(zoom.overlay.isHidden)
         XCTAssertFalse(zoom.cellsSuppressed)
         XCTAssertFalse(zoom.badgesSuppressed)
+    }
+
+    func testRepeatedNativePresetChangesDoNotRevealRecycledArtwork() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("artwork.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 20, pixelsHigh: 30,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+        _ = await SystemThumbnailProvider.shared.thumbnail(for: url, pointSize: 384, scale: 2, contentVersion: 1)
+        let (grid, scroll, window) = fixture(count: 0)
+        defer { window.orderOut(nil) }
+        window.setContentSize(NSSize(width: 635, height: 620))
+        grid.updateItems((0..<77).map {
+            ThumbnailGridItem(id: "reuse-\($0)", url: url, status: .finished, mediaKind: .photo, contentVersion: 1)
+        }, animatingDifferences: false)
+        scroll.layoutSubtreeIfNeeded()
+        let zoom = grid.zoom!
+        zoom.zoom(to: 0)
+        try await Task.sleep(for: .milliseconds(1200))
+        for direction in [1, 1, 1, -1, -1, -1] {
+            zoom.step(direction)
+            try await Task.sleep(for: .milliseconds(1200))
+            XCTAssertNil(zoom.plan)
+            XCTAssertTrue(zoom.overlay.isHidden)
+            let active = Set(grid.nsCollectionView.visibleItems().map { ObjectIdentifier($0.view) })
+            let ghosts = grid.nsCollectionView.subviews.compactMap { $0 as? ThumbnailItemView }.filter {
+                !active.contains(ObjectIdentifier($0)) && !$0.isHidden && $0.alphaValue > 0
+                    && $0.imageView?.image != nil && $0.frame.intersects(grid.nsCollectionView.visibleRect)
+            }
+            XCTAssertTrue(ghosts.isEmpty, "AppKit's recycled cells must not draw old preset artwork: \(ghosts.map(\.frame))")
+        }
     }
 }

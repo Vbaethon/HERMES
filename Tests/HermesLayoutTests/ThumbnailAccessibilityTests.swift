@@ -22,7 +22,7 @@ final class ThumbnailAccessibilityTests: XCTestCase {
         let original = try XCTUnwrap(item.imageView?.image)
         XCTAssertTrue(view.compositionEffect.isRunning)
         XCTAssertEqual(view.compositionEffect.frame, item.imageView?.frame)
-        XCTAssertEqual(view.failureLabel?.isHidden, true)
+        XCTAssertNil(view.failureLabel, "A running composition does not need an error label")
         XCTAssertTrue((view.accessibilityValue() as? String)?.contains("正在合成") == true)
         XCTAssertNil(view.compositionEffect.hitTest(.zero))
         item.configure(with: url, status: .finished, mediaKind: .livePhoto)

@@ -66,6 +66,16 @@ final class ThumbnailDeletionTests: XCTestCase {
         cell.setZoomPresentationSuppressed(false)
         XCTAssertEqual(cell.view.alphaValue, 0.25, accuracy: 0.001,
                        "Finishing zoom must not resurrect an item that is disappearing")
+        // AppKit can park a reusable view with zero opacity without issuing
+        // another layout attribute. A repeated presentation update is a no-op.
+        cell.view.alphaValue = 0
+        cell.setZoomPresentationSuppressed(false)
+        XCTAssertEqual(cell.view.alphaValue, 0, "An unchanged zoom state must preserve AppKit's reuse visibility")
+        cell.prepareForReuse()
+        XCTAssertEqual(cell.view.alphaValue, 1, "AppKit resets the reusable view for its next layout")
+        attributes.alpha = 1
+        cell.apply(attributes)
+        XCTAssertEqual(cell.view.alphaValue, 1, "The next native layout owns the reusable cell's reveal")
     }
 
     func testDeletingDuringZoomReleasesTheOldPresentationBeforeTheSnapshot() async throws {

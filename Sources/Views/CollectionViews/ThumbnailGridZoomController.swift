@@ -92,6 +92,8 @@ final class ThumbnailGridZoomController: NSObject {
     private var handoffGeneration = 0
     private var imageTasks: [Int: Task<Void, Never>] = [:]
     private var imageGeneration = 0
+    private var smallArtwork: [(index: Int, small: CGImage, detail: CGImage)] = []
+    private var settledThumbnailWork: [() -> Void] = []
     private var needsDisplay = false
     private var badgeBitmaps: [String: (image: CGImage?, size: CGSize)] = [:]
     private var badgeBackingScale: CGFloat = 0
@@ -226,11 +228,13 @@ final class ThumbnailGridZoomController: NSObject {
 
     private func preparePlan(at point: CGPoint) {
         guard plan == nil, let anchor = nativeAnchor(at: point) else { return }
+        settledThumbnailWork.removeAll()
         cancelImageTasks()
         plan = ZoomPlan(anchor: anchor, base: layout.spec, width: layout.viewportSize.width,
                         height: layout.viewportSize.height, count: layout.count, metrics: layout.metrics)
         alpha = ZoomAlphaPresentation(level: layout.spec.level)
         overlay.setAssets(makeArtwork(), count: layout.count)
+        prepareSmallArtwork()
         overlay.setZoomBadgeOpacity(badgeOpacity)
         prefetchPlanImages()
     }
@@ -393,11 +397,16 @@ final class ThumbnailGridZoomController: NSObject {
         // Badge-only frames change four decoration parents and native labels;
         // they never rebuild the prepared image geometry or start new loads.
         if presentsZoom {
+            installSmallArtworkBatch()
             applyOverlay()
             if gesture == nil && animation == nil && motion?.isAnimating != true { commitPlan() }
         }
-        if plan == nil && !badgeAnimation.isAnimating { stopDisplayLink() }
-        else if !needsDisplay && animation == nil && motion?.isAnimating != true && !badgeAnimation.isAnimating {
+        if plan == nil {
+            for _ in 0..<min(2, settledThumbnailWork.count) { settledThumbnailWork.removeLast()() }
+        }
+        if plan == nil && !badgeAnimation.isAnimating && settledThumbnailWork.isEmpty { stopDisplayLink() }
+        else if !needsDisplay && animation == nil && motion?.isAnimating != true && !badgeAnimation.isAnimating
+                    && settledThumbnailWork.isEmpty {
             displayLink?.isPaused = true
         }
     }
@@ -529,12 +538,52 @@ final class ThumbnailGridZoomController: NSObject {
                 // overlay; handoff must not restart a second opacity timeline.
                 self.applyBadgeOpacity()
                 CATransaction.commit()
+                self.enqueueSettledThumbnails()
             }
         } else if plan == nil {
             // Reduce Motion can commit without ever revealing the overlay.
             // It needs the same prefetch/display-clock cleanup as a handoff.
             cancelImageTasks()
             updateBadgeVisibility()
+            enqueueSettledThumbnails()
+        }
+    }
+
+    private func enqueueSettledThumbnails() {
+        settledThumbnailWork = (collection?.visibleItems() ?? []).compactMap { $0 as? ThumbnailCollectionItem }
+            .map { cell in { [weak cell] in cell?.settleThumbnailSize() } }
+        if !settledThumbnailWork.isEmpty { resumeDisplayLink() }
+    }
+
+    private func prepareSmallArtwork() {
+        smallArtwork.removeAll()
+        guard let plan else { return }
+        let scale = collection?.window?.backingScaleFactor ?? 2
+        let entries = items()
+        for index in planImageCandidates().sorted(by: { abs($0 - plan.anchor.index) > abs($1 - plan.anchor.index) })
+            where entries.indices.contains(index) {
+            let item = entries[index]
+            guard let current = overlay.image(at: index),
+                  let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: item.url,
+                    pointSize: ThumbnailCollectionStyle.cellSide, scale: scale, contentVersion: item.contentVersion),
+                  let image = cached.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  max(image.width, image.height) < max(current.width, current.height) else { continue }
+            smallArtwork.append((index, image, current))
+        }
+    }
+
+    private func installSmallArtworkBatch() {
+        // Keep detail until the on-screen side fits the small cache. Prepare
+        // only two new CA contents per refresh, and reuse them at handoff.
+        let usesSmall = ZoomGeometry.side(width: layout.viewportSize.width, position: position, metrics: layout.metrics)
+            * elasticScale <= ThumbnailCollectionStyle.cellSide
+        var installed = 0
+        for value in smallArtwork.reversed() {
+            let image = usesSmall ? value.small : value.detail
+            guard overlay.image(at: value.index) !== image else { continue }
+            overlay.replaceImage(image, at: value.index)
+            installed += 1
+            if installed == 2 { break }
         }
     }
 
@@ -580,8 +629,10 @@ final class ThumbnailGridZoomController: NSObject {
             let item = entries[index]
             let cell = collection?.item(at: IndexPath(item: index, section: 0)) as? ThumbnailCollectionItem
             let view = cell?.view as? ThumbnailItemView
-            let image = cell?.imageView?.image ?? SystemThumbnailProvider.shared.bestCachedThumbnail(
-                for: item.url, scale: scale, contentVersion: item.contentVersion)
+            let cached = item.unavailableMessage == nil ? SystemThumbnailProvider.shared.cachedThumbnail(
+                for: item.url, pointSize: ZoomGeometry.side(width: layout.viewportSize.width,
+                    position: position, metrics: layout.metrics), scale: scale, contentVersion: item.contentVersion) : nil
+            let image = cell?.imageView?.image ?? cached
             var value = ZoomArtwork(image: image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
             let loadedLabel = view?.badgeLabel
             let text = loadedLabel.flatMap { $0.stringValue.isEmpty ? nil : $0.stringValue }
@@ -641,5 +692,6 @@ final class ThumbnailGridZoomController: NSObject {
         imageGeneration += 1
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        smallArtwork.removeAll()
     }
 }

@@ -25,10 +25,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var lastAppearance: Appearance?
     private weak var lastAppearanceImage: NSImage?
     private var thumbnailView: ThumbnailItemView? { view as? ThumbnailItemView }
-    var isPresentingComposition: Bool { thumbnailView?.compositionEffect.isPresenting == true }
+    var isPresentingComposition: Bool { thumbnailView?.existingCompositionEffect?.isPresenting == true }
     var onCompositionPresentationEnded: (() -> Void)? {
-        get { thumbnailView?.compositionEffect.onPresentationEnded }
-        set { thumbnailView?.compositionEffect.onPresentationEnded = newValue }
+        get { thumbnailView?.onCompositionPresentationEnded }
+        set { thumbnailView?.onCompositionPresentationEnded = newValue }
     }
 
     deinit {
@@ -52,40 +52,11 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         rootView.imageView = imageView
         self.imageView = imageView
 
-        rootView.addSubview(rootView.compositionEffect)
-
-        let ringView = ThumbnailStateRingView(frame: .zero)
-        ringView.isHidden = true
-        ringView.wantsLayer = true
-        ringView.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
-            + ThumbnailCollectionStyle.stateRingGap
-            + ThumbnailCollectionStyle.stateRingLineWidth
-        ringView.layer?.cornerCurve = .continuous
-        ringView.layer?.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth
-        rootView.addSubview(ringView)
-        rootView.ringView = ringView
-
         let badgeLabel = ThumbnailBadgeLabel(labelWithString: "")
         badgeLabel.wantsLayer = true
         badgeLabel.isHidden = true
         rootView.addSubview(badgeLabel)
         rootView.badgeLabel = badgeLabel
-        let failureLabel = NSTextField(labelWithString: "失败")
-        failureLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        failureLabel.textColor = .labelColor
-        failureLabel.backgroundColor = .windowBackgroundColor
-        failureLabel.drawsBackground = true
-        failureLabel.isHidden = true
-        rootView.addSubview(failureLabel)
-        rootView.failureLabel = failureLabel
-        let placeholderLabel = NSTextField(labelWithString: "")
-        placeholderLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        placeholderLabel.textColor = .secondaryLabelColor
-        placeholderLabel.alignment = .center
-        placeholderLabel.lineBreakMode = .byTruncatingMiddle
-        placeholderLabel.isHidden = true
-        rootView.addSubview(placeholderLabel)
-        rootView.placeholderLabel = placeholderLabel
         rootView.onEffectiveAppearanceChanged = { [weak self] in
             self?.lastAppearance = nil
             self?.updateBorderAppearance(isSelected: self?.isSelected ?? false)
@@ -105,14 +76,15 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         lastAppliedSize = .zero
         zoomPresentationSuppressed = false
         layoutOpacity = 1
-        applyZoomPresentationVisibility()
+        // AppKit resets the reusable view's attributes. Leave its visibility
+        // untouched until the next native layout or zoom state change.
         unavailableMessage = nil
         previewMessage = nil
         lastAppearance = nil
         lastAppearanceImage = nil
         view.setAccessibilityLabel(nil)
         view.setAccessibilityValue(nil)
-        thumbnailView?.compositionEffect.reset()
+        thumbnailView?.existingCompositionEffect?.reset()
         thumbnailView?.failureLabel?.isHidden = true
         thumbnailView?.placeholderLabel?.isHidden = true
         imageView?.layer?.removeAnimation(forKey: "opacity")
@@ -137,7 +109,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         if sizeChanged { view.needsLayout = true }
         // Keep the displayed bitmap while requesting enough pixels for a larger
         // settled preset. Resizing/status changes must not restart its fade.
-        if let url = representedURL,
+        if !zoomPresentationSuppressed, let url = representedURL,
            SystemThumbnailProvider.requestSize(for: min(view.bounds.width, view.bounds.height)) > requestedThumbnailSide
                 || (sizeChanged && thumbnailTask != nil && imageView?.image != nil) {
             startThumbnailLoad(for: url)
@@ -145,6 +117,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     }
 
     func setZoomPresentationSuppressed(_ suppressed: Bool) {
+        guard zoomPresentationSuppressed != suppressed else { return }
         zoomPresentationSuppressed = suppressed
         applyZoomPresentationVisibility()
     }
@@ -187,6 +160,10 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
 
     func retainZoomThumbnail(_ image: CGImage, for url: URL, contentVersion: TimeInterval) {
         guard representedURL == url, representedContentVersion == contentVersion else { return }
+        // The settled-size pass owns any further request. An earlier cell load
+        // must not replace this exact handoff bitmap after the overlay leaves.
+        thumbnailTask?.cancel()
+        thumbnailTask = nil
         // A held frame can be checked twice while AppKit completes its layout.
         // Retain the existing NSImage and its native drawing state when the
         // bitmap is already installed; don't start another layout/redraw pass.
@@ -196,6 +173,29 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         showLoadedThumbnail(NSImage(cgImage: image,
             size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)), animated: false)
         updateBorderAppearance(isSelected: isSelected)
+    }
+
+    /// Resize cached artwork in a bounded display-clock batch after handoff.
+    func settleThumbnailSize() {
+        guard !zoomPresentationSuppressed, let url = representedURL else { return }
+        let side = SystemThumbnailProvider.requestSize(for: min(view.bounds.width, view.bounds.height))
+        let scale = view.window?.backingScaleFactor ?? 2
+        let current = imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let currentSide = current.map { max($0.width, $0.height) } ?? 0
+        let cached = unavailableMessage == nil ? SystemThumbnailProvider.shared.cachedThumbnail(for: url, pointSize: side,
+            scale: scale, contentVersion: representedContentVersion ?? 0) : nil
+        if let cached, let bitmap = cached.cgImage(forProposedRect: nil, context: nil, hints: nil),
+           current == nil || max(bitmap.width, bitmap.height) < currentSide {
+            thumbnailTask?.cancel()
+            thumbnailTask = nil
+            requestedThumbnailSide = side
+            showLoadedThumbnail(cached, animated: false)
+            updateBorderAppearance(isSelected: isSelected)
+        } else if current == nil || CGFloat(currentSide) + 1 < min(view.bounds.width, view.bounds.height) * scale {
+            startThumbnailLoad(for: url)
+        } else {
+            requestedThumbnailSide = side
+        }
     }
 
     func configure(with url: URL, status: PairItem.Status = .finished, mediaKind: ThumbnailMediaKind = .photo, contentVersion: TimeInterval = 0, unavailableMessage: String? = nil) {
@@ -209,7 +209,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             }
             updateBorderAppearance(isSelected: isSelected)
             if imageView?.image == nil, thumbnailTask == nil {
-                startThumbnailLoad(for: url)
+                if !zoomPresentationSuppressed { startThumbnailLoad(for: url) }
             }
             return
         }
@@ -227,7 +227,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         thumbnailView?.placeholderLabel?.isHidden = true
         thumbnailStatus = status
         self.mediaKind = mediaKind
-        thumbnailView?.compositionEffect.reset()
+        thumbnailView?.existingCompositionEffect?.reset()
         imageView?.alphaValue = 0
         imageView?.image = nil
         thumbnailView?.updateImageFrame(for: nil)
@@ -235,7 +235,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         updateBorderAppearance(isSelected: isSelected)
         view.toolTip = url.lastPathComponent
 
-        startThumbnailLoad(for: url)
+        if !zoomPresentationSuppressed { startThumbnailLoad(for: url) }
     }
 
     private func startThumbnailLoad(for url: URL) {
@@ -281,8 +281,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
                 self.previewMessage = result.unavailableMessage
                 let shouldFadeIn = self.imageView?.image == nil
                 self.showLoadedThumbnail(result.image ?? Self.unavailableThumbnail(), animated: shouldFadeIn)
-                self.thumbnailView?.placeholderLabel?.stringValue = url.lastPathComponent
-                self.thumbnailView?.placeholderLabel?.isHidden = result.image != nil
+                self.thumbnailView?.setPlaceholder(result.image == nil ? url.lastPathComponent : nil)
                 self.updateBorderAppearance(isSelected: self.isSelected)
             }
         }
@@ -380,15 +379,14 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         view.setAccessibilityLabel(representedURL.map { "\($0.lastPathComponent)，\(kind)" })
         view.setAccessibilityValue(([status, availability, isSelected ? "已选择" : "未选择"].compactMap { $0 }).joined(separator: "，"))
         view.toolTip = representedURL.map { availability == nil ? $0.lastPathComponent : "\(availability!)\n\($0.path)" }
-        thumbnailView?.compositionEffect.update(image: imageView?.image, running: thumbnailStatus == .running)
+        if thumbnailStatus == .running {
+            thumbnailView?.compositionEffect.update(image: imageView?.image, running: true)
+        } else {
+            thumbnailView?.existingCompositionEffect?.update(image: imageView?.image, running: false)
+        }
         let failureText = thumbnailStatus == .failed ? "合成失败" : availability ?? ""
         let failureHidden = thumbnailStatus != .failed && availability == nil
-        if let label = thumbnailView?.failureLabel,
-           label.stringValue != failureText || label.isHidden != failureHidden {
-            label.stringValue = failureText
-            label.isHidden = failureHidden
-            thumbnailView?.needsLayout = true
-        }
+        thumbnailView?.setFailure(failureHidden ? nil : failureText)
         if isSelected {
             thumbnailView?.setRingState(.selected)
         } else if thumbnailStatus == .failed {
@@ -555,7 +553,18 @@ final class ThumbnailItemView: NSView, NSCollectionViewElement {
         attributes
     }
 
-    let compositionEffect = ThumbnailCompositionEffect(frame: .zero)
+    private(set) var existingCompositionEffect: ThumbnailCompositionEffect?
+    var onCompositionPresentationEnded: (() -> Void)? {
+        didSet { existingCompositionEffect?.onPresentationEnded = onCompositionPresentationEnded }
+    }
+    var compositionEffect: ThumbnailCompositionEffect {
+        if let existingCompositionEffect { return existingCompositionEffect }
+        let effect = ThumbnailCompositionEffect(frame: interactiveFrame)
+        effect.onPresentationEnded = onCompositionPresentationEnded
+        addSubview(effect, positioned: .above, relativeTo: imageView)
+        existingCompositionEffect = effect
+        return effect
+    }
     weak var imageView: NSImageView?
     weak var badgeLabel: ThumbnailBadgeLabel?
     weak var failureLabel: NSTextField?
@@ -586,7 +595,7 @@ final class ThumbnailItemView: NSView, NSCollectionViewElement {
         guard let image, image.size.width > 0, image.size.height > 0 else {
             interactiveFrame = .zero
             imageView.frame = .zero
-            compositionEffect.frame = .zero
+            existingCompositionEffect?.frame = .zero
             ringView?.frame = .zero
             updateBadgeFrames()
             return
@@ -599,13 +608,56 @@ final class ThumbnailItemView: NSView, NSCollectionViewElement {
         let frame = NSRect(origin: origin, size: size)
         interactiveFrame = frame
         if imageView.frame != frame { imageView.frame = frame }
-        if compositionEffect.frame != frame { compositionEffect.frame = frame }
+        if let effect = existingCompositionEffect, effect.frame != frame { effect.frame = frame }
         updateRingFrame()
         updateBadgeFrames()
     }
 
     fileprivate func setRingState(_ state: ThumbnailStateRing) {
+        if state != .none, ringView == nil {
+            let ring = ThumbnailStateRingView(frame: .zero)
+            ring.wantsLayer = true
+            ring.layer?.cornerRadius = ThumbnailCollectionStyle.imageCornerRadius
+                + ThumbnailCollectionStyle.stateRingGap + ThumbnailCollectionStyle.stateRingLineWidth
+            ring.layer?.cornerCurve = .continuous
+            ring.layer?.borderWidth = ThumbnailCollectionStyle.stateRingLineWidth
+            addSubview(ring)
+            ringView = ring
+            updateRingFrame()
+        }
         ringView?.state = state
+    }
+
+    func setFailure(_ text: String?) {
+        if text != nil, failureLabel == nil {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+            label.textColor = .labelColor
+            label.backgroundColor = .windowBackgroundColor
+            label.drawsBackground = true
+            addSubview(label)
+            failureLabel = label
+        }
+        guard let label = failureLabel,
+              label.stringValue != (text ?? "") || label.isHidden != (text == nil) else { return }
+        label.stringValue = text ?? ""
+        label.isHidden = text == nil
+        needsLayout = true
+    }
+
+    func setPlaceholder(_ text: String?) {
+        if text != nil, placeholderLabel == nil {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .center
+            label.lineBreakMode = .byTruncatingMiddle
+            addSubview(label)
+            placeholderLabel = label
+        }
+        placeholderLabel?.stringValue = text ?? ""
+        placeholderLabel?.isHidden = text == nil
+        needsLayout = true
     }
 
     func setBadge(_ text: String?) {

@@ -14,6 +14,72 @@ private actor ThumbnailLoadMetrics {
 
 @MainActor
 final class ThumbnailPerformanceTests: XCTestCase {
+    func testOrdinaryPhotoCreatesStateViewsOnlyWhenTheirStateIsNeeded() throws {
+        let item = ThumbnailCollectionItem()
+        let view = try XCTUnwrap(item.view as? ThumbnailItemView)
+        item.onCompositionPresentationEnded = {}
+        item.configure(with: URL(fileURLWithPath: "/tmp/\(UUID().uuidString).jpg"))
+        XCTAssertNil(view.existingCompositionEffect)
+        XCTAssertNil(view.ringView)
+        XCTAssertNil(view.failureLabel)
+        XCTAssertNil(view.placeholderLabel)
+        XCTAssertEqual(view.badgeLabel?.stringValue, "JPG")
+        XCTAssertFalse(item.isPresentingComposition)
+
+        item.isSelected = true
+        let ring = try XCTUnwrap(view.ringView)
+        XCTAssertFalse(ring.isHidden)
+        item.isSelected = false
+        XCTAssertTrue(ring.isHidden)
+        item.configure(with: URL(fileURLWithPath: "/tmp/\(UUID().uuidString).heic"), status: .failed)
+        XCTAssertTrue(view.ringView === ring)
+        XCTAssertEqual(view.failureLabel?.stringValue, "合成失败")
+        item.prepareForReuse()
+        XCTAssertEqual(view.failureLabel?.isHidden, true)
+        XCTAssertNil(view.existingCompositionEffect, "A callback alone must not create a composition host")
+    }
+
+    func testSmallArtworkWaitsForHandoffAndKeepsIdentityWithoutAnotherFade() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("detail.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1200, pixelsHigh: 1600,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+        let result = await SystemThumbnailProvider.shared.thumbnail(for: url, pointSize: 384, scale: 2, contentVersion: 7)
+        let detail = try XCTUnwrap(result.image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let small = try XCTUnwrap(SystemThumbnailProvider.shared.cachedThumbnail(for: url,
+            pointSize: 148, scale: 2, contentVersion: 7)?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertLessThan(max(small.width, small.height), max(detail.width, detail.height))
+
+        let item = ThumbnailCollectionItem()
+        item.view.frame.size = NSSize(width: 384, height: 384)
+        item.configure(with: url, contentVersion: 7)
+        item.setZoomPresentationSuppressed(true)
+        item.view.frame.size = NSSize(width: 100, height: 100)
+        item.retainZoomThumbnail(detail, for: url, contentVersion: 7)
+        item.settleThumbnailSize()
+        XCTAssertTrue(item.imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) === detail,
+                      "The hidden native cell keeps the exact held bitmap until handoff completes")
+        item.setZoomPresentationSuppressed(false)
+        item.settleThumbnailSize()
+        XCTAssertTrue(item.imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) === small)
+        XCTAssertEqual(item.imageView?.alphaValue, 1)
+        XCTAssertNil(item.imageView?.layer?.animation(forKey: "opacity"))
+        item.configure(with: url, contentVersion: 8)
+        item.settleThumbnailSize()
+        XCTAssertNil(item.imageView?.image, "Settling must not install the previous file revision's cache")
+        item.prepareForReuse()
+
+        // A newly reported unavailable source must not resurrect old cached pixels.
+        item.configure(with: url, contentVersion: 7, unavailableMessage: "原文件不可用")
+        item.settleThumbnailSize()
+        XCTAssertNil(item.imageView?.image)
+        item.prepareForReuse()
+    }
+
     func testHEICDisplayPreparationKeepsP3ColorsAndLeavesFloatingHDRIntact() throws {
         let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
         let values: [UInt16] = [12000, 36000, 58000, 65535]

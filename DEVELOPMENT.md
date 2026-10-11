@@ -1,8 +1,8 @@
 # HERMES 小改动开发
 
-版本 1.4；更新日期：2026-10-11。
+版本 1.5；更新日期：2026-10-11。
 
-变更摘要：多选检查器复用单选原生表单显示共同元数据；缩放动态抽为对数列宽、增量平滑与速度弹簧组件，补齐系统照片参数证据、专项测试及不受呈现延迟影响的性能输入。
+变更摘要：保留多选检查器和缩放动态；密集网格按刷新帧分批切换缓存位图，原生交接后再补充所需清晰度，合成效果、选中框与异常提示按需创建，减少 9 列显示和交接开销。
 
 ## 功能定位
 
@@ -15,8 +15,8 @@
 | 设置保存、重启恢复、目录书签 | `Sources/AppSettings.swift` | 旧偏好键兼容；导入、相簿、目录及授权书签、页面与筛选、检查器、设置分类、各页缩略图列数；窗口和分栏尺寸由 AppKit 原生自动保存 | `AppSettingsTests`、`ThumbnailZoomTests`、模型与 UI/UX 回归；目录相关修改补原生媒体与下载回归 |
 | 下载输入、进度覆盖层、结果提示 | `Sources/DownloadViews.swift` | 页面布局、输入高度、模型进度、集合视图；只改呈现不必自动扩大为平台下载回归 | `script/test_window_layout.py`、UI/UX 回归 |
 | 集合布局、滚动、选择、拖出、删除 | `Sources/Views/CollectionViews/ThumbnailGridController.swift`、`ThumbnailGridArrangementController.swift` | 单元格、媒体身份、文件操作；与系统 AppKit 行为核对 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
-| 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 对数列宽、33 ms 增量平滑、速度投影与弹簧；六个相邻方向、边界、交接、位图身份、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
-| 缩略图加载、缓存、单元格、合成效果 | `Sources/Views/Thumbnail/` | 系统缩略图、异步图像身份、复用、拖出、缩放交接 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
+| 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 对数列宽、33 ms 增量平滑、速度投影与弹簧；六个相邻方向、边界、交接、位图身份、逐帧尺寸调整与反向恢复、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
+| 缩略图加载、缓存、单元格、合成效果 | `Sources/Views/Thumbnail/` | 系统缩略图、异步图像身份、复用、拖出、缩放交接；密集尺寸缓存与按需创建的状态控件 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
 | 下载、队列、已完成页面的媒体映射 | `Sources/Views/CollectionViews/DownloadCollectionView.swift`、`PairCollectionView.swift`、`CompletedCollectionView.swift` | `UIModels`、准确配对身份、原生资源动作、共享网格 | 布局、UI/UX、原生媒体回归 |
 | 检查器、媒体信息、地图位置卡 | `Sources/Views/Other/MediaInspectorController.swift`、`MediaInspectorSelection.swift`、`MediaLocationCard.swift`、`Sources/Utilities/MediaInspection.swift` | 页面选择映射、多选共同元数据、原生表单、坐标、迟到异步结果、宽度和可见性 | `LocationCardTests`、UI/UX、原生媒体回归 |
 | 队列、合成、历史记录、筛选、文件监控、目录迁移 | `Sources/Models/ImporterModel.swift` | 跨页面状态、文件读写、记录生命周期；按共享模型变更处理 | 模型、UI/UX、原生媒体回归；最终候选补下载、合成与元数据检查 |
@@ -98,6 +98,14 @@ python3 script/dev_build.py --run
 当前工作树 Release 安装成功后，现有安装脚本会清理默认开发目录中的闲置应用产品，并保留编译缓存。运行中的应用、正在构建的目录、自定义或链接的输出目录继续保留；此清理只针对当前工作树。
 
 Demo 能加快局部确认，不能替代真实主窗口的布局、手势、交接和交互验收。Debug 候选不代表 `/Applications/HERMES.app` 已更新。
+
+## 缩略图的原生实现依据
+
+交互遵循 Apple HIG 的[手势](https://developer.apple.com/design/human-interface-guidelines/gestures)与[动态效果](https://developer.apple.com/design/human-interface-guidelines/motion)：标准缩放及时反馈、动画可中断，并响应系统“减少动态效果”。网格的 `+` / `-` 键盘快捷键提供手势以外的入口。
+
+网格由 [NSCollectionView](https://developer.apple.com/documentation/appkit/nscollectionview) 管理单元格复用、选择和拖出，通过 [NSCollectionViewPrefetching](https://developer.apple.com/documentation/appkit/nscollectionviewprefetching) 预取资源；图片由 [Quick Look](https://developer.apple.com/documentation/quicklookthumbnailing/qlthumbnailgenerator/request) 按目标尺寸和屏幕比例生成，常态呈现交给 `NSImageView`。缩放期间的缓存图像交给 Core Animation 合成，尺寸调整使用 [NSView.displayLink](https://developer.apple.com/documentation/appkit/nsview/displaylink(target:selector:)) 随所在屏幕刷新，空闲后停止。
+
+缓存档位与每帧批量是 HERMES 经实测选择的策略，不代表照片 App 的内部实现。按 [Apple 的渲染效率建议](https://developer.apple.com/documentation/xcode/improving-your-app-s-rendering-efficiency)减少无效更新，并用同一素材的 Instruments 结果检查优化；脚本回调间隔不能作为屏幕帧率。
 
 ## 编译范围优化
 

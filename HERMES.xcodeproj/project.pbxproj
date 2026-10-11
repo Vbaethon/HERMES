@@ -586,7 +586,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 683;
+				CURRENT_PROJECT_VERSION = 684;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -598,7 +598,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.12;
+				MARKETING_VERSION = 3.0.13;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",
@@ -620,7 +620,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 683;
+				CURRENT_PROJECT_VERSION = 684;
 				DEAD_CODE_STRIPPING = YES;
 
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -632,7 +632,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LM_FILTER_WARNINGS = YES;
-				MARKETING_VERSION = 3.0.12;
+				MARKETING_VERSION = 3.0.13;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lsqlite3",

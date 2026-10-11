@@ -191,6 +191,8 @@ final class ThumbnailZoomArtworkTests: XCTestCase {
         let view = try XCTUnwrap(item.view as? ThumbnailItemView)
         let imageView = try XCTUnwrap(item.imageView)
         let badge = try XCTUnwrap(view.badgeLabel)
+        view.setFailure("原文件不可用")
+        view.setPlaceholder("example.jpg")
         let failure = try XCTUnwrap(view.failureLabel)
         let placeholder = try XCTUnwrap(view.placeholderLabel)
         failure.stringValue = "原文件不可用"

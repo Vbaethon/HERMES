@@ -216,7 +216,7 @@ final class SystemThumbnailProvider {
         }
         // Quick Look can return no preview while its service is busy. Decode a
         // bounded image thumbnail directly instead of presenting a generic file icon.
-        let fallback: NSImage? = autoreleasepool {
+        let fallback: CGImage? = autoreleasepool {
             guard !Task.isCancelled,
                   let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -225,9 +225,12 @@ final class SystemThumbnailProvider {
                     kCGImageSourceThumbnailMaxPixelSize: max(1, Int(ceil(pointSize * scale))),
                     kCGImageSourceShouldCacheImmediately: true
                   ] as CFDictionary) else { return nil }
-            return NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width) / scale, height: CGFloat(cgImage.height) / scale))
+            return displayThumbnail(cgImage)
         }
-        return MediaThumbnailResult(image: fallback, unavailableMessage: fallback == nil ? "预览暂不可用" : nil)
+        guard let fallback else { return MediaThumbnailResult(unavailableMessage: "预览暂不可用") }
+        return MediaThumbnailResult(image: NSImage(cgImage: fallback,
+            size: NSSize(width: CGFloat(fallback.width) / scale, height: CGFloat(fallback.height) / scale)),
+            smallImage: pointSize > Self.sizes[0] ? smallThumbnail(fallback, scale: scale) : nil)
     }
 
     /// Quick Look HEIC previews can contain 16-bit integer Display P3 pixels.
