@@ -6,7 +6,7 @@ from fnmatch import fnmatchcase
 APP = ("model", "uiux", "native")
 MEDIA = ("tool", "composition", "metadata")
 SHARED = ("layout", "network", *APP, "download", "attribution")
-ALL = (*SHARED, *MEDIA, "build", "version", "cache", "development", "debug")
+ALL = (*SHARED, *MEDIA, "build", "version", "cache", "development", "native-lock", "debug")
 LAYOUT_GROUPS = {
     "settings": ("AppSettingsTests",),
     "location": ("LocationCardTests",),
@@ -42,6 +42,8 @@ RULES = tuple(Rule((f"Tests/HermesLayoutTests/{case}.swift",), f"{case} 测试�
     Rule(("script/app_regression.py", "script/regression_compilation.py", "script/AppRegressionMain.swift", "script/test_app_regressions.py"),
          "共享回归编译与执行入口", ("cache", *APP)),
     Rule(("script/test_app_regression_cache.py",), "编译缓存失效及隔离", ("cache",)),
+    Rule(("script/native_ui_lock.py", "script/test_native_ui_lock.py"),
+         "跨入口原生窗口检查互斥与中断清理", ("native-lock", "development", "cache", *APP)),
     Rule(("Tests/HermesLayoutTests/*",), "布局测试自身", ("layout",)),
     Rule(("Tests/HermesNetworkingTests/*",), "网络测试自身", ("network",)),
     Rule(("Tests/HermesModelRegression/*", "script/test_model_safety.py"), "模型回归自身", ("model",)),
@@ -149,7 +151,8 @@ def commands(checks, python, *, previously_checked=()):
     """Group app suites and remove overlapping Swift test execution."""
     checks = set(checks)
     result = []
-    for key, script in (("development", "test_development_workflow.py"), ("cache", "test_app_regression_cache.py"),
+    for key, script in (("native-lock", "test_native_ui_lock.py"),
+                        ("development", "test_development_workflow.py"), ("cache", "test_app_regression_cache.py"),
                         ("build", "test_build_safety.py"), ("version", "test_versioning.sh")):
         if key in checks:
             executable = "/bin/bash" if script.endswith(".sh") else python
@@ -169,6 +172,8 @@ def commands(checks, python, *, previously_checked=()):
             passed = sorted({case for key in set(previously_checked).intersection(LAYOUT_GROUPS) for case in LAYOUT_GROUPS[key]})
             if passed:
                 arguments += ["--skip", "HermesLayoutTests\\.(" + "|".join(passed) + ")"]
+        if any(item.startswith("HermesLayoutTests") for item in filters):
+            arguments = [python, "script/native_ui_lock.py", *arguments]
         result.append(("swift", tuple(arguments)))
     if "tool" in checks or "composition" in checks:
         result.append(("tool", ("xcrun", "swift", "build", "--product", "tool")))

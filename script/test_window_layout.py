@@ -4,6 +4,7 @@ from pathlib import Path
 import platform
 import subprocess
 import tempfile
+from native_ui_lock import native_ui_lock
 
 root = Path(__file__).resolve().parents[1]
 source = (root / "Sources/DownloadViews.swift").read_text()
@@ -68,4 +69,5 @@ with tempfile.TemporaryDirectory(prefix="hermes-window-layout-") as directory:
     binary = Path(directory) / "WindowLayout"
     fixture.write_text(models + progress + empty + harness)
     subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-target", f"{platform.machine()}-apple-macos27.0", str(fixture), "-o", str(binary)], check=True)
-    subprocess.run([str(binary), "--assert"], check=True)
+    with native_ui_lock():
+        subprocess.run([str(binary), "--assert"], check=True)

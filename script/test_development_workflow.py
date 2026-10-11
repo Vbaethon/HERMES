@@ -74,9 +74,17 @@ class CheckSelectionTests(unittest.TestCase):
         self.assertEqual(len(apps), 1)
         self.assertEqual(apps[0][-3:], APP)
         swift = [command for name, command in selected if name == "swift"]
-        self.assertEqual(swift, [("xcrun", "swift", "test", "--filter", "HermesLayoutTests|HermesNetworkingTests")])
+        self.assertEqual(swift, [(sys.executable, "script/native_ui_lock.py", "xcrun", "swift", "test",
+                                 "--filter", "HermesLayoutTests|HermesNetworkingTests")])
         names = [name for name, _ in selected]
         self.assertLess(names.index("tool"), names.index("composition"))
+
+    def test_window_checks_share_the_lock_and_network_only_does_not_wait_for_windows(self):
+        layout = dict(commands({"layout"}, sys.executable))["swift"]
+        network = dict(commands({"network"}, sys.executable))["swift"]
+        self.assertEqual(layout[:2], (sys.executable, "script/native_ui_lock.py"))
+        self.assertEqual(network[:2], ("xcrun", "swift"))
+        self.assertFalse(make_plan(("script/native_ui_lock.py", "script/test_native_ui_lock.py")).unknown)
 
 
 class GitSelectionTests(unittest.TestCase):

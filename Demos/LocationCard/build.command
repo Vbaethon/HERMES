@@ -34,7 +34,7 @@ cat > "$demo_app/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$demo_app"
 if [[ "${1:-}" == "--test" ]]; then
-  "$demo_app/Contents/MacOS/HERMESLocationDemo" --self-test
+  python3 "$demo_repo/script/native_ui_lock.py" "$demo_app/Contents/MacOS/HERMESLocationDemo" --self-test
 else
   print -r -- "$demo_app"
 fi

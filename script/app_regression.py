@@ -17,6 +17,7 @@ import time
 import uuid
 
 from regression_compilation import compile_program
+from native_ui_lock import native_ui_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = Path.home() / "Library/Caches/HERMESRegression"
@@ -223,17 +224,21 @@ def run_suites(suites, *, root=ROOT, cache=CACHE, compiler=None, arguments=(), b
             scratch = folder / "tmp"
             scratch.mkdir()
             env = dict(os.environ, HERMES_REGRESSION_SUITE=suite, TMPDIR=str(scratch) + "/")
-            suite_start = time.monotonic()
             try:
-                run_process([str(executable), str(folder / "fixtures"), *arguments],
-                            env=env, timeout=120 if suite == "uiux" and preview_title else SUITES[suite][3])
+                # Compilation can overlap other work; native windows cannot.
+                # The shared path also covers other HERMES worktrees/entry points.
+                with native_ui_lock(cache / "native-ui.lock"):
+                    suite_start = time.monotonic()
+                    run_process([str(executable), str(folder / "fixtures"), *arguments],
+                                env=env, timeout=120 if suite == "uiux" and preview_title else SUITES[suite][3])
+                    suite_seconds = time.monotonic() - suite_start
             finally:
                 # Also clean this precise, unique domain after crashes or interruption.
                 defaults = Path("/usr/bin/defaults")
                 if defaults.is_file():
                     subprocess.run([str(defaults), "delete", domain], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=5, check=False)
-            print(f"PASS: {suite} suite ({time.monotonic() - suite_start:.2f}s)", flush=True)
+            print(f"PASS: {suite} suite ({suite_seconds:.2f}s)", flush=True)
     return {"key": key, "reused": reused, "prepare_seconds": prepared_seconds}
 
 
