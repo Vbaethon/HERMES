@@ -13,19 +13,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let detailController: DetailPagesController
     private let toolbarController: NativeWindowToolbarController
     let inspectorController: MediaInspectorController
-    private let inspectorDefaults: UserDefaults
+    private let inspectorSettings: AppSettings
     private var inspectorItem: NSSplitViewItem?
     private var inspectorObservation: NSKeyValueObservation?
-    static let inspectorVisibleDefaultsKey = "HERMESInspectorVisible.v1"
+    static let inspectorVisibleDefaultsKey = AppPreferenceKey.inspectorVisible
     var inspectorVisible: Bool { inspectorItem?.isCollapsed == false }
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
     private var terminationProgressAlert: NSAlert?
     var requestTermination: () -> Void = { NSApp.terminate(nil) }
 
-    init(model: ImporterModel = ImporterModel(), inspectorDefaults: UserDefaults = .standard) {
+    init(model: ImporterModel = ImporterModel(), inspectorDefaults: UserDefaults? = nil) {
         self.model = model
-        self.inspectorDefaults = inspectorDefaults
+        inspectorSettings = inspectorDefaults.map { AppSettings(defaults: $0) } ?? model.settings
         inspectorController = MediaInspectorController(model: model)
         sidebarController = FinderStyleSidebarController(
             sections: SidebarSection.allCases,
@@ -203,7 +203,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // pane-preserving window resize mode adds 1pt on every round trip
         // on macOS 27, even when the split view has zero-thickness dividers.
         inspector.collapseBehavior = .preferResizingSiblingsWithFixedSplitView
-        let startsInspectorCollapsed = !inspectorDefaults.bool(forKey: Self.inspectorVisibleDefaultsKey)
+        let startsInspectorCollapsed = !inspectorSettings.inspectorVisible
         inspector.isCollapsed = startsInspectorCollapsed
         inspectorItem = inspector
         splitViewController.addSplitViewItem(inspector)
@@ -230,7 +230,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func inspectorVisibilityDidChange() {
         let visible = inspectorVisible
-        inspectorDefaults.set(visible, forKey: Self.inspectorVisibleDefaultsKey)
+        inspectorSettings.inspectorVisible = visible
         inspectorController.isInspectionEnabled = visible
     }
 

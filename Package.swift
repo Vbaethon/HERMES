@@ -45,7 +45,7 @@ let package = Package(
             name: "HermesThumbnailUI",
             path: "Sources",
             sources: [
-                "UIModels.swift", "Utilities/FileSystemUtilities.swift",
+                "UIModels.swift", "AppSettings.swift", "Utilities/FileSystemUtilities.swift",
                 "Views/CollectionViews/ThumbnailGridController.swift",
                 "Views/CollectionViews/ThumbnailGridArrangementController.swift",
                 "Views/CollectionViews/ThumbnailGridZoomController.swift",

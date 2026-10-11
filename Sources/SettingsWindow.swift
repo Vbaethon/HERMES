@@ -22,7 +22,7 @@ private final class SettingsWindow: NSWindow {
 }
 
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
-    init(model: ImporterModel, defaults: UserDefaults = .standard) {
+    init(model: ImporterModel, defaults: UserDefaults? = nil) {
         let controller = SettingsViewController(model: model, defaults: defaults)
         let window = SettingsWindow(contentViewController: controller)
         window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
@@ -64,22 +64,22 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
+extension AppSettings.Pane: SidebarDestination {
+    var title: String { self == .synthesis ? "合成与导入" : "已完成" }
+    var symbolName: String {
+        self == .synthesis ? AppSymbol.composeLivePhoto.normal : AppSymbol.completed.normal
+    }
+}
+
 final class SettingsViewController: NSSplitViewController {
-    static let selectedPanePreferenceKey = "SettingsSelectedPane.v1"
+    static let selectedPanePreferenceKey = AppPreferenceKey.selectedSettingsPane
     static let contentSize = NSSize(width: 760, height: 460)
     static let sidebarWidth: CGFloat = 220
 
-    enum Pane: String, CaseIterable, SidebarDestination {
-        case synthesis, completed
-
-        var title: String { self == .synthesis ? "合成与导入" : "已完成" }
-        var symbolName: String {
-            self == .synthesis ? AppSymbol.composeLivePhoto.normal : AppSymbol.completed.normal
-        }
-    }
+    typealias Pane = AppSettings.Pane
 
     private let model: ImporterModel
-    private let defaults: UserDefaults
+    private let settings: AppSettings
     private(set) var selectedPane: Pane
     private lazy var sidebar = NativeSidebarController<Pane>(
         sections: Pane.allCases,
@@ -90,10 +90,10 @@ final class SettingsViewController: NSSplitViewController {
     )
     private lazy var detail = NSHostingController(rootView: SettingsPaneView(model: model, pane: selectedPane))
 
-    init(model: ImporterModel, defaults: UserDefaults) {
+    init(model: ImporterModel, defaults: UserDefaults? = nil) {
         self.model = model
-        self.defaults = defaults
-        selectedPane = defaults.string(forKey: Self.selectedPanePreferenceKey).flatMap(Pane.init(rawValue:)) ?? .synthesis
+        settings = defaults.map { AppSettings(defaults: $0) } ?? model.settings
+        selectedPane = settings.selectedSettingsPane
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -125,7 +125,7 @@ final class SettingsViewController: NSSplitViewController {
     func selectPane(_ pane: Pane) {
         guard pane != selectedPane else { return }
         selectedPane = pane
-        defaults.set(pane.rawValue, forKey: Self.selectedPanePreferenceKey)
+        settings.selectedSettingsPane = pane
         sidebar.update(sections: Pane.allCases, selection: pane, count: { _ in nil })
         detail.rootView = SettingsPaneView(model: model, pane: pane)
         view.window?.recalculateKeyViewLoop()

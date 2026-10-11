@@ -8,7 +8,7 @@ enum CompletedCollectionView {
         model: ImporterModel
     ) -> (NSScrollView, Coordinator) {
         let coordinator = Coordinator()
-        let gridController = ThumbnailGridController()
+        let gridController = ThumbnailGridController(settings: model.settings, preferencePage: .completed)
         let scrollView = NSScrollView()
         ThumbnailCollectionStyle.prepare(scrollView, documentView: gridController.nsCollectionView)
 

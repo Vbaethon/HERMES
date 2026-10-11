@@ -94,7 +94,8 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     var onPresentationChange: (() -> Void)?
 
     init(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset,
-         flow: ThumbnailGridArrangementController.Flow = .newestEnd) {
+         flow: ThumbnailGridArrangementController.Flow = .newestEnd,
+         settings: AppSettings = .shared, preferencePage: SidebarSection? = nil) {
         let collectionView = GridCollectionView()
         self.collectionView = collectionView
         self.dataSource = NSCollectionViewDiffableDataSource<String, String>(
@@ -123,8 +124,14 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         collectionView.gridController = self
         collectionView.delegate = self
         ThumbnailCollectionStyle.prepare(collectionView, sectionInset: sectionInset)
+        let initialLevel = preferencePage.flatMap {
+            ZoomGeometry.columns.firstIndex(of: settings.thumbnailColumns(for: $0))
+        } ?? 2
         zoom = ThumbnailGridZoomController(collection: collectionView, items: { [weak self] in self?.items ?? [] },
-                                           sectionInset: sectionInset, flow: flow)
+                                           sectionInset: sectionInset, flow: flow, initialLevel: initialLevel,
+                                           onLevelChange: { level in
+            if let preferencePage { settings.setThumbnailColumns(ZoomGeometry.columns[level], for: preferencePage) }
+        })
         collectionView.prefetchDataSource = self
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)

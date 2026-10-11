@@ -20,7 +20,7 @@ if not args.directory.is_dir() or not 1 <= args.copies <= 100:
     parser.error("Use an existing media directory and 1–100 copies")
 
 sources = [
-    "Sources/UIModels.swift", "Sources/Utilities/FileSystemUtilities.swift",
+    "Sources/UIModels.swift", "Sources/AppSettings.swift", "Sources/Utilities/FileSystemUtilities.swift",
     "Sources/Utilities/NativeMediaResources.swift",
     "Sources/Views/CollectionViews/ThumbnailGridController.swift",
     "Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift",

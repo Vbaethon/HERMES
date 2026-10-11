@@ -6,7 +6,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 sources = [root / "Sources" / name for name in (
-    "dydl.swift", "rndl.swift", "dwdl.swift", "DewuLogStore.swift", "DownloaderHTTPCompatibility.swift", "UIModels.swift"
+    "dydl.swift", "rndl.swift", "dwdl.swift", "DewuLogStore.swift", "DownloaderHTTPCompatibility.swift", "UIModels.swift", "AppSettings.swift"
 )]
 # Collection-view resource actions are exercised by test_native_media.py.
 sources += [path for path in sorted((root / "Sources/Utilities").glob("*.swift"))

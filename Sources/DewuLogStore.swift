@@ -3,8 +3,6 @@ import SQLite3
 
 enum DewuLogStore {
     private static let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-    private static let authorizedRootBookmarkKey = "DewuAuthorizedDataRootBookmark.v1"
-    private static let authorizedRootPathKey = "DewuAuthorizedDataRootPath.v1"
     private static let dbSubpath = "Library/DUCaches/logger/sqlite3/never/com.shizhuang.Logger.v2"
 
     static func dataRoots() -> [URL] {
@@ -257,9 +255,9 @@ enum DewuLogStore {
     }
 
     private static func resolveAuthorizedDataRoot() -> URL? {
-        let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: authorizedRootBookmarkKey) else {
-            return defaults.string(forKey: authorizedRootPathKey).map(URL.init(fileURLWithPath:))
+        let settings = AppSettings.shared
+        guard let data = settings.dewuDataRootBookmark else {
+            return settings.dewuDataRootPath.map(URL.init(fileURLWithPath:))
         }
         var isStale = false
         do {
@@ -272,11 +270,11 @@ enum DewuLogStore {
             if isStale {
                 saveAuthorizedDataRoot(url)
             }
-            defaults.set(url.path, forKey: authorizedRootPathKey)
+            settings.dewuDataRootPath = url.path
             return url
         } catch {
-            defaults.removeObject(forKey: authorizedRootBookmarkKey)
-            return defaults.string(forKey: authorizedRootPathKey).map(URL.init(fileURLWithPath:))
+            settings.dewuDataRootBookmark = nil
+            return settings.dewuDataRootPath.map(URL.init(fileURLWithPath:))
         }
     }
 
@@ -287,11 +285,11 @@ enum DewuLogStore {
                 includingResourceValuesForKeys: nil,
                 relativeTo: nil
             )
-            UserDefaults.standard.set(data, forKey: authorizedRootBookmarkKey)
+            AppSettings.shared.dewuDataRootBookmark = data
         } catch {
-            UserDefaults.standard.removeObject(forKey: authorizedRootBookmarkKey)
+            AppSettings.shared.dewuDataRootBookmark = nil
         }
-        UserDefaults.standard.set(url.path, forKey: authorizedRootPathKey)
+        AppSettings.shared.dewuDataRootPath = url.path
     }
 
 }

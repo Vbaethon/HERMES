@@ -73,8 +73,9 @@ final class LocationCardTests: XCTestCase {
 
     func testCaptionWrapsInsideTheSameRoundedCardAndFailureStaysBoundToThePin() async throws {
         _ = NSApplication.shared
-        let card = MediaLocationCard { _ in
-            .init(title: "一个完整且很长的地点名称", address: "一条完整的系统格式地址，在很窄的信息栏中也必须换行显示，不使用省略号截断")
+        let card = MediaLocationCard { [b] coordinate in
+            if coordinate == b { throw NSError(domain: "MKErrorDomain", code: 4) }
+            return .init(title: "一个完整且很长的地点名称", address: "一条完整的系统格式地址，在很窄的信息栏中也必须换行显示，不使用省略号截断")
         }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 500),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
@@ -107,11 +108,56 @@ final class LocationCardTests: XCTestCase {
                 }
             }
         }
-        card.show(b, simulateFailure: true)
+        card.show(b)
+        await Task.yield()
         XCTAssertEqual(card.coordinate, b)
         XCTAssertEqual(card.mapView.annotations.first?.coordinate.latitude, b.latitude)
-        XCTAssertEqual(card.displayedAddress, "暂时无法获取地点名称")
+        XCTAssertEqual(card.displayedTitle, "拍摄位置")
+        XCTAssertNil(card.displayedAddress)
         XCTAssertFalse(card.resolutionSucceeded)
         XCTAssertFalse(card.isHidden)
+    }
+
+    func testNativeFailureKeepsThePinWithoutPromptsOrRepeatedLookups() async {
+        var calls = 0
+        let card = MediaLocationCard { _ in
+            calls += 1
+            throw NSError(domain: "MKErrorDomain", code: 4)
+        }
+        card.show(b)
+        await Task.yield()
+        card.show(b)
+        card.cancelResolution()
+        card.resumeResolution()
+        await Task.yield()
+        XCTAssertEqual(calls, 1)
+        XCTAssertFalse(card.isResolving)
+        XCTAssertFalse(card.resolutionSucceeded)
+        XCTAssertFalse(card.isHidden)
+        XCTAssertNil(card.displayedAddress)
+        XCTAssertEqual(card.mapView.annotations.first?.coordinate.longitude, b.longitude)
+        XCTAssertFalse(buttons(in: card).contains { $0.title == "重试" })
+    }
+
+    func testPendingNativeLookupKeepsTheMapAndAcceptsItsEventualAddress() async throws {
+        var pending: CheckedContinuation<MediaLocationCard.Place, any Error>?
+        let card = MediaLocationCard { _ in
+            try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        card.show(a)
+        await Task.yield()
+        XCTAssertTrue(card.isResolving)
+        XCTAssertNil(card.displayedAddress)
+        XCTAssertFalse(card.isHidden)
+        XCTAssertEqual(card.mapView.annotations.count, 1)
+        XCTAssertFalse(buttons(in: card).contains { $0.title == "重试" })
+        try XCTUnwrap(pending).resume(returning: .init(title: "原生地点", address: "原生地址"))
+        await Task.yield()
+        XCTAssertTrue(card.resolutionSucceeded)
+        XCTAssertEqual(card.displayedAddress, "原生地址")
+    }
+
+    private func buttons(in view: NSView) -> [NSButton] {
+        (view as? NSButton).map { [$0] } ?? view.subviews.flatMap { buttons(in: $0) }
     }
 }

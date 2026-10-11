@@ -8,6 +8,7 @@ MEDIA = ("tool", "composition", "metadata")
 SHARED = ("layout", "network", *APP, "download", "attribution")
 ALL = (*SHARED, *MEDIA, "build", "version", "cache", "development", "debug")
 LAYOUT_GROUPS = {
+    "settings": ("AppSettingsTests",),
     "location": ("LocationCardTests",),
     "zoom": ("ThumbnailZoomTests", "ThumbnailZoomArtworkTests", "ThumbnailPointerGeometryTests",
              "ThumbnailBadgeRenderingTests", "ThumbnailScrollAnchorTests", "ThumbnailPerformanceTests"),
@@ -59,6 +60,7 @@ RULES = tuple(Rule((f"Tests/HermesLayoutTests/{case}.swift",), f"{case} 测试�
     Rule(("Sources/Models/ImporterModel.swift", "Sources/HermesApp.swift"),
          "共享模型、队列、记录或应用生命周期", APP, ("download", *MEDIA)),
     Rule(("Sources/UIModels.swift",), "跨页面和下载器共享的媒体模型", SHARED, MEDIA),
+    Rule(("Sources/AppSettings.swift",), "统一设置、目录授权与缩略图档位持久化", ("settings", *APP), ("download",)),
     Rule(("Sources/Views/CollectionViews/ThumbnailGridController.swift",),
          "共享网格、选择、滚动和资源身份", ("layout",), ("uiux",)),
     Rule(("Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift",),

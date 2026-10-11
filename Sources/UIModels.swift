@@ -1,11 +1,5 @@
 import Foundation
 
-enum AppPreferenceKey {
-    static let importToPhotos = "ImportToPhotosPreference.v1"
-    static let addToAlbum = "AddToAlbumPreference.v1"
-    static let completedAddToAlbum = "CompletedAddToAlbumPreference.v1"
-}
-
 enum AppSymbol {
     struct Stateful {
         let normal: String

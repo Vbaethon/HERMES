@@ -48,21 +48,20 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
 
     let mapView = MKMapView()
     private let titleField = NSTextField(wrappingLabelWithString: "拍摄位置")
-    private let addressField = NSTextField(wrappingLabelWithString: "正在查找地点…")
+    private let addressField = NSTextField(wrappingLabelWithString: "")
     private let openButton = NSButton()
-    private let retryButton = NSButton(title: "重试", target: nil, action: nil)
     private let textStack = NSStackView()
     private let footer = NSView()
     var onContentChange: (() -> Void)?
     private let resolver: Resolver?
     private var lookupTask: Task<Void, Never>?
-    private var deadlineTask: Task<Void, Never>?
     private var geocodingRequest: MKReverseGeocodingRequest?
     private var generation = UUID()
     private var resolvedPlaces: [Coordinate: Place] = [:]
     private(set) var coordinate: Coordinate?
     private(set) var isResolving = false
     private(set) var resolutionSucceeded = false
+    private var resolutionFinished = false
 
     var displayedTitle: String { titleField.stringValue }
     var displayedAddress: String? { addressField.isHidden ? nil : addressField.stringValue }
@@ -114,17 +113,9 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
         textStack.translatesAutoresizingMaskIntoConstraints = false
         textStack.addArrangedSubview(titleField)
         textStack.addArrangedSubview(addressField)
-        textStack.addArrangedSubview(retryButton)
         for field in [titleField, addressField] {
             field.widthAnchor.constraint(equalTo: textStack.widthAnchor).isActive = true
         }
-        retryButton.bezelStyle = .inline
-        retryButton.font = .systemFont(ofSize: NSFont.systemFontSize)
-        retryButton.target = self
-        retryButton.action = #selector(retry)
-        retryButton.setAccessibilityLabel("重新获取此位置的地点名称")
-        retryButton.isHidden = true
-
         openButton.translatesAutoresizingMaskIntoConstraints = false
         openButton.isBordered = false
         openButton.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: "在地图中打开")
@@ -180,15 +171,15 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
         }
     }
 
-    func show(_ newCoordinate: Coordinate?, simulateFailure: Bool = false) {
-        if !simulateFailure, let newCoordinate, coordinate == newCoordinate,
-           isResolving || resolutionSucceeded { return }
+    func show(_ newCoordinate: Coordinate?) {
+        if let newCoordinate, coordinate == newCoordinate,
+           isResolving || resolutionFinished { return }
         invalidateRequest()
         coordinate = newCoordinate
         setAccessibilityLabel("拍摄位置")
         resolutionSucceeded = false
+        resolutionFinished = false
         mapView.removeAnnotations(mapView.annotations)
-        retryButton.isHidden = true
         isHidden = newCoordinate == nil
         openButton.isEnabled = newCoordinate != nil
         guard let newCoordinate else {
@@ -207,14 +198,10 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
         mapView.setRegion(MKCoordinateRegion(center: newCoordinate.mapCoordinate,
             latitudinalMeters: 1_200, longitudinalMeters: 1_200), animated: false)
         titleField.stringValue = "拍摄位置"
-        addressField.stringValue = "正在查找地点…"
-        addressField.isHidden = false
+        addressField.stringValue = ""
+        addressField.isHidden = true
         titleField.toolTip = nil
         addressField.toolTip = nil
-        if simulateFailure {
-            showFailure()
-            return
-        }
         if let place = resolvedPlaces[newCoordinate] {
             apply(place)
             return
@@ -225,7 +212,7 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
     func cancelResolution() { invalidateRequest() }
 
     func resumeResolution() {
-        guard let coordinate, !isResolving, !resolutionSucceeded else { return }
+        guard let coordinate, !isResolving, !resolutionFinished else { return }
         show(coordinate)
     }
 
@@ -235,22 +222,12 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
         geocodingRequest = nil
         lookupTask?.cancel()
         lookupTask = nil
-        deadlineTask?.cancel()
-        deadlineTask = nil
         isResolving = false
     }
 
     private func resolve(_ requestedCoordinate: Coordinate) {
         let requestGeneration = generation
         isResolving = true
-        deadlineTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(15)) }
-            catch { return }
-            guard let self, self.generation == requestGeneration,
-                  self.coordinate == requestedCoordinate, self.isResolving else { return }
-            self.invalidateRequest()
-            self.showFailure()
-        }
         lookupTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -273,8 +250,6 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
                 self.resolvedPlaces[requestedCoordinate] = place
                 self.geocodingRequest = nil
                 self.lookupTask = nil
-                self.deadlineTask?.cancel()
-                self.deadlineTask = nil
                 self.isResolving = false
                 self.apply(place)
             } catch {
@@ -282,10 +257,10 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
                       self.coordinate == requestedCoordinate else { return }
                 self.geocodingRequest = nil
                 self.lookupTask = nil
-                self.deadlineTask?.cancel()
-                self.deadlineTask = nil
                 self.isResolving = false
-                self.showFailure()
+                // Leave the native map and original pin visible when MapKit
+                // has no placemark. No app-defined timeout or retry message.
+                self.resolutionFinished = true
             }
         }
     }
@@ -296,27 +271,11 @@ final class MediaLocationCard: NSView, MKMapViewDelegate {
         addressField.stringValue = place.address ?? ""
         addressField.toolTip = place.address
         addressField.isHidden = place.address == nil
-        retryButton.isHidden = true
         resolutionSucceeded = true
+        resolutionFinished = true
         setAccessibilityLabel("拍摄位置：\(place.title)")
         needsLayout = true
         onContentChange?()
-    }
-
-    private func showFailure() {
-        titleField.stringValue = "拍摄位置"
-        addressField.stringValue = "暂时无法获取地点名称"
-        addressField.isHidden = false
-        retryButton.isHidden = false
-        resolutionSucceeded = false
-        setAccessibilityLabel("拍摄位置：暂时无法获取地点名称")
-        needsLayout = true
-        onContentChange?()
-    }
-
-    @objc private func retry() {
-        guard let coordinate else { return }
-        show(coordinate)
     }
 
     @objc private func openInMaps() {

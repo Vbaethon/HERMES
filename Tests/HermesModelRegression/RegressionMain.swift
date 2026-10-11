@@ -29,7 +29,8 @@ import Foundation
         }
         func model(_ name: String) throws -> ImporterModel {
             // This executable has its own defaults domain. All folders are explicit test fixtures.
-            for key in ["CompletedRecords.v1", "DownloadCompletedRecords.v1", "OutputFolderBookmark.v1", "DownloadOutputFolderBookmark.v1"] {
+            for key in ["CompletedRecords.v1", "DownloadCompletedRecords.v1", "OutputFolderBookmark.v1", "DownloadOutputFolderBookmark.v1",
+                        AppPreferenceKey.selectedPage, AppPreferenceKey.completedFilter, AppPreferenceKey.downloadFilter] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
             let m = ImporterModel(refreshOnInit: false)
@@ -51,6 +52,27 @@ import Foundation
             let satisfied = await predicate()
             expect(satisfied, "asynchronous actor test timed out")
         }
+        let preferenceSuite = "HermesModelSettingsTests.\(UUID().uuidString)"
+        let preferenceDefaults = UserDefaults(suiteName: preferenceSuite)!
+        defer { preferenceDefaults.removePersistentDomain(forName: preferenceSuite) }
+        let preferences = AppSettings(defaults: preferenceDefaults)
+        let configured = ImporterModel(refreshOnInit: false, settings: preferences)
+        configured.importToPhotos = true
+        configured.addToAlbum = true
+        configured.completedAddToAlbum = true
+        configured.selection = .downloads
+        configured.completedFilter = .added
+        configured.downloadFilter = .notComposed
+        configured.outputFolder = root.appendingPathComponent("settings/output")
+        configured.downloadOutputFolder = root.appendingPathComponent("settings/download")
+        let restored = ImporterModel(refreshOnInit: false, settings: AppSettings(defaults: preferenceDefaults))
+        expect(restored.importToPhotos && restored.addToAlbum && restored.completedAddToAlbum, "model must restore import preferences")
+        expect(restored.selection == .downloads && restored.completedFilter == .added && restored.downloadFilter == .notComposed,
+               "model must restore the selected page and both filters")
+        expect(restored.outputFolder == configured.outputFolder && restored.downloadOutputFolder == configured.downloadOutputFolder,
+               "model must restore folder settings from its injected settings store")
+        pass("app settings restore model preferences, page, filters and directories")
+
         let singles = try model("standalone-completion")
         let still = singles.downloadOutputFolder.appendingPathComponent("photo.jpg")
         let video = singles.downloadOutputFolder.appendingPathComponent("video.mp4")

@@ -1,8 +1,8 @@
 # HERMES 小改动开发
 
-版本 1.0；更新日期：2026-10-07。
+版本 1.1；更新日期：2026-10-09。
 
-变更摘要：建立功能入口与测试导航，提供专项与最终补充检查、独立 Debug 增量构建和构建计时；共享回归保留增量中间产物；记录逐步抽出职责的约定。
+变更摘要：增加统一设置管理器与持久化检查导航；三个页面分别保存缩略图列数；目录书签职责从共享模型抽出；位置卡遵循原生服务结果，移除应用超时和额外提示。
 
 ## 功能定位
 
@@ -12,6 +12,7 @@
 | --- | --- | --- | --- |
 | 启动、退出、应用菜单 | `Sources/HermesApp.swift` | `ImporterModel`、主窗口、工具栏；退出还涉及取消和记录落盘 | 模型及 UI/UX 回归 |
 | 主窗口、侧栏、页面切换、设置 | `Sources/Views/Other/MainWindowController.swift`、`Sources/SidebarController.swift`、`Sources/Views/Other/PageControllers.swift`、`Sources/SettingsWindow.swift` | 模型状态、选择、工具栏、检查器生命周期 | UI/UX 回归；修改设置持久化时补模型回归 |
+| 设置保存、重启恢复、目录书签 | `Sources/AppSettings.swift` | 旧偏好键兼容；导入、相簿、目录及授权书签、页面与筛选、检查器、设置分类、各页缩略图列数；窗口和分栏尺寸由 AppKit 原生自动保存 | `AppSettingsTests`、`ThumbnailZoomTests`、模型与 UI/UX 回归；目录相关修改补原生媒体与下载回归 |
 | 下载输入、进度覆盖层、结果提示 | `Sources/DownloadViews.swift` | 页面布局、输入高度、模型进度、集合视图；只改呈现不必自动扩大为平台下载回归 | `script/test_window_layout.py`、UI/UX 回归 |
 | 集合布局、滚动、选择、拖出、删除 | `Sources/Views/CollectionViews/ThumbnailGridController.swift`、`ThumbnailGridArrangementController.swift` | 单元格、媒体身份、文件操作；与系统 AppKit 行为核对 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
 | 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 六个相邻方向、边界、交接、位图身份、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |

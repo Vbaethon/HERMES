@@ -8,13 +8,12 @@ final class LocationDemo: NSObject, NSApplicationDelegate, NSTableViewDataSource
         let name: String
         let detail: String
         let coordinate: MediaLocationCard.Coordinate?
-        var fails = false
     }
 
     private let samples: [Sample] = [
         Sample(name: "国内示例", detail: "查看中文地点与地址", coordinate: .init(latitude: 31.3064, longitude: 120.7051)),
         Sample(name: "海外示例", detail: "查看系统的海外地址格式", coordinate: .init(latitude: 37.3349, longitude: -122.0090)),
-        Sample(name: "解析失败", detail: "地图和失败提示仍在同一张卡片", coordinate: .init(latitude: 31.3064, longitude: 120.7051), fails: true),
+        Sample(name: "泰国示例", detail: "没有原生地点名称时保留地图标记", coordinate: .init(latitude: 13.7563, longitude: 100.5018)),
         Sample(name: "无位置信息", detail: "整张位置卡片一同隐藏", coordinate: nil)
     ]
     private var window: NSWindow!
@@ -211,7 +210,7 @@ final class LocationDemo: NSObject, NSApplicationDelegate, NSTableViewDataSource
         let sample = samples[table.selectedRow]
         sampleName.stringValue = sample.name
         locationHeading.isHidden = sample.coordinate == nil
-        card.show(sample.coordinate, simulateFailure: sample.fails)
+        card.show(sample.coordinate)
         window.contentView?.layoutSubtreeIfNeeded()
     }
 
@@ -233,8 +232,10 @@ final class LocationDemo: NSObject, NSApplicationDelegate, NSTableViewDataSource
     private func checkBindingAndLayout() async throws {
         let a = samples[0].coordinate!
         let b = samples[1].coordinate!
+        let c = samples[2].coordinate!
         // Deliberately let a cancelled provider deliver a late result.
         let probe = MediaLocationCard { coordinate in
+            if coordinate == c { throw CheckError(message: "No native placemark") }
             if coordinate == a {
                 try? await Task.sleep(for: .milliseconds(120))
                 return .init(title: "旧地点", address: "旧地址")
@@ -270,10 +271,11 @@ final class LocationDemo: NSObject, NSApplicationDelegate, NSTableViewDataSource
                 }
             }
         }
-        probe.show(a, simulateFailure: true)
+        probe.show(c)
+        await Task.yield()
         guard !probe.resolutionSucceeded, probe.displayedTitle == "拍摄位置",
-              probe.displayedAddress == "暂时无法获取地点名称",
-              probe.mapView.annotations.first?.coordinate.latitude == a.latitude else {
+              probe.displayedAddress == nil,
+              probe.mapView.annotations.first?.coordinate.latitude == c.latitude else {
             throw CheckError(message: "Failure state retained an old place")
         }
         probe.show(nil)

@@ -12,7 +12,7 @@ final class ThumbnailGridArrangementController {
     }
     let flow: Flow
     private(set) var itemIDs: [String] = []
-    private(set) var spec = ZoomGridSpec(level: 2)
+    private(set) var spec: ZoomGridSpec
     private(set) var viewportSize = CGSize(width: 900, height: 600)
     private(set) var metrics = ZoomMetrics()
     private var newestColumn: Int?
@@ -20,7 +20,10 @@ final class ThumbnailGridArrangementController {
     private var trailingSpace: CGFloat = 0
     private var pending: SnapshotChange?
 
-    init(flow: Flow = .newestEnd) { self.flow = flow }
+    init(flow: Flow = .newestEnd, initialLevel: Int = 2) {
+        self.flow = flow
+        spec = ZoomGridSpec(level: (0..<ZoomGeometry.columns.count).contains(initialLevel) ? initialLevel : 2)
+    }
 
     var count: Int { itemIDs.count }
     var contentSize: CGSize {

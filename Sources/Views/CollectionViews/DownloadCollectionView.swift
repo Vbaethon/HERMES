@@ -9,7 +9,8 @@ enum DownloadCollectionView {
         bottomContentInset: CGFloat
     ) -> (NSScrollView, Coordinator) {
         let coordinator = Coordinator()
-        let gridController = ThumbnailGridController(sectionInset: downloadSectionInset(bottomContentInset: bottomContentInset))
+        let gridController = ThumbnailGridController(sectionInset: downloadSectionInset(bottomContentInset: bottomContentInset),
+                                                     settings: model.settings, preferencePage: .downloads)
         let scrollView = NSScrollView()
         ThumbnailCollectionStyle.prepare(scrollView, documentView: gridController.nsCollectionView)
 

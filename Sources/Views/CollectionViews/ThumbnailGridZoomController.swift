@@ -5,8 +5,8 @@ import QuartzCore
 final class ThumbnailGridLayout: NSCollectionViewLayout {
     let arrangement: ThumbnailGridArrangementController
 
-    init(flow: ThumbnailGridArrangementController.Flow) {
-        arrangement = ThumbnailGridArrangementController(flow: flow)
+    init(flow: ThumbnailGridArrangementController.Flow, initialLevel: Int = 2) {
+        arrangement = ThumbnailGridArrangementController(flow: flow, initialLevel: initialLevel)
         super.init()
     }
 
@@ -77,6 +77,7 @@ final class ThumbnailGridZoomController: NSObject {
     private weak var collection: NSCollectionView?
     private weak var scroll: NSScrollView?
     private let items: () -> [ThumbnailGridItem]
+    private let onLevelChange: (Int) -> Void
     private var pinch: NSMagnificationGestureRecognizer?
     private var boundsObserver: NSObjectProtocol?
     private(set) var position: CGFloat = 2
@@ -126,8 +127,12 @@ final class ThumbnailGridZoomController: NSObject {
     }
 
     init(collection: NSCollectionView, items: @escaping () -> [ThumbnailGridItem], sectionInset: NSEdgeInsets,
-         flow: ThumbnailGridArrangementController.Flow) {
-        layout = ThumbnailGridLayout(flow: flow)
+         flow: ThumbnailGridArrangementController.Flow, initialLevel: Int = 2,
+         onLevelChange: @escaping (Int) -> Void = { _ in }) {
+        layout = ThumbnailGridLayout(flow: flow, initialLevel: initialLevel)
+        position = CGFloat(layout.spec.level)
+        alpha = ZoomAlphaPresentation(level: layout.spec.level)
+        self.onLevelChange = onLevelChange
         self.collection = collection
         self.items = items
         super.init()
@@ -331,6 +336,9 @@ final class ThumbnailGridZoomController: NSObject {
     private func animate(to target: CGFloat) {
         stopAnimation()
         guard plan != nil else { return }
+        // Persist the released/keyboard destination before its animation so
+        // quitting during settlement still restores the user's chosen preset.
+        onLevelChange(Int(target))
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             position = target
             commitPlan()
@@ -408,6 +416,7 @@ final class ThumbnailGridZoomController: NSObject {
             width: layout.viewportSize.width, focusCenter: center, weights: weights, metrics: layout.metrics)
         overlay.render(position: position, plan: plan, weights: weights)
         layout.arrangement.commitZoom(plan.specs[level], origin: -state.offset.y)
+        onLevelChange(level)
         stopAnimation()
         gesture = nil
         self.plan = nil

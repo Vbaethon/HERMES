@@ -5,9 +5,10 @@ import XCTest
 
 @MainActor
 final class ThumbnailZoomTests: XCTestCase {
-    private func fixture(count: Int = 500, animatingDifferences: Bool = false) -> (ThumbnailGridController, NSScrollView, NSWindow) {
+    private func fixture(count: Int = 500, animatingDifferences: Bool = false,
+                         settings: AppSettings = .shared, page: SidebarSection? = nil) -> (ThumbnailGridController, NSScrollView, NSWindow) {
         _ = NSApplication.shared
-        let grid = ThumbnailGridController()
+        let grid = ThumbnailGridController(settings: settings, preferencePage: page)
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
         ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
         let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
@@ -28,6 +29,57 @@ final class ThumbnailZoomTests: XCTestCase {
         let after = ZoomGeometry.side(width: width, position: position, metrics: metrics)
         zoom.changeGesture(magnification: 2 * (after - before) / zoom.gesture!.startSide)
         zoom.displayFrame(at: CACurrentMediaTime())
+    }
+
+    func testEachPageRestoresItsColumnsBeforeLoadingAndRetainsThemAcrossResize() async {
+        let name = "HermesZoomPersistenceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AppSettings(defaults: defaults)
+        for (page, columns) in zip(SidebarSection.allCases, [9, 7, 3]) {
+            settings.setThumbnailColumns(columns, for: page)
+        }
+        for (page, columns) in zip(SidebarSection.allCases, [9, 7, 3]) {
+            let restored = AppSettings(defaults: defaults)
+            let empty = ThumbnailGridController(settings: restored, preferencePage: page)
+            XCTAssertEqual(ZoomGeometry.columns[empty.zoom.layout.spec.level], columns)
+            XCTAssertEqual(Int(empty.zoom.position), empty.zoom.layout.spec.level)
+            let (grid, scroll, window) = fixture(count: 70, settings: restored, page: page)
+            defer { window.orderOut(nil) }
+            for width in [CGFloat(720), 1000] {
+                window.setContentSize(NSSize(width: width, height: 600))
+                scroll.layoutSubtreeIfNeeded()
+                grid.zoom.viewportChanged()
+                XCTAssertEqual(ZoomGeometry.columns[grid.zoom.layout.spec.level], columns)
+                XCTAssertEqual(restored.thumbnailColumns(for: page), columns)
+            }
+            await Task.yield()
+        }
+    }
+
+    func testReleasedZoomDestinationSavesBeforeAnimationAndCancelledPinchRestoresIt() async throws {
+        let name = "HermesZoomPersistenceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AppSettings(defaults: defaults)
+        let (grid, scroll, window) = fixture(settings: settings, page: .downloads)
+        defer { window.orderOut(nil) }
+        let zoom = grid.zoom!
+        zoom.step(1)
+        XCTAssertEqual(AppSettings(defaults: defaults).thumbnailColumns(for: .downloads), 3)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
+        await Task.yield()
+        let frame = zoom.layout.spec.frame(index: 499, width: zoom.layout.viewportSize.width, metrics: zoom.layout.metrics)
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: zoom.maximumOrigin))
+        zoom.beginGesture(at: CGPoint(x: frame.midX, y: frame.midY))
+        XCTAssertNotNil(zoom.gesture)
+        pinch(zoom, to: 2)
+        zoom.endGesture(cancelled: true)
+        XCTAssertEqual(settings.thumbnailColumns(for: .downloads), 3)
+        zoom.displayFrame(at: CACurrentMediaTime() + 10)
+        XCTAssertEqual(zoom.layout.spec.level, 3)
+        XCTAssertEqual(settings.thumbnailColumns(for: .queue), 5)
+        XCTAssertEqual(settings.thumbnailColumns(for: .completed), 5)
     }
 
     func testAllAdjacentDirectionsBlendDepartingNeighboursAndKeepAlignedPhotosContinuous() async throws {

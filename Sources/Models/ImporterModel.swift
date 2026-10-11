@@ -68,11 +68,8 @@ private final class LocalMediaFolderMonitor: @unchecked Sendable {
 
 @MainActor
 final class ImporterModel: ObservableObject {
-    private static let outputFolderDefaultsKey = "OutputFolderPath"
-    private static let outputFolderBookmarkDefaultsKey = "OutputFolderBookmark.v1"
+    let settings: AppSettings
     private static let completedRecordsDefaultsKey = "CompletedRecords.v1"
-    private static let downloadOutputFolderDefaultsKey = "DownloadOutputFolderPath.v1"
-    private static let downloadOutputFolderBookmarkDefaultsKey = "DownloadOutputFolderBookmark.v1"
     private static let downloadCompletedRecordsDefaultsKey = "DownloadCompletedRecords.v1"
     private static var appDisplayName: String {
         let bundle = Bundle.main
@@ -95,7 +92,9 @@ final class ImporterModel: ObservableObject {
         defaultOutputFolder.appendingPathComponent("Downloader", isDirectory: true)
     }
 
-    @Published var selection: SidebarSection? = .queue
+    @Published var selection: SidebarSection? = .queue {
+        didSet { if let selection { settings.selectedPage = selection } }
+    }
     @Published var files: [URL] = []
     @Published var pairs: [PairItem] = []
     @Published var selectedPairIDs = Set<PairItem.ID>()
@@ -106,18 +105,19 @@ final class ImporterModel: ObservableObject {
     @Published var selectedCompletedIDs = Set<CompletedItem.ID>()
     @Published var completedFilter: CompletedFilter = .all {
         didSet {
+            settings.completedFilter = completedFilter
             retainVisibleCompletedSelection()
         }
     }
     @Published var outputFolder: URL {
         didSet {
-            UserDefaults.standard.set(outputFolder.path, forKey: Self.outputFolderDefaultsKey)
+            settings.setFolderPath(outputFolder.path, for: .output)
             refreshLocalFileMonitoring()
         }
     }
     @Published var importToPhotos = true {
         didSet {
-            UserDefaults.standard.set(importToPhotos, forKey: AppPreferenceKey.importToPhotos)
+            settings.importToPhotos = importToPhotos
             if !importToPhotos {
                 addToAlbum = false
             }
@@ -125,12 +125,12 @@ final class ImporterModel: ObservableObject {
     }
     @Published var addToAlbum = false {
         didSet {
-            UserDefaults.standard.set(addToAlbum, forKey: AppPreferenceKey.addToAlbum)
+            settings.addToAlbum = addToAlbum
         }
     }
     @Published var completedAddToAlbum = false {
         didSet {
-            UserDefaults.standard.set(completedAddToAlbum, forKey: AppPreferenceKey.completedAddToAlbum)
+            settings.completedAddToAlbum = completedAddToAlbum
         }
     }
     @Published var isProcessing = false
@@ -139,7 +139,7 @@ final class ImporterModel: ObservableObject {
     @Published var downloadShareText = ""
     @Published var downloadOutputFolder: URL {
         didSet {
-            UserDefaults.standard.set(downloadOutputFolder.path, forKey: Self.downloadOutputFolderDefaultsKey)
+            settings.setFolderPath(downloadOutputFolder.path, for: .download)
             downloadPresentationIsDirty = true
             refreshLocalFileMonitoring()
         }
@@ -155,6 +155,7 @@ final class ImporterModel: ObservableObject {
     @Published var downloadFilter: DownloadFilter = .all {
         didSet {
             guard downloadFilter != oldValue else { return }
+            settings.downloadFilter = downloadFilter
             if downloadPresentationIsDirty { rebuildVisibleDownloadItems() }
             else { applyDownloadFilter() }
             retainVisibleDownloadSelection()
@@ -525,17 +526,19 @@ final class ImporterModel: ObservableObject {
             MediaFileRevision(url).map { (url.resolvingSymlinksInPath().standardizedFileURL.path, $0) }
         }, uniquingKeysWith: { first, _ in first })
     }
-    init(refreshOnInit: Bool = true) {
-        let defaults = UserDefaults.standard
-        let preferredImportToPhotos = defaults.object(forKey: AppPreferenceKey.importToPhotos) as? Bool ?? true
-        importToPhotos = preferredImportToPhotos
-        addToAlbum = preferredImportToPhotos && (defaults.object(forKey: AppPreferenceKey.addToAlbum) as? Bool ?? false)
-        completedAddToAlbum = defaults.object(forKey: AppPreferenceKey.completedAddToAlbum) as? Bool ?? false
+    init(refreshOnInit: Bool = true, settings: AppSettings = .shared) {
+        self.settings = settings
+        importToPhotos = settings.importToPhotos
+        addToAlbum = settings.addToAlbum
+        completedAddToAlbum = settings.completedAddToAlbum
+        selection = settings.selectedPage
+        completedFilter = settings.completedFilter
+        downloadFilter = settings.downloadFilter
 
         let resolvedOutputFolder: URL
-        if let bookmarkedFolder = Self.resolveOutputFolderBookmark() {
+        if let bookmarkedFolder = settings.resolveFolderBookmark(for: .output) {
             resolvedOutputFolder = bookmarkedFolder
-        } else if let path = UserDefaults.standard.string(forKey: Self.outputFolderDefaultsKey), !path.isEmpty {
+        } else if let path = settings.folderPath(for: .output), !path.isEmpty {
             resolvedOutputFolder = URL(fileURLWithPath: path)
         } else {
             resolvedOutputFolder = Self.defaultOutputFolder
@@ -543,9 +546,9 @@ final class ImporterModel: ObservableObject {
         outputFolder = resolvedOutputFolder
 
         let resolvedDownloadOutputFolder: URL
-        if let bookmarkedDownloadFolder = Self.resolveDownloadOutputFolderBookmark() {
+        if let bookmarkedDownloadFolder = settings.resolveFolderBookmark(for: .download) {
             resolvedDownloadOutputFolder = bookmarkedDownloadFolder
-        } else if let path = Self.downloadOutputFolderPath(), !path.isEmpty {
+        } else if let path = settings.folderPath(for: .download), !path.isEmpty {
             resolvedDownloadOutputFolder = URL(fileURLWithPath: path)
         } else {
             resolvedDownloadOutputFolder = Self.defaultDownloadOutputFolder
@@ -755,7 +758,7 @@ final class ImporterModel: ObservableObject {
     }
 
     private func authorizedOutputFolderForUserAction() -> URL? {
-        if let bookmarkedFolder = Self.resolveOutputFolderBookmark() {
+        if let bookmarkedFolder = settings.resolveFolderBookmark(for: .output) {
             if outputFolder.standardizedFileURL != bookmarkedFolder.standardizedFileURL {
                 outputFolder = bookmarkedFolder
             }
@@ -765,92 +768,13 @@ final class ImporterModel: ObservableObject {
     }
 
     private func authorizedDownloadOutputFolderForUserAction() -> URL? {
-        if let bookmarkedFolder = Self.resolveDownloadOutputFolderBookmark() {
+        if let bookmarkedFolder = settings.resolveFolderBookmark(for: .download) {
             if downloadOutputFolder.standardizedFileURL != bookmarkedFolder.standardizedFileURL {
                 downloadOutputFolder = bookmarkedFolder
             }
             return bookmarkedFolder
         }
         return downloadOutputFolder.standardizedFileURL
-    }
-
-    private static func resolveOutputFolderBookmark() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: outputFolderBookmarkDefaultsKey) else {
-            return nil
-        }
-        var isStale = false
-        do {
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ).standardizedFileURL
-            if isStale {
-                saveOutputFolderBookmark(for: url)
-            }
-            UserDefaults.standard.set(url.path, forKey: outputFolderDefaultsKey)
-            return url
-        } catch {
-            UserDefaults.standard.removeObject(forKey: outputFolderBookmarkDefaultsKey)
-            return nil
-        }
-    }
-
-    private static func saveOutputFolderBookmark(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: [.withSecurityScope],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(data, forKey: outputFolderBookmarkDefaultsKey)
-            UserDefaults.standard.set(url.path, forKey: outputFolderDefaultsKey)
-        } catch {
-            UserDefaults.standard.set(url.path, forKey: outputFolderDefaultsKey)
-        }
-    }
-
-    private static func resolveDownloadOutputFolderBookmark() -> URL? {
-        let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: downloadOutputFolderBookmarkDefaultsKey) else {
-            return nil
-        }
-        var isStale = false
-        do {
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ).standardizedFileURL
-            if isStale {
-                saveDownloadOutputFolderBookmark(for: url)
-            }
-            defaults.set(url.path, forKey: downloadOutputFolderDefaultsKey)
-            return url
-        } catch {
-            defaults.removeObject(forKey: downloadOutputFolderBookmarkDefaultsKey)
-            return nil
-        }
-    }
-
-    private static func saveDownloadOutputFolderBookmark(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: [.withSecurityScope],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(data, forKey: downloadOutputFolderBookmarkDefaultsKey)
-            UserDefaults.standard.set(url.path, forKey: downloadOutputFolderDefaultsKey)
-        } catch {
-            UserDefaults.standard.set(url.path, forKey: downloadOutputFolderDefaultsKey)
-        }
-    }
-
-    private static func downloadOutputFolderPath() -> String? {
-        UserDefaults.standard.string(forKey: downloadOutputFolderDefaultsKey)
     }
 
     private nonisolated static func withSecurityScopedAccess<T>(to url: URL, _ body: () throws -> T) rethrows -> T {
@@ -997,11 +921,11 @@ final class ImporterModel: ObservableObject {
             downloadDisplayOrdersByPath = Dictionary(downloadDisplayOrdersByPath.map { (path($0.key), $0.value) }, uniquingKeysWith: { _, next in next })
             completedMutationVersion += 1
             outputFolder = destination
-            Self.saveOutputFolderBookmark(for: destination)
+            settings.saveFolderBookmark(for: destination, folder: .output)
             let relocatedDownloadFolder = url(downloadOutputFolder)
             if relocatedDownloadFolder.standardizedFileURL != downloadOutputFolder.standardizedFileURL {
                 downloadOutputFolder = relocatedDownloadFolder
-                Self.saveDownloadOutputFolderBookmark(for: relocatedDownloadFolder)
+                settings.saveFolderBookmark(for: relocatedDownloadFolder, folder: .download)
             }
             saveCompletedRecords()
             saveDownloadCompletedRecords()
@@ -1090,7 +1014,7 @@ final class ImporterModel: ObservableObject {
         guard !isPreparingToQuit, !fileOperationsBusy else { return }
         let standardizedFolder = folder.standardizedFileURL
         downloadOutputFolder = standardizedFolder
-        Self.saveDownloadOutputFolderBookmark(for: downloadOutputFolder)
+        settings.saveFolderBookmark(for: downloadOutputFolder, folder: .download)
         refreshDownloads()
         downloadStatusText = "下载文件夹已设置为“\(downloadOutputFolder.path)”。"
     }

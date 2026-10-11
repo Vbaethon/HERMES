@@ -37,7 +37,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = [
-    "Sources/UIModels.swift", "Sources/Utilities/FileSystemUtilities.swift",
+    "Sources/UIModels.swift", "Sources/AppSettings.swift", "Sources/Utilities/FileSystemUtilities.swift",
     "Sources/Utilities/NativeMediaResources.swift",
     "Sources/Views/CollectionViews/ThumbnailGridController.swift",
     "Sources/Views/CollectionViews/ThumbnailGridArrangementController.swift",
