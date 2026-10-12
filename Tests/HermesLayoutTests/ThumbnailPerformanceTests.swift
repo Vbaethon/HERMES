@@ -14,6 +14,75 @@ private actor ThumbnailLoadMetrics {
 
 @MainActor
 final class ThumbnailPerformanceTests: XCTestCase {
+    func testFirstScreenThumbnailReportsReadinessWithoutIndividualFadeOrProgressViews() async throws {
+        _ = NSApplication.shared
+        let item = ThumbnailCollectionItem()
+        let view = try XCTUnwrap(item.view as? ThumbnailItemView)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        var completions = 0
+        item.onThumbnailReady = { completions += 1 }
+        item.shouldAnimateThumbnail = { false }
+        item.configure(with: URL(fileURLWithPath: "/tmp/\(UUID().uuidString).png"))
+        XCTAssertFalse(item.hasPreparedThumbnail)
+        XCTAssertTrue(view.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty)
+        for _ in 0..<100 where item.imageView?.image == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(item.imageView?.image, "An unavailable file must finish as a placeholder")
+        XCTAssertTrue(item.hasPreparedThumbnail)
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(item.imageView?.alphaValue, 1)
+        XCTAssertNil(item.imageView?.layer?.animation(forKey: "opacity"))
+        XCTAssertTrue(view.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty)
+        item.prepareForReuse()
+        XCTAssertFalse(item.hasPreparedThumbnail)
+        XCTAssertNil(item.onThumbnailReady, "Recycling must detach the previous page's readiness callback")
+        XCTAssertNil(item.shouldAnimateThumbnail, "Recycling must detach the previous page's animation policy")
+    }
+
+    func testLaterColdThumbnailFadesWithNativeAppKitAnimationWithoutProgressViews() async throws {
+        _ = NSApplication.shared
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("later-photo.png")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 400, pixelsHigh: 600,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
+
+        let item = ThumbnailCollectionItem()
+        let view = try XCTUnwrap(item.view as? ThumbnailItemView)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        var completions = 0
+        item.onThumbnailReady = { completions += 1 }
+        item.configure(with: url)
+        XCTAssertFalse(item.hasPreparedThumbnail, "The uncached image must use the asynchronous path")
+        for _ in 0..<100 where item.imageView?.image == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let imageView = try XCTUnwrap(item.imageView)
+        XCTAssertNotNil(imageView.image)
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(imageView.alphaValue, 1)
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            XCTAssertNil(imageView.layer?.animation(forKey: "opacity"))
+        } else {
+            XCTAssertNotNil(imageView.layer?.animation(forKey: "opacity"),
+                            "Later asynchronous artwork must fade through NSView's AppKit animator")
+        }
+        XCTAssertTrue(view.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty)
+        item.prepareForReuse()
+    }
+
     func testOrdinaryPhotoCreatesStateViewsOnlyWhenTheirStateIsNeeded() throws {
         let item = ThumbnailCollectionItem()
         let view = try XCTUnwrap(item.view as? ThumbnailItemView)
@@ -182,7 +251,10 @@ final class ThumbnailPerformanceTests: XCTestCase {
         grid.updateItems((0..<70).map { ThumbnailGridItem(id: "prefetch-\($0)",
             url: $0 == 15 ? url : folder.appendingPathComponent("missing-\($0).png"),
             status: .finished, mediaKind: .photo, contentVersion: 7) }, animatingDifferences: false)
-        try await Task.sleep(for: .milliseconds(30))
+        for _ in 0..<100 where grid.nsCollectionView.alphaValue == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 1, "Offscreen prefetch resumes after the first screen is ready")
         let path = IndexPath(item: 15, section: 0)
         XCTAssertNil(grid.nsCollectionView.item(at: path))
         XCTAssertTrue(grid.nsCollectionView.prefetchDataSource === grid)

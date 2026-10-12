@@ -11,6 +11,136 @@ struct ThumbnailGridItem: Identifiable, Hashable {
 }
 
 @MainActor
+private final class ThumbnailGridInitialPresentation {
+    private weak var collectionView: NSCollectionView?
+    private var indicator: NSProgressIndicator?
+    private(set) var isPreparing = true
+    private var contentLoading: Bool?
+    private var hasItems = false
+    private var snapshotReady = false
+    private var updateScheduled = false
+    private var indicatorDelay: Timer?
+    private var canShowIndicator = false
+
+    init(collectionView: NSCollectionView) {
+        self.collectionView = collectionView
+        collectionView.alphaValue = 0
+    }
+
+    func setContentLoading(_ loading: Bool) {
+        contentLoading = loading
+        guard isPreparing else { return }
+        collectionView?.alphaValue = 0
+        update()
+    }
+
+    func beginSnapshot(hasItems: Bool) {
+        guard isPreparing else { return }
+        self.hasItems = hasItems
+        snapshotReady = false
+        collectionView?.alphaValue = 0
+        update()
+    }
+
+    func snapshotDidComplete() {
+        snapshotReady = true
+        update()
+    }
+
+    func scheduleUpdate() {
+        guard isPreparing, !updateScheduled else { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.updateScheduled = false
+            self.update(allowsPresentation: true)
+        }
+    }
+
+    func update(allowsPresentation: Bool = false) {
+        guard let collectionView, let scroll = collectionView.enclosingScrollView else { return }
+        guard isPreparing, collectionView.window != nil else {
+            stopWaiting()
+            return
+        }
+        // An empty array before enumeration finishes is still loading. Only
+        // the completed scan can establish that there is no content to show.
+        if contentLoading == false, !hasItems {
+            isPreparing = false
+            stopWaiting()
+            collectionView.alphaValue = 1
+            return
+        }
+        let visible = scroll.contentView.documentVisibleRect
+        let paths = collectionView.collectionViewLayout?.layoutAttributesForElements(in: visible)
+            .filter { $0.representedElementCategory == .item }.compactMap(\.indexPath) ?? []
+        if allowsPresentation, snapshotReady, !paths.isEmpty, paths.allSatisfy({
+            (collectionView.item(at: $0) as? ThumbnailCollectionItem)?.hasPreparedThumbnail == true
+        }) {
+            isPreparing = false
+            stopWaiting()
+            // Animate the original native collection once, after every first-screen
+            // image (or unavailable placeholder) is installed in its reusable cell.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = ThumbnailCollectionAnimation.duration(
+                    animated: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+                collectionView.animator().alphaValue = 1
+            }
+            return
+        }
+        // Give already cached/quickly prepared artwork the first native layout
+        // turn. A spinner is feedback for an actual wait, not a launch effect.
+        if !allowsPresentation { scheduleUpdate() }
+        guard canShowIndicator else {
+            if indicatorDelay == nil {
+                let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.indicatorDelay = nil
+                        self.canShowIndicator = true
+                        self.update(allowsPresentation: true)
+                    }
+                }
+                indicatorDelay = timer
+                RunLoop.main.add(timer, forMode: .common)
+            }
+            return
+        }
+        if indicator == nil {
+            let progress = NSProgressIndicator()
+            progress.style = .spinning
+            progress.isIndeterminate = true
+            progress.isDisplayedWhenStopped = false
+            progress.isHidden = true
+            progress.setAccessibilityLabel("正在加载媒体列表")
+            progress.sizeToFit()
+            progress.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+            scroll.addSubview(progress)
+            indicator = progress
+        }
+        let viewport = scroll.convert(scroll.contentView.bounds, from: scroll.contentView)
+        if let indicator {
+            indicator.setFrameOrigin(NSPoint(x: viewport.midX - indicator.frame.width / 2,
+                                             y: viewport.midY - indicator.frame.height / 2))
+            if indicator.isHidden {
+                indicator.isHidden = false
+                indicator.startAnimation(nil)
+            }
+        }
+    }
+
+    private func stopWaiting() {
+        indicatorDelay?.invalidate()
+        indicatorDelay = nil
+        canShowIndicator = false
+        indicator?.stopAnimation(nil)
+        indicator?.isHidden = true
+    }
+
+    isolated deinit { indicatorDelay?.invalidate() }
+}
+
+@MainActor
 final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSCollectionViewPrefetching, NSDraggingSource {
     private enum Section {
         static let main = "main"
@@ -31,11 +161,14 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             gridController?.zoom.attachIfNeeded()
+            gridController?.initialPresentation.update()
+            gridController?.initialPresentation.scheduleUpdate()
         }
 
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             gridController?.zoom?.viewportChanged()
+            gridController?.initialPresentation.update()
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -49,6 +182,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         }
 
         override func keyDown(with event: NSEvent) {
+            guard alphaValue == 1 else { return }
             switch event.charactersIgnoringModifiers {
             case "+", "=": gridController?.zoom.step(1)
             case "-": gridController?.zoom.step(-1)
@@ -87,11 +221,16 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     private var exportSession: NSDraggingSession?
     private var snapshotGeneration = 0
     private var prefetchTasks: [String: Task<Void, Never>] = [:]
+    private lazy var initialPresentation = ThumbnailGridInitialPresentation(collectionView: collectionView)
     private(set) var zoom: ThumbnailGridZoomController!
 
     var nsCollectionView: NSCollectionView { collectionView }
     var hasPresentedItems: Bool { !items.isEmpty }
     var onPresentationChange: (() -> Void)?
+
+    func setContentLoading(_ loading: Bool) {
+        initialPresentation.setContentLoading(loading)
+    }
 
     init(sectionInset: NSEdgeInsets = ThumbnailCollectionStyle.sectionInset,
          flow: ThumbnailGridArrangementController.Flow = .newestEnd,
@@ -105,6 +244,12 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
             guard let thumbnailItem = item as? ThumbnailCollectionItem,
                   let gridItem = (collectionView as? GridCollectionView)?.gridController?.itemByID[itemID] else {
                 return item
+            }
+            thumbnailItem.onThumbnailReady = { [weak grid = (collectionView as? GridCollectionView)?.gridController] in
+                grid?.initialPresentation.scheduleUpdate()
+            }
+            thumbnailItem.shouldAnimateThumbnail = { [weak grid = (collectionView as? GridCollectionView)?.gridController] in
+                grid?.initialPresentation.isPreparing == false
             }
             (collectionView as? GridCollectionView)?.gridController?.zoom.prepareBadgeAppearance(for: thumbnailItem)
             thumbnailItem.configure(with: gridItem.url, status: gridItem.status, mediaKind: gridItem.mediaKind, contentVersion: gridItem.contentVersion, unavailableMessage: gridItem.unavailableMessage)
@@ -161,6 +306,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
         let presentedIDs = presentedItems.map(\.id)
         if previousIDs != presentedIDs {
             zoom.itemsWillChange(ids: presentedIDs)
+            initialPresentation.beginSnapshot(hasItems: !presentedItems.isEmpty)
         }
         itemByID = Dictionary(uniqueKeysWithValues: presentedItems.map { ($0.id, $0) })
         items = presentedItems
@@ -189,6 +335,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
                 guard let self, self.snapshotGeneration == generation else { return }
                 self.zoom.itemsDidChange(snapshotCompleted: true)
                 self.updateVisibleItems()
+                self.initialPresentation.snapshotDidComplete()
             }
         }
         applySelection(selectedIDs)
@@ -208,6 +355,7 @@ final class ThumbnailGridController: NSObject, NSCollectionViewDelegate, NSColle
     isolated deinit { prefetchTasks.values.forEach { $0.cancel() } }
 
     func collectionView(_ collectionView: NSCollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+        guard !initialPresentation.isPreparing else { return }
         let columns = ZoomGeometry.columns[zoom.layout.spec.level]
         let side = ZoomGeometry.side(width: zoom.layout.viewportSize.width, columns: columns, metrics: zoom.layout.metrics)
         let scale = collectionView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2

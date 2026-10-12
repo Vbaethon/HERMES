@@ -84,8 +84,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     override func showWindow(_ sender: Any?) {
-        super.showWindow(sender)
         toolbarController.installToolbar(in: window)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        super.showWindow(sender)
+        detailController.layoutVisiblePage()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

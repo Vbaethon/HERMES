@@ -207,8 +207,8 @@ final class ImporterModel: ObservableObject {
     private var fileOperationsBusy: Bool { isProcessing || isProcessingDownloads || isImportingCompleted || isImportingDownloadMedia }
     private var completedMutationVersion = 0
     private var needsAnotherCompletedRefresh = false
-    private var isRefreshingCompleted = false
-    private var isRefreshingDownloads = false
+    @Published private(set) var isRefreshingCompleted = false
+    @Published private(set) var isRefreshingDownloads = false
     private var needsAnotherDownloadRefresh = false
     private var downloadMutationVersion = 0
     private var localFileMonitoringStarted = false

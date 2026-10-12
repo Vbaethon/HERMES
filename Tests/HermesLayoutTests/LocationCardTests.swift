@@ -46,7 +46,10 @@ final class LocationCardTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         pending[0].resume(returning: .init(title: "取消的地点", address: nil))
         pending[1].resume(returning: .init(title: "当前地点", address: nil))
-        await Task.yield()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while card.isResolving && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         card.show(a)
         XCTAssertEqual(calls, 2)
         XCTAssertEqual(card.displayedTitle, "当前地点")

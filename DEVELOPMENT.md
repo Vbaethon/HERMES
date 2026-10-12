@@ -1,8 +1,8 @@
 # HERMES 小改动开发
 
-版本 1.5；更新日期：2026-10-11。
+版本 1.10；更新日期：2026-10-12。
 
-变更摘要：保留多选检查器和缩放动态；密集网格按刷新帧分批切换缓存位图，原生交接后再补充所需清晰度，合成效果、选中框与异常提示按需创建，减少 9 列显示和交接开销。
+变更摘要：在 3.0.17 最新首屏加载与淡入实现上修复反向缩放后保持手势时缓存位图批次提前停止的问题；每帧仍最多切换两张，补充所有已准备位图的双向恢复和批量上限检查。保留首屏及隐藏页面恢复的 AppKit 布局修复；准备较慢时才显示页面中央唯一的原生等待指示器，快速加载及确认空页面不闪指示器。已有首屏图片准备好即整体淡入，不再串行等待后台目录重扫；首屏准备期间暂停后台预取。后续单张异步缩略图恢复原生淡入，单元格不添加等待控件。
 
 ## 功能定位
 
@@ -14,9 +14,9 @@
 | 主窗口、侧栏、页面切换、设置 | `Sources/Views/Other/MainWindowController.swift`、`Sources/SidebarController.swift`、`Sources/Views/Other/PageControllers.swift`、`Sources/SettingsWindow.swift` | 模型状态、选择、工具栏、检查器生命周期 | UI/UX 回归；修改设置持久化时补模型回归 |
 | 设置保存、重启恢复、目录书签 | `Sources/AppSettings.swift` | 旧偏好键兼容；导入、相簿、目录及授权书签、页面与筛选、检查器、设置分类、各页缩略图列数；窗口和分栏尺寸由 AppKit 原生自动保存 | `AppSettingsTests`、`ThumbnailZoomTests`、模型与 UI/UX 回归；目录相关修改补原生媒体与下载回归 |
 | 下载输入、进度覆盖层、结果提示 | `Sources/DownloadViews.swift` | 页面布局、输入高度、模型进度、集合视图；只改呈现不必自动扩大为平台下载回归 | `script/test_window_layout.py`、UI/UX 回归 |
-| 集合布局、滚动、选择、拖出、删除 | `Sources/Views/CollectionViews/ThumbnailGridController.swift`、`ThumbnailGridArrangementController.swift` | 单元格、媒体身份、文件操作；与系统 AppKit 行为核对 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
+| 集合布局、首屏与隐藏页面恢复、滚动、选择、拖出、删除 | `Sources/Views/CollectionViews/ThumbnailGridController.swift`、`ThumbnailGridArrangementController.swift` | `ThumbnailGridInitialPresentation` 管理页面唯一等待器与首屏整体淡入；原生滚动区尺寸、单元格、媒体身份、文件操作 | `ThumbnailArrangementTests`、`HermesLayoutTests`；最终候选补真实主窗口 UI/UX 回归 |
 | 缩略图缩放、焦点、叠化、角标恢复 | `Sources/Views/CollectionViews/ThumbnailGridZoomController.swift`、`ThumbnailZoomGeometry.swift`、`ThumbnailZoomOverlay.swift` | 对数列宽、33 ms 增量平滑、速度投影与弹簧；六个相邻方向、边界、交接、位图身份、逐帧尺寸调整与反向恢复、单元格角标 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
-| 缩略图加载、缓存、单元格、合成效果 | `Sources/Views/Thumbnail/` | 系统缩略图、异步图像身份、复用、拖出、缩放交接；密集尺寸缓存与按需创建的状态控件 | `HermesLayoutTests`；最终候选补 UI/UX 回归 |
+| 缩略图加载、缓存、单元格、合成效果 | `Sources/Views/Thumbnail/` | 系统缩略图、准备完成回调、首屏整体与后续单图的 AppKit 淡入、异步图像身份、复用、拖出、缩放交接；单元格不添加等待控件，密集尺寸缓存与按需创建的状态控件 | `ThumbnailPerformanceTests`、`HermesLayoutTests`；最终候选补 UI/UX 回归 |
 | 下载、队列、已完成页面的媒体映射 | `Sources/Views/CollectionViews/DownloadCollectionView.swift`、`PairCollectionView.swift`、`CompletedCollectionView.swift` | `UIModels`、准确配对身份、原生资源动作、共享网格 | 布局、UI/UX、原生媒体回归 |
 | 检查器、媒体信息、地图位置卡 | `Sources/Views/Other/MediaInspectorController.swift`、`MediaInspectorSelection.swift`、`MediaLocationCard.swift`、`Sources/Utilities/MediaInspection.swift` | 页面选择映射、多选共同元数据、原生表单、坐标、迟到异步结果、宽度和可见性 | `LocationCardTests`、UI/UX、原生媒体回归 |
 | 队列、合成、历史记录、筛选、文件监控、目录迁移 | `Sources/Models/ImporterModel.swift` | 跨页面状态、文件读写、记录生命周期；按共享模型变更处理 | 模型、UI/UX、原生媒体回归；最终候选补下载、合成与元数据检查 |
@@ -104,6 +104,8 @@ Demo 能加快局部确认，不能替代真实主窗口的布局、手势、交
 交互遵循 Apple HIG 的[手势](https://developer.apple.com/design/human-interface-guidelines/gestures)与[动态效果](https://developer.apple.com/design/human-interface-guidelines/motion)：标准缩放及时反馈、动画可中断，并响应系统“减少动态效果”。网格的 `+` / `-` 键盘快捷键提供手势以外的入口。
 
 网格由 [NSCollectionView](https://developer.apple.com/documentation/appkit/nscollectionview) 管理单元格复用、选择和拖出，通过 [NSCollectionViewPrefetching](https://developer.apple.com/documentation/appkit/nscollectionviewprefetching) 预取资源；图片由 [Quick Look](https://developer.apple.com/documentation/quicklookthumbnailing/qlthumbnailgenerator/request) 按目标尺寸和屏幕比例生成，常态呈现交给 `NSImageView`。缩放期间的缓存图像交给 Core Animation 合成，尺寸调整使用 [NSView.displayLink](https://developer.apple.com/documentation/appkit/nsview/displaylink(target:selector:)) 随所在屏幕刷新，空闲后停止。
+
+首次呈现以 macOS“照片”的交互为参考，并遵循 Apple 的[加载](https://developer.apple.com/design/human-interface-guidelines/loading)与[等待指示器](https://developer.apple.com/design/human-interface-guidelines/progress-indicators)指南：准备超过 300ms 才在固定中央位置显示一个 `NSProgressIndicator`（`.spinning`、不确定进度）；快速完成或确认空时取消等待器，确认结果为空前不显示空状态。300ms 是本应用根据实际首屏准备时间避免控件闪现的策略，并非 Apple 规定时长或“照片”的内部实现。已有记录的首屏图片准备完成后即通过 [NSAnimationContext](https://developer.apple.com/documentation/appkit/nsanimationcontext) 与 [animator()](https://developer.apple.com/documentation/appkit/nsanimatablepropertycontainer/animator%28%29) 修改原集合视图的 `alphaValue`，目录重扫继续后台运行；后续单图冷加载仅对已有 `NSImageView` 使用同一原生接口，不增加单元格等待控件。
 
 缓存档位与每帧批量是 HERMES 经实测选择的策略，不代表照片 App 的内部实现。按 [Apple 的渲染效率建议](https://developer.apple.com/documentation/xcode/improving-your-app-s-rendering-efficiency)减少无效更新，并用同一素材的 Instruments 结果检查优化；脚本回调间隔不能作为屏幕帧率。
 

@@ -114,7 +114,16 @@ final class DetailPagesController: NSViewController {
         }
         if selectionChanged {
             controller(for: selection)?.setVisible(true)
+            layoutVisiblePage()
         }
+    }
+
+    func layoutVisiblePage() {
+        // A hidden page can already have a completed layout at its fitting
+        // size. Explicitly invalidate it when it joins the real window.
+        view.needsLayout = true
+        (controller(for: activeSelection) as? NSViewController)?.view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
     }
 
     @objc private func showOperationNotice() {
@@ -299,8 +308,7 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
             pair.0.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
-        scrollView?.isHidden = model.completed.isEmpty
-        emptyView.isHidden = !model.completed.isEmpty
+        updateCollectionVisibility()
 
         model.$completed
             .receive(on: RunLoop.main)
@@ -308,6 +316,11 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
             .store(in: &cancellables)
 
         model.$completedFilter
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
+
+        model.$isRefreshingCompleted
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
@@ -333,8 +346,6 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
             )
         }
         if visibleCompleted.isEmpty {
-            scrollView?.isHidden = true
-            emptyView.isHidden = false
             switch model.completedFilter {
             case .all:
                 emptyView.message = "合成完成后会显示在这里。"
@@ -343,9 +354,15 @@ final class CompletedPageController: NSViewController, ThumbnailPageController {
             case .added:
                 emptyView.message = "没有已导入的项目。"
             }
-            return
         }
-        emptyView.isHidden = true
-        scrollView?.isHidden = false
+        updateCollectionVisibility()
+    }
+
+    private func updateCollectionVisibility() {
+        let hasItems = coordinator?.gridController?.hasPresentedItems == true
+        coordinator?.gridController?.setContentLoading(model.isRefreshingCompleted)
+        let showsCollection = hasItems || model.isRefreshingCompleted
+        scrollView?.isHidden = !showsCollection
+        emptyView.isHidden = showsCollection
     }
 }

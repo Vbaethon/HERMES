@@ -101,6 +101,405 @@ import Foundation
         terminationWindow.window?.orderOut(nil)
         pass("window close and Cmd-Q share native confirmation/progress alerts; Continue preserves work and Exit waits for safe cleanup")
 
+        let startupRoot = root.appendingPathComponent("startup-gallery", isDirectory: true)
+        let startupOutput = startupRoot.appendingPathComponent("completed", isDirectory: true)
+        let startupDownloads = startupRoot.appendingPathComponent("downloads", isDirectory: true)
+        for folder in [startupOutput, startupDownloads] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        // Geometry does not depend on image decoding. Tiny isolated files keep
+        // the model's revision checks valid without reading any user media.
+        let startupCompleted = try (0..<78).map { index -> CompletedItem in
+            let url = startupOutput.appendingPathComponent("completed-\(index).png")
+            try Data([0]).write(to: url)
+            return CompletedItem(imagePath: url.path, modifiedTime: Double(index), standaloneRevision: MediaFileRevision(url))
+        }
+        let startupPairs = try (0..<79).map { index -> PairItem in
+            let image = startupDownloads.appendingPathComponent("download-\(index).png")
+            let video = startupDownloads.appendingPathComponent("download-\(index).mov")
+            try Data([0]).write(to: image)
+            try Data([0]).write(to: video)
+            return PairItem(imageURL: image, videoURL: video)
+        }
+        var startupLoadingFramesBeforeCells = 0
+        for initialPage in [SidebarSection.completed, .downloads] {
+            let startupSuite = "HermesStartupRegression.\(UUID().uuidString)"
+            let startupDefaults = UserDefaults(suiteName: startupSuite)!
+            defer { startupDefaults.removePersistentDomain(forName: startupSuite) }
+            let startupSettings = AppSettings(defaults: startupDefaults)
+            startupSettings.selectedPage = initialPage
+            startupSettings.inspectorVisible = false
+            startupSettings.setFolderPath(startupOutput.path, for: .output)
+            startupSettings.setFolderPath(startupDownloads.path, for: .download)
+            let startupModel = ImporterModel(refreshOnInit: false, settings: startupSettings)
+            startupModel.completed = Array(startupCompleted.prefix(77))
+            startupModel.downloadPairs = Array(startupPairs.prefix(78))
+            startupModel.downloadFilter = .notComposed
+            startupModel.downloadFilter = .all
+            let startupMain = MainWindowController(model: startupModel)
+            let startupWindow = startupMain.window!
+            let startupContent = startupWindow.contentView!
+            func checkStartupLoadingFrame(phase: String) {
+                guard let collection = descendants(startupContent).compactMap({ $0 as? NSCollectionView }).first,
+                      let scroll = collection.enclosingScrollView else { return }
+                // Read existing frames only. A test-side layout here settles
+                // the pending native snapshot and can conceal a misplaced spinner.
+                let viewport = startupContent.convert(scroll.contentView.frame, from: scroll)
+                guard viewport.width > 0 && viewport.height > 0 else { return }
+                expect(descendants(collection).allSatisfy { !($0 is NSProgressIndicator) },
+                       "\(initialPage) \(phase): native thumbnail cells must not contain progress indicators")
+                let indicators = descendants(startupContent).compactMap { $0 as? NSProgressIndicator }
+                    .filter { $0.accessibilityLabel() == "正在加载媒体列表" && !$0.isHiddenOrHasHiddenAncestor }
+                expect(indicators.count <= 1, "\(initialPage) \(phase): the page must have only one waiting indicator")
+                for indicator in indicators {
+                    expect(indicator.style == .spinning && indicator.isIndeterminate,
+                           "\(initialPage) \(phase): waiting must use an indeterminate native AppKit spinner")
+                    let actual = startupContent.convert(indicator.bounds, from: indicator)
+                    if collection.visibleItems().isEmpty { startupLoadingFramesBeforeCells += 1 }
+                    expect(actual.width > 0 && actual.height > 0 && viewport.contains(actual),
+                           "\(initialPage) \(phase): the list spinner must fit the actual clip viewport; indicator=\(actual), viewport=\(viewport)")
+                    expect(abs(actual.midX - viewport.midX) <= 1 && abs(actual.midY - viewport.midY) <= 1,
+                           "\(initialPage) \(phase): the single list spinner must be centered while the page prepares; indicator=\(actual), viewport=\(viewport), cells=\(collection.visibleItems().count), sections=\(collection.numberOfSections)")
+                    expect(collection.alphaValue == 0,
+                           "\(initialPage) \(phase): the whole collection must remain transparent while its waiting indicator is visible")
+                }
+            }
+            func checkStartupPageAllocation(phase: String) {
+                let collection = descendants(startupContent).compactMap { $0 as? NSCollectionView }.first!
+                let scroll = collection.enclosingScrollView!
+                let page = scroll.superview!
+                let split = startupWindow.contentViewController as! NSSplitViewController
+                let detail = split.splitViewItems[1].viewController.view
+                let frame = scroll.frame
+                let expected = page.bounds
+                expect(abs(frame.minX - expected.minX) <= 1 && abs(frame.minY - expected.minY) <= 1
+                        && abs(frame.maxX - expected.maxX) <= 1 && abs(frame.maxY - expected.maxY) <= 1,
+                       "\(initialPage) \(phase): the gallery scroll must fill its page on the first paint, not use its loading indicator's fitting height; scroll=\(frame), page=\(expected), detail=\(detail.bounds)")
+                let pageInWindow = page.convert(page.bounds, to: nil)
+                let detailContent = detail.convert(detail.safeAreaLayoutGuide.frame, to: nil)
+                let windowContent = startupWindow.contentLayoutRect
+                expect(abs(page.frame.height - detail.bounds.height) <= 1
+                        && detailContent.height >= windowContent.height - 1
+                        && pageInWindow.intersection(windowContent).height >= windowContent.height - 1,
+                       "\(initialPage) \(phase): the page and detail must retain the actual native content height; page=\(pageInWindow), detail=\(detailContent), windowContent=\(windowContent)")
+            }
+            checkStartupLoadingFrame(phase: "attached before first show")
+            startupMain.showWindow(nil)
+            checkStartupPageAllocation(phase: "first show returned")
+            checkStartupLoadingFrame(phase: "first show returned")
+            defer { startupWindow.orderOut(nil) }
+
+            func startupPresentationReady(count expectedCount: Int) -> Bool {
+                guard let collection = descendants(startupContent).compactMap({ $0 as? NSCollectionView }).first,
+                      let scroll = collection.enclosingScrollView,
+                      let layout = collection.collectionViewLayout as? ThumbnailGridLayout,
+                      collection.numberOfSections == 1,
+                      collection.numberOfItems(inSection: 0) == expectedCount,
+                      layout.count == expectedCount,
+                      collection.alphaValue == 1 else { return false }
+                let attributes = layout.layoutAttributesForElements(in: scroll.contentView.documentVisibleRect)
+                guard !attributes.isEmpty, attributes.allSatisfy({ attributes in
+                    guard let path = attributes.indexPath,
+                          let cell = collection.item(at: path) as? ThumbnailCollectionItem else { return false }
+                    return cell.hasPreparedThumbnail
+                }) else { return false }
+                return scroll.subviews.compactMap { $0 as? NSProgressIndicator }
+                    .filter { $0.accessibilityLabel() == "正在加载媒体列表" }
+                    .allSatisfy(\.isHidden)
+            }
+
+            func checkStartupGallery(count expectedCount: Int, phase: String, allowsPreparing: Bool = false) {
+                checkStartupPageAllocation(phase: phase)
+                let collection = descendants(startupContent).compactMap { $0 as? NSCollectionView }.first!
+                let scroll = collection.enclosingScrollView!
+                let layout = collection.collectionViewLayout as! ThumbnailGridLayout
+                let visible = scroll.contentView.documentVisibleRect
+                let description = "\(initialPage) \(phase)"
+                expect(collection.numberOfSections == 1 && layout.count == expectedCount
+                        && collection.numberOfItems(inSection: 0) == expectedCount,
+                       "\(description): the first native snapshot must contain the complete page")
+                expect(layout.viewportSize == visible.size && visible.width > 0 && visible.height > 0,
+                       "\(description): the native clip viewport must be the layout's viewport; layout=\(layout.viewportSize), visible=\(visible), document=\(collection.frame)")
+                let maximum = max(0, layout.collectionViewContentSize.height - visible.height)
+                expect(visible.minY >= -0.5 && abs(visible.minY - maximum) <= 1,
+                       "\(description): the first presentation must reach the newest end without a later refresh")
+                let attributes = layout.layoutAttributesForElements(in: visible)
+                let rows = Set(attributes.map { Int(($0.frame.minY * 2).rounded()) })
+                expect(rows.count >= 2, "\(description): startup must display multiple rows instead of a clipped bottom strip")
+                expect(attributes.contains { $0.indexPath?.item == expectedCount - 1 },
+                       "\(description): the newest item must be in the native clip viewport")
+                for attributes in attributes {
+                    guard let path = attributes.indexPath, let cell = collection.item(at: path) else {
+                        preconditionFailure("\(description): every visible layout item must have a realized native cell")
+                    }
+                    let actual = cell.view.frame
+                    let expected = attributes.frame
+                    expect(abs(actual.minX - expected.minX) <= 0.5 && abs(actual.minY - expected.minY) <= 0.5
+                            && abs(actual.width - expected.width) <= 0.5 && abs(actual.height - expected.height) <= 0.5,
+                           "\(description): native cell \(path.item) must match its layout attributes; actual=\(actual), expected=\(expected)")
+                    expect(cell.view.alphaValue > 0 && !cell.view.isHidden,
+                           "\(description): visible native cells must not retain hidden insertion attributes")
+                }
+                expect(descendants(collection).allSatisfy { !($0 is NSProgressIndicator) },
+                       "\(description): reusable native cells must not contain waiting indicators")
+                let prepared = attributes.allSatisfy { attributes in
+                    guard let path = attributes.indexPath,
+                          let cell = collection.item(at: path) as? ThumbnailCollectionItem else { return false }
+                    return cell.hasPreparedThumbnail
+                }
+                let listIndicators = scroll.subviews.compactMap { $0 as? NSProgressIndicator }
+                    .filter { $0.accessibilityLabel() == "正在加载媒体列表" }
+                expect(listIndicators.count <= 1,
+                       "\(description): the gallery must own at most one native waiting indicator")
+                if !allowsPreparing || collection.alphaValue == 1 {
+                    expect(prepared, "\(description): the collection may fade in only after every first-screen thumbnail or failure placeholder is prepared")
+                }
+                if allowsPreparing && collection.alphaValue == 0 {
+                    expect(listIndicators.count <= 1,
+                           "\(description): first-screen preparation may show at most one delayed page-level waiting indicator")
+                    checkStartupLoadingFrame(phase: phase)
+                } else {
+                    expect(collection.alphaValue == 1 && listIndicators.allSatisfy(\.isHidden),
+                           "\(description): the prepared collection must fade in together and stop its waiting indicator")
+                }
+            }
+
+            // Showing the real window must prepare its first paint without a
+            // test-only layout or a subsequent scanner update repairing it.
+            checkStartupGallery(count: initialPage == .completed ? 77 : 78, phase: "first presentation", allowsPreparing: true)
+            for page in [SidebarSection.completed, .downloads, initialPage] {
+                startupModel.selection = page
+                checkStartupLoadingFrame(phase: "page selection before its run-loop delivery to \(page)")
+                try await waitUntil { startupPresentationReady(count: page == .completed ? 77 : 78) }
+                checkStartupLoadingFrame(phase: "prepared page after switch to \(page)")
+                checkStartupGallery(count: page == .completed ? 77 : 78, phase: "initial page switch to \(page)")
+            }
+            startupModel.completedScanner = { _ in
+                try await Task.sleep(for: .milliseconds(40))
+                return startupCompleted
+            }
+            startupModel.downloadScanner = { _, _ in
+                try? await Task.sleep(for: .milliseconds(40))
+                return DownloadScanResult(pairs: startupPairs, photos: [], videos: [])
+            }
+            startupModel.refreshCompleted()
+            try await waitUntil { startupModel.completed.count == 78 }
+            startupModel.refreshDownloads()
+            try await waitUntil { startupModel.visibleDownloadItems.count == 79 }
+            for page in [SidebarSection.completed, .downloads, initialPage] {
+                startupModel.selection = page
+                checkStartupLoadingFrame(phase: "refreshed page selection before run-loop delivery to \(page)")
+                try await waitUntil { startupPresentationReady(count: page == .completed ? 78 : 79) }
+                checkStartupLoadingFrame(phase: "prepared refreshed page after switch to \(page)")
+                checkStartupGallery(count: page == .completed ? 78 : 79, phase: "page switch after asynchronous refresh to \(page)")
+            }
+        }
+        print("Startup loading frame observations before native cells: \(startupLoadingFramesBeforeCells)")
+        pass("real main-window startup preserves full native viewport geometry, uses one centered waiting indicator and reveals prepared thumbnails together before and after refresh/page switching")
+
+        actor StartupScanGate {
+            private var released = false
+            private var started = false
+            private var completion: CheckedContinuation<Void, Never>?
+            private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+            func wait() async {
+                started = true
+                startWaiters.forEach { $0.resume() }
+                startWaiters.removeAll()
+                guard !released else { return }
+                await withCheckedContinuation { completion = $0 }
+            }
+
+            func waitUntilStarted() async {
+                guard !started else { return }
+                await withCheckedContinuation { startWaiters.append($0) }
+            }
+
+            func release() {
+                released = true
+                completion?.resume()
+                completion = nil
+            }
+        }
+
+        let startupBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<2 {
+            for x in 0..<2 { startupBitmap.setColor(.systemBlue, atX: x, y: y) }
+        }
+        let startupImageData = startupBitmap.representation(using: .png, properties: [:])!
+        for initialPage in [SidebarSection.completed, .downloads] {
+            for returnsEmpty in [false, true] {
+                let phase = "\(initialPage) pending initial scan (empty result: \(returnsEmpty))"
+                let fixtureRoot = root.appendingPathComponent("pending-startup-\(UUID().uuidString)", isDirectory: true)
+                let outputFolder = fixtureRoot.appendingPathComponent("completed", isDirectory: true)
+                let downloadFolder = fixtureRoot.appendingPathComponent("downloads", isDirectory: true)
+                for folder in [outputFolder, downloadFolder] {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                }
+                let fixtureFolder = initialPage == .completed ? outputFolder : downloadFolder
+                let resultURLs = try (0..<(returnsEmpty ? 0 : 3)).map { index -> URL in
+                    let url = fixtureFolder.appendingPathComponent("initial-\(index).png")
+                    try startupImageData.write(to: url)
+                    return url
+                }
+                let completedResult = initialPage == .completed ? resultURLs.map {
+                    CompletedItem(imagePath: $0.path, standaloneRevision: MediaFileRevision($0))
+                } : []
+                let downloadResult = DownloadScanResult(pairs: [],
+                    photos: initialPage == .downloads ? resultURLs : [], videos: [])
+                let suite = "HermesPendingStartupRegression.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: suite)!
+                defer { defaults.removePersistentDomain(forName: suite) }
+                let settings = AppSettings(defaults: defaults)
+                settings.selectedPage = initialPage
+                settings.inspectorVisible = false
+                settings.setFolderPath(outputFolder.path, for: .output)
+                settings.setFolderPath(downloadFolder.path, for: .download)
+                let pendingModel = ImporterModel(refreshOnInit: false, settings: settings)
+                pendingModel.completed = []
+                pendingModel.downloadCompleted = []
+                pendingModel.downloadPairs = []
+                pendingModel.downloadPhotos = []
+                pendingModel.downloadVideos = []
+                let completedGate = StartupScanGate()
+                let downloadGate = StartupScanGate()
+                pendingModel.completedScanner = { _ in
+                    await completedGate.wait()
+                    return completedResult
+                }
+                pendingModel.downloadScanner = { _, _ in
+                    await downloadGate.wait()
+                    return downloadResult
+                }
+                pendingModel.refreshCompleted()
+                pendingModel.refreshDownloads()
+                let pendingMain = MainWindowController(model: pendingModel)
+                let pendingWindow = pendingMain.window!
+                let pendingContent = pendingWindow.contentView!
+                pendingMain.showWindow(nil)
+                defer { pendingWindow.orderOut(nil) }
+
+                func visibleWaitingIndicators() -> [NSProgressIndicator] {
+                    descendants(pendingContent).compactMap { $0 as? NSProgressIndicator }
+                        .filter { $0.accessibilityLabel() == "正在加载媒体列表" && !$0.isHiddenOrHasHiddenAncestor }
+                }
+                func visibleEmptyStates() -> [EmptyStateView] {
+                    descendants(pendingContent).compactMap { $0 as? EmptyStateView }
+                        .filter { !$0.isHiddenOrHasHiddenAncestor }
+                }
+                func checkPendingFirstFrame(_ moment: String, requiresIndicator: Bool = false) {
+                    let description = "\(phase), \(moment)"
+                    let collection = descendants(pendingContent).compactMap { $0 as? NSCollectionView }.first!
+                    let scroll = collection.enclosingScrollView!
+                    let viewport = pendingContent.convert(scroll.contentView.frame, from: scroll)
+                    let indicators = visibleWaitingIndicators()
+                    expect(indicators.count <= 1 && (!requiresIndicator || indicators.count == 1),
+                           "\(description): preparation must use at most one list spinner, and a prolonged wait must show it")
+                    expect(viewport.width > 0 && viewport.height > 0,
+                           "\(description): preparation must retain the full native viewport")
+                    for indicator in indicators {
+                        let indicatorFrame = pendingContent.convert(indicator.bounds, from: indicator)
+                        expect(indicator.style == .spinning && indicator.isIndeterminate,
+                               "\(description): waiting must use a native indeterminate AppKit spinner")
+                        expect(viewport.contains(indicatorFrame)
+                                && abs(indicatorFrame.midX - viewport.midX) <= 1
+                                && abs(indicatorFrame.midY - viewport.midY) <= 1,
+                               "\(description): the delayed spinner must be centered in the actual native viewport; indicator=\(indicatorFrame), viewport=\(viewport)")
+                    }
+                    expect(collection.alphaValue == 0 && !scroll.isHiddenOrHasHiddenAncestor,
+                           "\(description): the page must retain its native scroll view and conceal the unprepared collection")
+                    expect(visibleEmptyStates().isEmpty,
+                           "\(description): a pending initial scan must never expose an empty-state page")
+                    expect(descendants(collection).allSatisfy { !($0 is NSProgressIndicator) },
+                           "\(description): thumbnail cells must not own waiting indicators")
+                }
+
+                // No test-side layout, yield or delay may repair the first frame.
+                checkPendingFirstFrame("showWindow returned without yielding")
+                await completedGate.waitUntilStarted()
+                await downloadGate.waitUntilStarted()
+                checkPendingFirstFrame("both asynchronous scanners are suspended")
+                if !returnsEmpty {
+                    try await waitUntil { visibleWaitingIndicators().count == 1 }
+                    checkPendingFirstFrame("prolonged scan shows its delayed waiting control", requiresIndicator: true)
+                }
+                await completedGate.release()
+                await downloadGate.release()
+                if returnsEmpty {
+                    try await waitUntil {
+                        !pendingModel.isRefreshingCompleted && !pendingModel.isRefreshingDownloads
+                            && visibleWaitingIndicators().isEmpty && visibleEmptyStates().count == 1
+                    }
+                    expect(pendingModel.completed.isEmpty && pendingModel.visibleDownloadItems.isEmpty,
+                           "\(phase): only a completed empty scan may reveal the genuine empty state")
+                    // Cross the fallback timer's deadline after the fast empty
+                    // result to catch an orphaned delayed waiting control.
+                    try await Task.sleep(for: .milliseconds(350))
+                    expect(visibleWaitingIndicators().isEmpty && visibleEmptyStates().count == 1,
+                           "\(phase): a completed empty scan must cancel the delayed spinner")
+                } else {
+                    try await waitUntil {
+                        guard !pendingModel.isRefreshingCompleted && !pendingModel.isRefreshingDownloads,
+                              let collection = descendants(pendingContent).compactMap({ $0 as? NSCollectionView }).first,
+                              let scroll = collection.enclosingScrollView,
+                              collection.numberOfSections == 1,
+                              collection.numberOfItems(inSection: 0) == resultURLs.count,
+                              collection.alphaValue == 1,
+                              visibleWaitingIndicators().isEmpty, visibleEmptyStates().isEmpty else { return false }
+                        let attributes = collection.collectionViewLayout?.layoutAttributesForElements(in: scroll.contentView.documentVisibleRect) ?? []
+                        return !attributes.isEmpty && attributes.allSatisfy {
+                            guard let path = $0.indexPath,
+                                  let cell = collection.item(at: path) as? ThumbnailCollectionItem else { return false }
+                            return cell.hasPreparedThumbnail
+                        }
+                    }
+                }
+            }
+
+            let emptyRoot = root.appendingPathComponent("known-empty-startup-\(UUID().uuidString)", isDirectory: true)
+            let emptyOutput = emptyRoot.appendingPathComponent("completed", isDirectory: true)
+            let emptyDownloads = emptyRoot.appendingPathComponent("downloads", isDirectory: true)
+            for folder in [emptyOutput, emptyDownloads] {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            }
+            let emptySuite = "HermesKnownEmptyStartupRegression.\(UUID().uuidString)"
+            let emptyDefaults = UserDefaults(suiteName: emptySuite)!
+            defer { emptyDefaults.removePersistentDomain(forName: emptySuite) }
+            let emptySettings = AppSettings(defaults: emptyDefaults)
+            emptySettings.selectedPage = initialPage
+            emptySettings.inspectorVisible = false
+            emptySettings.setFolderPath(emptyOutput.path, for: .output)
+            emptySettings.setFolderPath(emptyDownloads.path, for: .download)
+            let emptyModel = ImporterModel(refreshOnInit: false, settings: emptySettings)
+            emptyModel.completed = []
+            emptyModel.downloadCompleted = []
+            emptyModel.completedScanner = { _ in [] }
+            emptyModel.downloadScanner = { _, _ in DownloadScanResult(pairs: [], photos: [], videos: []) }
+            emptyModel.refreshCompleted()
+            emptyModel.refreshDownloads()
+            try await waitUntil { !emptyModel.isRefreshingCompleted && !emptyModel.isRefreshingDownloads }
+            let emptyMain = MainWindowController(model: emptyModel)
+            let emptyWindow = emptyMain.window!
+            let emptyContent = emptyWindow.contentView!
+            emptyMain.showWindow(nil)
+            defer { emptyWindow.orderOut(nil) }
+            func checkKnownEmpty(_ moment: String) {
+                let indicators = descendants(emptyContent).compactMap { $0 as? NSProgressIndicator }
+                    .filter { $0.accessibilityLabel() == "正在加载媒体列表" && !$0.isHiddenOrHasHiddenAncestor }
+                let emptyStates = descendants(emptyContent).compactMap { $0 as? EmptyStateView }
+                    .filter { !$0.isHiddenOrHasHiddenAncestor }
+                expect(indicators.isEmpty && emptyStates.count == 1,
+                       "\(initialPage) \(moment): a confirmed empty page must show its empty state immediately and skip the waiting indicator")
+            }
+            checkKnownEmpty("first show returned without yielding")
+            try await Task.sleep(for: .milliseconds(350))
+            checkKnownEmpty("after the delayed waiting-control deadline")
+        }
+        pass("completed and downloads avoid false empty first paint, show one centered spinner only for prolonged preparation, and skip delayed spinners after confirmed empty scans")
+
         let downloadProgress = DownloadTaskProgressBarView(frame: CGRect(x: 0, y: 0, width: 620, height: 40))
         let progressWindow = NSWindow(contentRect: downloadProgress.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         progressWindow.contentView = downloadProgress

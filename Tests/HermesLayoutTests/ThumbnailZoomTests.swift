@@ -87,6 +87,12 @@ final class ThumbnailZoomTests: XCTestCase {
     func testAllAdjacentDirectionsBlendDepartingNeighboursAndKeepAlignedPhotosContinuous() async throws {
         let (grid, scroll, window) = fixture()
         defer { window.orderOut(nil) }
+        // This test starts after the page's initial collective presentation;
+        // its assertions concern the separate native pinch handoff.
+        for _ in 0..<100 where grid.nsCollectionView.alphaValue == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 1)
         let zoom = grid.zoom!
         for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)] {
             zoom.zoom(to: from)
@@ -368,6 +374,28 @@ final class ThumbnailZoomTests: XCTestCase {
         pinch(zoom, to: 3)
         XCTAssertTrue(zoom.overlay.image(at: focal) === detail,
                       "Reversing the same pinch must restore the already decoded detail")
+
+        let detailIndices = (0..<70).filter { zoom.overlay.image(at: $0) === detail }
+        XCTAssertGreaterThan(detailIndices.count, 2, "Exercise more than one refresh batch")
+        // Hold each end of the same gesture without sending more input.
+        // Cache work must keep its own refreshes alive after smoothing ends.
+        for target in [CGFloat(0), CGFloat(3)] {
+            pinch(zoom, to: target)
+            let timestamp = CACurrentMediaTime() + 10
+            for tick in 0..<60 {
+                let before = detailIndices.map { zoom.overlay.image(at: $0) }
+                zoom.displayFrame(at: timestamp + Double(tick) / 60)
+                let changed = zip(detailIndices, before).filter { index, image in
+                    zoom.overlay.image(at: index) !== image
+                }.count
+                XCTAssertLessThanOrEqual(changed, 2, "Keep the per-refresh cache switching limit")
+            }
+            let expected = target == 0 ? small : detail
+            XCTAssertTrue(detailIndices.allSatisfy { zoom.overlay.image(at: $0) === expected },
+                          "Every prepared bitmap must settle while the gesture is stationary")
+            XCTAssertNotNil(zoom.gesture, "Cache settlement must not end the held gesture")
+            XCTAssertEqual(zoom.position, target, accuracy: 0.0001)
+        }
         zoom.endGesture(cancelled: true)
         zoom.displayFrame(at: CACurrentMediaTime() + 10)
         await Task.yield()

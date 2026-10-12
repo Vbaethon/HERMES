@@ -25,6 +25,9 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     private var lastAppearance: Appearance?
     private weak var lastAppearanceImage: NSImage?
     private var thumbnailView: ThumbnailItemView? { view as? ThumbnailItemView }
+    var hasPreparedThumbnail: Bool { imageView?.image != nil }
+    var onThumbnailReady: (() -> Void)?
+    var shouldAnimateThumbnail: (() -> Bool)?
     var isPresentingComposition: Bool { thumbnailView?.existingCompositionEffect?.isPresenting == true }
     var onCompositionPresentationEnded: (() -> Void)? {
         get { thumbnailView?.onCompositionPresentationEnded }
@@ -70,6 +73,8 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         badgeTask?.cancel()
         thumbnailTask = nil
         badgeTask = nil
+        onThumbnailReady = nil
+        shouldAnimateThumbnail = nil
         representedURL = nil
         representedContentVersion = nil
         requestedThumbnailSide = 0
@@ -171,7 +176,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
            imageView?.image?.cgImage(forProposedRect: nil, context: nil, hints: nil) === image { return }
         let scale = view.window?.backingScaleFactor ?? 2
         showLoadedThumbnail(NSImage(cgImage: image,
-            size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)), animated: false)
+            size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)))
         updateBorderAppearance(isSelected: isSelected)
     }
 
@@ -189,7 +194,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
             thumbnailTask?.cancel()
             thumbnailTask = nil
             requestedThumbnailSide = side
-            showLoadedThumbnail(cached, animated: false)
+            showLoadedThumbnail(cached)
             updateBorderAppearance(isSelected: isSelected)
         } else if current == nil || CGFloat(currentSide) + 1 < min(view.bounds.width, view.bounds.height) * scale {
             startThumbnailLoad(for: url)
@@ -248,20 +253,20 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
         if allowsCachedThumbnail, let cached = SystemThumbnailProvider.shared.cachedThumbnail(for: url,
             pointSize: pointSize, scale: displayScale, contentVersion: contentVersion) {
             thumbnailTask = nil
-            showLoadedThumbnail(cached, animated: false)
+            showLoadedThumbnail(cached)
             updateBorderAppearance(isSelected: isSelected)
             return
         }
         if imageView?.image == nil, allowsCachedThumbnail,
            let cached = SystemThumbnailProvider.shared.bestCachedThumbnail(for: url,
                 scale: displayScale, contentVersion: contentVersion) {
-            showLoadedThumbnail(cached, animated: false)
+            showLoadedThumbnail(cached)
         }
         let hasArtwork = imageView?.image != nil
         thumbnailTask = Task { [weak self] in
             // Resizing a window or animating a sidebar keeps the current
             // bitmap on screen. Generate extra detail only after sizing rests.
-            try? await Task.sleep(for: hasArtwork ? .milliseconds(140) : .milliseconds(35))
+            if hasArtwork { try? await Task.sleep(for: .milliseconds(140)) }
             while self?.view.inLiveResize == true && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(80))
             }
@@ -279,7 +284,7 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
                       self.representedContentVersion == contentVersion, !Task.isCancelled else { return }
                 self.thumbnailTask = nil
                 self.previewMessage = result.unavailableMessage
-                let shouldFadeIn = self.imageView?.image == nil
+                let shouldFadeIn = self.imageView?.image == nil && (self.shouldAnimateThumbnail?() ?? true)
                 self.showLoadedThumbnail(result.image ?? Self.unavailableThumbnail(), animated: shouldFadeIn)
                 self.thumbnailView?.setPlaceholder(result.image == nil ? url.lastPathComponent : nil)
                 self.updateBorderAppearance(isSelected: self.isSelected)
@@ -300,26 +305,22 @@ final class ThumbnailCollectionItem: NSCollectionViewItem {
     }
 
     @MainActor
-    private func showLoadedThumbnail(_ image: NSImage, animated: Bool) {
+    private func showLoadedThumbnail(_ image: NSImage, animated: Bool = false) {
         guard let imageView else { return }
         // Changing the model alpha does not cancel a fade still presenting on
         // the recycled image layer. Never carry it into another artwork.
         imageView.layer?.removeAnimation(forKey: "opacity")
-        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            imageView.alphaValue = 0
-            imageView.image = image
-            thumbnailView?.updateImageFrame(for: image)
-            // Retain AppKit's timing curve with the grid's calmer transition
-            // duration. Cached revisits paint immediately without another fade.
+        let duration = ThumbnailCollectionAnimation.duration(animated: animated)
+        imageView.alphaValue = duration > 0 ? 0 : 1
+        imageView.image = image
+        thumbnailView?.updateImageFrame(for: image)
+        if duration > 0 {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = ThumbnailCollectionAnimation.duration()
+                context.duration = duration
                 imageView.animator().alphaValue = 1
             }
-        } else {
-            imageView.image = image
-            thumbnailView?.updateImageFrame(for: image)
-            imageView.alphaValue = 1
         }
+        onThumbnailReady?()
     }
 
     private func loadBadgeIfNeeded(for url: URL, mediaKind: ThumbnailMediaKind) {

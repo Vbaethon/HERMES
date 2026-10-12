@@ -289,7 +289,7 @@ final class ThumbnailGridZoomController: NSObject {
     }
 
     @objc private func handlePinch(_ recognizer: NSMagnificationGestureRecognizer) {
-        guard collection != nil else { return }
+        guard collection?.alphaValue == 1 else { return }
         if recognizer.state == .began {
             lastMagnification = 0
             // A trackpad gesture's location is recognizer-specific. Photos-like
@@ -397,8 +397,11 @@ final class ThumbnailGridZoomController: NSObject {
         // Badge-only frames change four decoration parents and native labels;
         // they never rebuild the prepared image geometry or start new loads.
         if presentsZoom {
-            installSmallArtworkBatch()
+            let hasPendingArtwork = installSmallArtworkBatch()
             applyOverlay()
+            // A stationary pinch still needs refreshes until its cached
+            // bitmaps match the displayed size, including after reversal.
+            needsDisplay = hasPendingArtwork
             if gesture == nil && animation == nil && motion?.isAnimating != true { commitPlan() }
         }
         if plan == nil {
@@ -572,7 +575,7 @@ final class ThumbnailGridZoomController: NSObject {
         }
     }
 
-    private func installSmallArtworkBatch() {
+    private func installSmallArtworkBatch() -> Bool {
         // Keep detail until the on-screen side fits the small cache. Prepare
         // only two new CA contents per refresh, and reuse them at handoff.
         let usesSmall = ZoomGeometry.side(width: layout.viewportSize.width, position: position, metrics: layout.metrics)
@@ -581,10 +584,11 @@ final class ThumbnailGridZoomController: NSObject {
         for value in smallArtwork.reversed() {
             let image = usesSmall ? value.small : value.detail
             guard overlay.image(at: value.index) !== image else { continue }
+            if installed == 2 { return true }
             overlay.replaceImage(image, at: value.index)
             installed += 1
-            if installed == 2 { break }
         }
+        return false
     }
 
     private func retainHandoffImages() {

@@ -3,8 +3,165 @@ import QuartzCore
 import XCTest
 @testable import HermesThumbnailUI
 
+private final class BeginningMagnificationRecognizer: NSMagnificationGestureRecognizer {
+    override var state: NSGestureRecognizer.State {
+        get { .began }
+        set {}
+    }
+}
+
 @MainActor
 final class ThumbnailArrangementTests: XCTestCase {
+    func testSlowInitialScanShowsOneSpinnerButPreparedRecordsDoNotWaitForRescan() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 904, height: 566))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        grid.setContentLoading(true)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        XCTAssertTrue(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty,
+                      "Quick preparation must not flash a spinner")
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 0)
+        XCTAssertFalse(grid.hasPresentedItems)
+        for _ in 0..<100 where scroll.subviews.compactMap({ $0 as? NSProgressIndicator }).isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let progress = try XCTUnwrap(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.first)
+        XCTAssertFalse(progress.isHidden, "A prolonged scan uses one native page spinner")
+
+        grid.updateItems(items(Array(0..<12)), animatingDifferences: false)
+        scroll.layoutSubtreeIfNeeded()
+        for _ in 0..<100 {
+            let cells = grid.nsCollectionView.visibleItems().compactMap { $0 as? ThumbnailCollectionItem }
+            if !cells.isEmpty && cells.allSatisfy(\.hasPreparedThumbnail) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let cells = grid.nsCollectionView.visibleItems().compactMap { $0 as? ThumbnailCollectionItem }
+        XCTAssertFalse(cells.isEmpty)
+        XCTAssertTrue(cells.allSatisfy(\.hasPreparedThumbnail))
+        XCTAssertTrue(cells.allSatisfy { $0.imageView?.layer?.animation(forKey: "opacity") == nil },
+                      "First-screen images must leave their animation to the collective native fade")
+
+        for _ in 0..<100 where grid.nsCollectionView.alphaValue == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 1, "Prepared records must display while rescanning continues in the background")
+        XCTAssertTrue(progress.isHidden)
+        XCTAssertEqual(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.count, 1)
+        grid.setContentLoading(false)
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 1)
+    }
+
+    func testDelayedProgressIsCenteredInTheCurrentNativeViewport() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 904, height: 566))
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        grid.setContentLoading(true)
+        scroll.contentInsets = NSEdgeInsets(top: 52, left: 0, bottom: 0, right: 0)
+        let window = NSWindow(contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = scroll
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        scroll.tile()
+        for _ in 0..<100 where scroll.subviews.compactMap({ $0 as? NSProgressIndicator }).isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let progress = try XCTUnwrap(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.first)
+        let viewport = scroll.convert(scroll.contentView.bounds, from: scroll.contentView)
+        XCTAssertFalse(progress.isHidden)
+        XCTAssertGreaterThan(progress.frame.width, 0)
+        XCTAssertGreaterThan(progress.frame.height, 0)
+        XCTAssertEqual(progress.frame.midX, viewport.midX, accuracy: 0.5)
+        XCTAssertEqual(progress.frame.midY, viewport.midY, accuracy: 0.5)
+        XCTAssertTrue(viewport.contains(progress.frame), "The first spinner frame must be inside the native clip")
+    }
+
+    func testPreloadedGridSettlesAfterItsConstrainedPageJoinsTheWindow() async throws {
+        _ = NSApplication.shared
+        let grid = ThumbnailGridController()
+        let scroll = NSScrollView()
+        ThumbnailCollectionStyle.prepare(scroll, documentView: grid.nsCollectionView)
+        grid.updateItems(items(Array(0..<77)), animatingDifferences: false)
+        await Task.yield()
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 0)
+        XCTAssertTrue(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty,
+                      "An off-window page must not animate a waiting indicator")
+
+        let page = NSView()
+        page.isHidden = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        page.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: page.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor)
+        ])
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 904, height: 566),
+                              styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.contentView = page
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        XCTAssertTrue(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty,
+                      "The fast first-screen path must get a layout turn before showing a spinner")
+        let nativePinch = try XCTUnwrap(scroll.gestureRecognizers.compactMap { $0 as? NSMagnificationGestureRecognizer }
+            .first { ($0.target as? ThumbnailGridZoomController) === grid.zoom })
+        let pinchAction = try XCTUnwrap(nativePinch.action)
+        let startingPinch = BeginningMagnificationRecognizer(target: nil, action: nil)
+        NSApp.sendAction(pinchAction, to: nativePinch.target, from: startingPinch)
+        XCTAssertNil(grid.zoom.gesture, "A pinch must not expose the sibling zoom presentation during page preparation")
+        XCTAssertTrue(grid.zoom.overlay.isHidden)
+        let plus = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "+", charactersIgnoringModifiers: "+",
+            isARepeat: false, keyCode: 24))
+        let initialLevel = grid.zoom.layout.spec.level
+        grid.nsCollectionView.keyDown(with: plus)
+        XCTAssertEqual(grid.zoom.layout.spec.level, initialLevel)
+        page.layoutSubtreeIfNeeded()
+        for _ in 0..<3 { await Task.yield() }
+        page.isHidden = false
+        for _ in 0..<100 where grid.nsCollectionView.alphaValue == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let visible = scroll.contentView.documentVisibleRect
+        XCTAssertEqual(visible.minY, grid.zoom.maximumOrigin, accuracy: 0.5)
+        let paths = grid.nsCollectionView.indexPathsForVisibleItems()
+        XCTAssertGreaterThan(paths.count, 5, "The first display must contain rows, not a clipped bottom strip")
+        XCTAssertTrue(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.allSatisfy(\.isHidden),
+                      "The ready page must stop any fallback indicator")
+        XCTAssertEqual(grid.nsCollectionView.alphaValue, 1)
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            XCTAssertNotNil(grid.nsCollectionView.layer?.animation(forKey: "opacity"),
+                            "The original native collection must own the single collective fade")
+        }
+        for path in paths {
+            let cell = try XCTUnwrap(grid.nsCollectionView.item(at: path))
+            let attributes = try XCTUnwrap(grid.zoom.layout.layoutAttributesForItem(at: path))
+            assertFrame(cell.view.frame, attributes.frame)
+            XCTAssertEqual(cell.view.alphaValue, 1, accuracy: 0.01)
+            XCTAssertTrue((cell as? ThumbnailCollectionItem)?.hasPreparedThumbnail == true)
+            XCTAssertTrue(cell.view.subviews.compactMap { $0 as? NSProgressIndicator }.isEmpty)
+        }
+        let newest = try XCTUnwrap(grid.nsCollectionView.item(at: IndexPath(item: 76, section: 0)))
+        XCTAssertTrue(visible.contains(newest.view.frame), "The newest photo must be fully inside the initial clip")
+        NSApp.sendAction(pinchAction, to: nativePinch.target, from: startingPinch)
+        XCTAssertNotNil(grid.zoom.gesture, "The original native pinch action must resume after page preparation")
+        grid.zoom.endGesture(cancelled: true)
+        grid.zoom.displayFrame(at: CACurrentMediaTime() + 10)
+
+        window.contentView = NSView(frame: page.frame)
+        window.contentView = page
+        for _ in 0..<3 { await Task.yield() }
+        XCTAssertFalse(grid.nsCollectionView.visibleItems().isEmpty)
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertTrue(scroll.subviews.compactMap { $0 as? NSProgressIndicator }.allSatisfy(\.isHidden),
+                      "Reattaching a ready page must not leave a delayed spinner")
+    }
+
     private func items(_ ids: [Int], version: TimeInterval = 1) -> [ThumbnailGridItem] {
         ids.map {
             ThumbnailGridItem(id: "arrange-\($0)", url: URL(fileURLWithPath: "/tmp/hermes-arrange-\($0).png"),

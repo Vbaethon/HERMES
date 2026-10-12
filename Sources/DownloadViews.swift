@@ -1270,6 +1270,11 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
 
+        model.$isRefreshingDownloads
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
+
         model.$downloadShareText
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.reload() }
@@ -1336,8 +1341,10 @@ final class DownloadPageController: NSViewController, ThumbnailPageController {
 
     private func updateCollectionVisibility() {
         let hasItems = coordinator?.gridController?.hasPresentedItems == true
-        scrollView?.isHidden = !hasItems
-        emptyView.isHidden = hasItems
+        coordinator?.gridController?.setContentLoading(model.isRefreshingDownloads)
+        let showsCollection = hasItems || model.isRefreshingDownloads
+        scrollView?.isHidden = !showsCollection
+        emptyView.isHidden = showsCollection
     }
 
     private func reloadProgress() {
